@@ -85,6 +85,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let cycles: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2);
             run_live(cycles).await?;
         }
+        Some("sync") => {
+            run_sync_demo()?;
+        }
         _ => smoke_test(&info),
     }
     Ok(())
@@ -711,6 +714,58 @@ fn run_cognition() {
         cal.verdict(),
         cal.samples()
     );
+}
+
+/// Demo de sincronización local-first cifrada E2E entre dos dispositivos.
+/// El "relay" (nube) solo ve ciphertext; los dispositivos convergen sin conflicto.
+fn run_sync_demo() -> Result<(), Box<dyn std::error::Error>> {
+    use aion_sync::{decrypt, derive_key, encrypt, LwwMap};
+
+    // Clave derivada de la passphrase del usuario (nunca sale del dispositivo).
+    let key = derive_key("mi-passphrase", b"ariel@ceo-intelligence.com")?;
+
+    // 📱 Dispositivo A (Mac) y 💻 Dispositivo B (otro) editan en paralelo.
+    let mut a = LwwMap::new();
+    a.set("tema", "plasma teal", 10);
+    a.set("modo", "oscuro", 10);
+    let mut b = LwwMap::new();
+    b.set("idioma", "español", 11);
+    b.set("modo", "claro", 20); // edición más reciente del mismo campo
+
+    // Cada dispositivo sube su estado CIFRADO al relay.
+    let blob_a = encrypt(&key, &a.to_bytes())?;
+    let blob_b = encrypt(&key, &b.to_bytes())?;
+    println!(
+        "📱 A sube blob cifrado ({} bytes): {}…",
+        blob_a.len(),
+        hex_prefix(&blob_a)
+    );
+    println!(
+        "💻 B sube blob cifrado ({} bytes): {}…",
+        blob_b.len(),
+        hex_prefix(&blob_b)
+    );
+    println!("☁️  el relay NO puede leer el contenido (solo ciphertext)\n");
+
+    // Cada dispositivo descarga el blob del otro, lo descifra y fusiona.
+    b.merge(&LwwMap::from_bytes(&decrypt(&key, &blob_a)?).ok_or("blob A inválido")?);
+    a.merge(&LwwMap::from_bytes(&decrypt(&key, &blob_b)?).ok_or("blob B inválido")?);
+
+    println!("Tras sincronizar:");
+    for k in ["tema", "modo", "idioma"] {
+        println!("   {k:8} → A={:?}  B={:?}", a.get(k), b.get(k));
+    }
+    if a == b {
+        println!("\n✅ ambos dispositivos CONVERGEN (modo=claro gana por last-write-wins)");
+        println!("\x1b[2m(cómputo y datos local-first; la nube solo transporta blobs cifrados E2E)\x1b[0m");
+    } else {
+        println!("\n❌ no convergieron");
+    }
+    Ok(())
+}
+
+fn hex_prefix(b: &[u8]) -> String {
+    b.iter().take(8).map(|x| format!("{x:02x}")).collect()
 }
 
 /// Muestra el audit log (acciones del agente y de la auto-evolución).

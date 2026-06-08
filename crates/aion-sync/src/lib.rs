@@ -1,17 +1,19 @@
 //! # aion-sync
 //!
-//! Sincronización CRDT (Automerge) cifrada E2E entre dispositivos.
+//! Sincronización **local-first** entre dispositivos: un CRDT mergeable
+//! ([`LwwMap`]) + **cifrado de extremo a extremo** ([`crypto`]). El relay en la
+//! nube solo transporta **ciphertext opaco**; nunca ve el contenido.
 //!
-//! Estado: stub de F0. La implementación llega en su fase correspondiente
-//! (ver docs/PRD y el plan maestro). Depende de `aion-kernel` para los contratos.
+//! Flujo: cada dispositivo edita su [`LwwMap`] → lo serializa y **cifra** con la
+//! clave derivada de la passphrase del usuario → sube el blob → otro dispositivo
+//! lo **descifra y fusiona** (convergen sin conflictos, last-write-wins por clave).
+//!
+//! Nota: el plan menciona Automerge; aquí usamos un CRDT LWW propio (suficiente y
+//! sin dependencias pesadas). El blob cifrado es intercambiable por uno de Automerge
+//! tras la misma interfaz si se requiere edición concurrente de texto enriquecido.
 
-/// Marcador de versión del crate (placeholder hasta implementación).
-pub const CRATE: &str = "aion-sync";
+mod crdt;
+pub mod crypto;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_name_is_set() {
-        assert!(!super::CRATE.is_empty());
-    }
-}
+pub use crdt::LwwMap;
+pub use crypto::{decrypt, derive_key, encrypt};
