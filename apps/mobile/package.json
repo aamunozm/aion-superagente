@@ -1,0 +1,22 @@
+{
+  "name": "@aion/mobile",
+  "version": "0.0.1",
+  "private": true,
+  "description": "AION móvil (Capacitor) — envuelve la UI web para iOS/Android.",
+  "scripts": {
+    "build:web": "AION_TAURI=1 pnpm --filter @aion/web build",
+    "sync": "pnpm build:web && cap sync",
+    "add:ios": "cap add ios",
+    "add:android": "cap add android",
+    "open:ios": "cap open ios",
+    "open:android": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/core": "^6.1.0",
+    "@capacitor/ios": "^6.1.0",
+    "@capacitor/android": "^6.1.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.0"
+  }
+}
