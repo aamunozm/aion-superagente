@@ -1,17 +1,12 @@
 //! # aion-control-client
 //!
-//! Cliente del plano de control: auth, licencias firmadas, billing.
+//! Tipos y lógica de **licencias** compartidos entre el control-plane (que las
+//! emite/firma) y el cliente (que las **valida offline**). Firma Ed25519.
 //!
-//! Estado: stub de F0. La implementación llega en su fase correspondiente
-//! (ver docs/PRD y el plan maestro). Depende de `aion-kernel` para los contratos.
+//! El cliente embebe la clave pública de confianza y valida la licencia sin red,
+//! con un **periodo de gracia** configurable: la app sigue funcionando aunque el
+//! control-plane esté caído, hasta `valid_until + gracia`.
 
-/// Marcador de versión del crate (placeholder hasta implementación).
-pub const CRATE: &str = "aion-control-client";
+mod license;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_name_is_set() {
-        assert!(!super::CRATE.is_empty());
-    }
-}
+pub use license::{LicenseClaims, LicenseIssuer, LicenseStatus, LicenseValidator, SignedLicense};

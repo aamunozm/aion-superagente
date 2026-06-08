@@ -1,7 +1,7 @@
 //! Estado compartido de la aplicación.
 
-use crate::license::LicenseIssuer;
 use crate::store::UserStore;
+use aion_control_client::LicenseIssuer;
 use std::sync::Arc;
 
 #[derive(Clone)]

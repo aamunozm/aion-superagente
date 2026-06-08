@@ -61,8 +61,12 @@ name = "aion-control-client"
 version = "0.0.1"
 dependencies = [
  "aion-kernel",
- "async-trait",
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.6",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -71,13 +75,11 @@ dependencies = [
 name = "aion-control-plane"
 version = "0.0.1"
 dependencies = [
+ "aion-control-client",
  "argon2",
  "axum",
  "chrono",
- "ed25519-dalek",
- "hex",
  "jsonwebtoken",
- "rand 0.8.6",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

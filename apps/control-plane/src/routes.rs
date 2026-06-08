@@ -2,8 +2,8 @@
 
 use crate::auth;
 use crate::billing;
-use crate::license::LicenseClaims;
 use crate::state::AppState;
+use aion_control_client::LicenseClaims;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},

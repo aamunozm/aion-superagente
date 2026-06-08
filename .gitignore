@@ -40,3 +40,6 @@ local-data/
 
 # Logs
 *.log
+
+# clave de firma de licencias (secreto local)
+data/license_signing_key.hex
