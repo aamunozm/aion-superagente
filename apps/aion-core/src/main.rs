@@ -6,6 +6,7 @@
 //!   y respuesta) usando `OllamaEngine` contra `gemma4-reason`.
 
 mod serve;
+mod skill_tool;
 
 use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, StreamChunk};
 use aion_kernel::types::Message;
@@ -156,6 +157,8 @@ async fn run_rag(query: &str) -> Result<(), Box<dyn std::error::Error>> {
 /// (pensamiento/acción/observación) en vivo vía el bus de eventos.
 async fn run_agent(task: &str) -> Result<(), Box<dyn std::error::Error>> {
     use aion_orchestrator::{CalculatorTool, ReActAgent, ToolRegistry};
+    use aion_skills::{SkillManifest, WasmSkillHost, SUM_TO_WAT};
+    use skill_tool::SkillTool;
     use std::sync::Arc;
 
     let engine = OllamaEngine::default_local();
@@ -164,8 +167,23 @@ async fn run_agent(task: &str) -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|e| format!("LLM local no disponible ({e})."))?;
 
+    // Skills WASM en sandbox, expuestas como herramientas del agente.
+    let skill_host = Arc::new(WasmSkillHost::new()?);
+    skill_host.register(
+        SkillManifest {
+            name: "sum_to".into(),
+            description: "suma 1..=n".into(),
+        },
+        SUM_TO_WAT,
+    )?;
+
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(CalculatorTool));
+    tools.register(Arc::new(SkillTool::new(
+        skill_host,
+        "sum_to",
+        "Suma todos los enteros de 1 hasta n (skill WASM en sandbox). Entrada: el número n.",
+    )));
 
     let bus = EventBus::default();
     let mut rx = bus.subscribe();
