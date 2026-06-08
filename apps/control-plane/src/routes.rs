@@ -13,10 +13,16 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use tower_http::cors::{Any, CorsLayer};
 
 const JWT_TTL_SECS: i64 = 3600;
 
 pub fn router(state: AppState) -> Router {
+    // CORS abierto: la UI (app Tauri / web) hace fetch desde otro origen.
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/auth/register", post(register))
@@ -25,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/billing/license", get(license))
         .route("/billing/checkout", post(billing::checkout))
         .route("/billing/webhook", post(billing::webhook))
+        .layer(cors)
         .with_state(state)
 }
 
