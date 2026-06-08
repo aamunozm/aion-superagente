@@ -5,6 +5,8 @@
 //! - `chat <prompt...>` F1: chat real con el LLM local (streaming de razonamiento
 //!   y respuesta) usando `OllamaEngine` contra `gemma4-reason`.
 
+mod serve;
+
 use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, StreamChunk};
 use aion_kernel::types::Message;
 use aion_kernel::{kernel_info, AionEvent, EventBus};
@@ -34,6 +36,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("rag") => {
             let query = args[1..].join(" ");
             run_rag(&query).await?;
+        }
+        Some("serve") => {
+            let addr = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1:8765".to_string());
+            serve::run(&addr).await?;
         }
         _ => smoke_test(&info),
     }

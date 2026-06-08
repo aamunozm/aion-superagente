@@ -1,0 +1,99 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── AION Design Tokens (espejo de packages/design-system) ─────────── */
+:root {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-1: #fafafa;
+  --surface-2: #f5f5f5;
+  --border: #e8e8e8;
+  --border-2: #d8d8d8;
+  --text-1: #0a0a0a;
+  --text-2: #555555;
+  --text-3: #999999;
+  --ink: #0f172a;
+  --ink-hover: #1e293b;
+  --accent: #0fb5ba;
+  --accent-hover: #0c9499;
+  --accent-subtle: rgba(15, 181, 186, 0.1);
+  --primary: var(--ink);
+  --primary-contrast: #ffffff;
+  --focus-ring: rgba(15, 181, 186, 0.3);
+  --shadow-elevated: 0 4px 20px rgba(0, 0, 0, 0.06);
+  --shadow-float: 0 8px 30px rgba(0, 0, 0, 0.1);
+  --ease-premium: cubic-bezier(0.22, 1, 0.36, 1);
+  --radius-card: 12px;
+  --radius-btn: 10px;
+}
+.dark {
+  --bg: #1a1a1a;
+  --surface: #262626;
+  --surface-1: #333333;
+  --surface-2: #3f3f3f;
+  --border: rgba(255, 255, 255, 0.1);
+  --border-2: rgba(255, 255, 255, 0.16);
+  --text-1: #ffffff;
+  --text-2: #d0d0d0;
+  --text-3: #a0a0a0;
+  --accent: #2dd4d9;
+  --accent-hover: #4de0e5;
+  --primary: #f1f5f9;
+  --primary-contrast: #0f172a;
+  --shadow-elevated: 0 4px 20px rgba(0, 0, 0, 0.25);
+}
+
+@layer base {
+  html {
+    font-family: "Space Grotesk", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    background-color: var(--bg);
+    color: var(--text-1);
+    transition: background-color 0.3s ease, color 0.3s ease;
+  }
+}
+
+@layer components {
+  .card {
+    border-radius: var(--radius-card);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    padding: 20px;
+    transition: all 200ms var(--ease-premium);
+  }
+  .btn {
+    border-radius: var(--radius-btn);
+    background: var(--primary);
+    color: var(--primary-contrast);
+    font-weight: 600;
+    padding: 12px 16px;
+    transition: all 200ms var(--ease-premium);
+  }
+  .btn:hover {
+    box-shadow: var(--shadow-elevated);
+    transform: translateY(-1px);
+  }
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .input {
+    width: 100%;
+    border-radius: var(--radius-btn);
+    border: 1px solid var(--border-2);
+    background: var(--bg);
+    color: var(--text-1);
+    padding: 12px 14px;
+    outline: none;
+    transition: border-color 200ms var(--ease-premium);
+  }
+  .input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--focus-ring);
+  }
+}
