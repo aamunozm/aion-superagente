@@ -3,13 +3,17 @@
 //! Expone el núcleo a la UI web/Tauri:
 //! - `GET  /api/health`  estado del LLM local.
 //! - `POST /api/chat`    chat con streaming SSE (eventos thinking/answer/done).
+//! - `POST /api/agent`   agente ReAct con herramientas (eventos thought/action/
+//!   observation/answer/done).
 //!
 //! En el empaquetado Tauri esto puede correr embebido o reemplazarse por
 //! comandos Tauri; el contrato (eventos) es el mismo.
 
+use aion_kernel::events::{AionEvent, EventBus};
 use aion_kernel::traits::{GenerateRequest, LlmEngine, StreamChunk};
 use aion_kernel::types::Message;
 use aion_llm::OllamaEngine;
+use aion_orchestrator::{CalculatorTool, ReActAgent, ToolRegistry};
 use axum::{
     extract::State,
     response::sse::{Event, Sse},
@@ -47,6 +51,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/chat", post(chat))
+        .route("/api/agent", post(agent))
         .layer(cors)
         .with_state(state);
 
@@ -103,6 +108,70 @@ async fn chat(
                     serde_json::json!({ "kind": "error", "text": e.to_string() }).to_string(),
                 ));
         }
+    });
+
+    let stream = ReceiverStream::new(rx).map(Ok);
+    Sse::new(stream)
+}
+
+#[derive(Deserialize)]
+struct AgentBody {
+    task: String,
+}
+
+/// Agente ReAct con herramientas. Emite por SSE los pasos (thought/action/
+/// observation) y al final `answer` + `done`.
+async fn agent(
+    State(_st): State<AppState>,
+    Json(body): Json<AgentBody>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
+
+    tokio::spawn(async move {
+        let engine = OllamaEngine::default_local();
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(CalculatorTool));
+        let bus = EventBus::default();
+
+        // Reenvía los eventos del bus a SSE mientras corre el agente.
+        let tx_fwd = tx.clone();
+        let mut rx_bus = bus.subscribe();
+        let fwd = tokio::spawn(async move {
+            while let Ok(ev) = rx_bus.recv().await {
+                let payload = match ev {
+                    AionEvent::ThoughtEmitted { text, .. } => {
+                        serde_json::json!({ "kind": "thought", "text": text })
+                    }
+                    AionEvent::ActionRequested { action, .. } => {
+                        serde_json::json!({ "kind": "action", "text": action })
+                    }
+                    AionEvent::ObservationReceived { summary, .. } => {
+                        serde_json::json!({ "kind": "observation", "text": summary })
+                    }
+                    _ => continue,
+                };
+                let _ = tx_fwd
+                    .send(Event::default().data(payload.to_string()))
+                    .await;
+            }
+        });
+
+        let agent = ReActAgent::new(&engine, &tools, bus.clone());
+        let result = agent.run(&body.task).await;
+        fwd.abort();
+
+        let final_event = match result {
+            Ok(run) => {
+                serde_json::json!({ "kind": "answer", "text": run.answer, "steps": run.steps })
+            }
+            Err(e) => serde_json::json!({ "kind": "error", "text": e.to_string() }),
+        };
+        let _ = tx
+            .send(Event::default().data(final_event.to_string()))
+            .await;
+        let _ = tx
+            .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+            .await;
     });
 
     let stream = ReceiverStream::new(rx).map(Ok);

@@ -1,17 +1,27 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { chatStream, type ChatEvent } from "@/lib/api";
+import { agentStream, chatStream, type AgentEvent, type ChatEvent } from "@/lib/api";
 
+type Step = { kind: "thought" | "action" | "observation"; text: string };
 type Turn = {
   prompt: string;
+  mode: "chat" | "agent";
   thinking: string;
+  steps: Step[];
   answer: string;
   meta?: string;
 };
 
+const STEP_STYLE: Record<Step["kind"], { icon: string; color: string }> = {
+  thought: { icon: "🧠", color: "var(--cog-thinking, #0FB5BA)" },
+  action: { icon: "🔧", color: "#5B8FA8" },
+  observation: { icon: "👁", color: "#C49A3D" },
+};
+
 export default function ChatPage() {
   const [input, setInput] = useState("");
+  const [mode, setMode] = useState<"chat" | "agent">("chat");
   const [think, setThink] = useState(true);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
@@ -24,20 +34,31 @@ export default function ChatPage() {
     setInput("");
     setBusy(true);
     const idx = turns.length;
-    setTurns((t) => [...t, { prompt, thinking: "", answer: "" }]);
-
+    setTurns((t) => [...t, { prompt, mode, thinking: "", steps: [], answer: "" }]);
     const update = (patch: (t: Turn) => Turn) =>
       setTurns((prev) => prev.map((t, i) => (i === idx ? patch(t) : t)));
+    const scroll = () => endRef.current?.scrollIntoView({ behavior: "smooth" });
 
     try {
-      await chatStream(prompt, think, (ev: ChatEvent) => {
-        if (ev.kind === "thinking") update((t) => ({ ...t, thinking: t.thinking + ev.text }));
-        else if (ev.kind === "answer") update((t) => ({ ...t, answer: t.answer + ev.text }));
-        else if (ev.kind === "done")
-          update((t) => ({ ...t, meta: `${ev.tokens} tokens · ${ev.tps.toFixed(1)} tok/s` }));
-        else if (ev.kind === "error") update((t) => ({ ...t, answer: `⚠️ ${ev.text}` }));
-        endRef.current?.scrollIntoView({ behavior: "smooth" });
-      });
+      if (mode === "chat") {
+        await chatStream(prompt, think, (ev: ChatEvent) => {
+          if (ev.kind === "thinking") update((t) => ({ ...t, thinking: t.thinking + ev.text }));
+          else if (ev.kind === "answer") update((t) => ({ ...t, answer: t.answer + ev.text }));
+          else if (ev.kind === "done")
+            update((t) => ({ ...t, meta: `${ev.tokens} tokens · ${ev.tps.toFixed(1)} tok/s` }));
+          else if (ev.kind === "error") update((t) => ({ ...t, answer: `⚠️ ${ev.text}` }));
+          scroll();
+        });
+      } else {
+        await agentStream(prompt, (ev: AgentEvent) => {
+          if (ev.kind === "thought" || ev.kind === "action" || ev.kind === "observation")
+            update((t) => ({ ...t, steps: [...t.steps, { kind: ev.kind, text: ev.text }] }));
+          else if (ev.kind === "answer")
+            update((t) => ({ ...t, answer: ev.text, meta: `${ev.steps} pasos` }));
+          else if (ev.kind === "error") update((t) => ({ ...t, answer: `⚠️ ${ev.text}` }));
+          scroll();
+        });
+      }
     } catch (err) {
       update((t) => ({ ...t, answer: `⚠️ ${err instanceof Error ? err.message : "error"}` }));
     } finally {
@@ -48,17 +69,34 @@ export default function ChatPage() {
   return (
     <main className="min-h-screen flex flex-col max-w-3xl mx-auto px-4">
       <header className="flex items-center gap-2 py-4 border-b" style={{ borderColor: "var(--border)" }}>
-        <span className="w-2.5 h-2.5 rounded-full" style={{ background: busy ? "var(--cog-thinking)" : "var(--accent)" }} />
+        <span className="w-2.5 h-2.5 rounded-full" style={{ background: busy ? "var(--accent)" : "var(--accent)" }} />
         <span className="font-display font-semibold">AION</span>
         <span className="text-xs" style={{ color: "var(--text-3)" }}>
-          {busy ? "pensando…" : "gemma4-reason · local"}
+          {busy ? "trabajando…" : "gemma4-reason · local"}
         </span>
+        <div className="ml-auto flex gap-1 p-1 rounded-full" style={{ background: "var(--surface-2)" }}>
+          {(["chat", "agent"] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              className="text-xs px-3 py-1 rounded-full transition-all"
+              style={{
+                background: mode === m ? "var(--primary)" : "transparent",
+                color: mode === m ? "var(--primary-contrast)" : "var(--text-2)",
+              }}
+            >
+              {m === "chat" ? "Chat" : "Agente"}
+            </button>
+          ))}
+        </div>
       </header>
 
       <div className="flex-1 overflow-y-auto py-6 flex flex-col gap-6">
         {turns.length === 0 && (
           <p className="text-center text-sm mt-20" style={{ color: "var(--text-3)" }}>
-            Escribe algo. AION razona localmente, sin enviar tus datos a nadie.
+            {mode === "chat"
+              ? "Chat: AION razona localmente, sin enviar tus datos a nadie."
+              : "Agente: AION usa herramientas (p. ej. calculadora) para resolver tareas."}
           </p>
         )}
         {turns.map((t, i) => (
@@ -66,14 +104,24 @@ export default function ChatPage() {
             <div className="self-end card max-w-[80%]" style={{ background: "var(--surface-2)" }}>
               {t.prompt}
             </div>
-            {t.thinking && (
+
+            {t.mode === "chat" && t.thinking && (
               <details className="text-sm" style={{ color: "var(--text-3)" }}>
-                <summary className="cursor-pointer select-none" style={{ color: "var(--cog-thinking)" }}>
+                <summary className="cursor-pointer select-none" style={{ color: "var(--accent)" }}>
                   🧠 razonamiento
                 </summary>
                 <pre className="whitespace-pre-wrap font-mono text-xs mt-2">{t.thinking}</pre>
               </details>
             )}
+
+            {t.mode === "agent" &&
+              t.steps.map((s, j) => (
+                <div key={j} className="flex items-start gap-2 text-sm pl-1" style={{ color: "var(--text-2)" }}>
+                  <span style={{ color: STEP_STYLE[s.kind].color }}>{STEP_STYLE[s.kind].icon}</span>
+                  <span className={s.kind === "action" ? "font-mono text-xs" : ""}>{s.text}</span>
+                </div>
+              ))}
+
             {t.answer && (
               <div className="card max-w-[90%]">
                 <p className="whitespace-pre-wrap">{t.answer}</p>
@@ -90,21 +138,23 @@ export default function ChatPage() {
       </div>
 
       <form onSubmit={send} className="py-4 flex gap-2 items-center border-t" style={{ borderColor: "var(--border)" }}>
-        <button
-          type="button"
-          onClick={() => setThink(!think)}
-          className="text-xs px-3 py-2 rounded-full shrink-0"
-          style={{
-            background: think ? "var(--accent-subtle)" : "var(--surface-2)",
-            color: think ? "var(--accent)" : "var(--text-3)",
-          }}
-          title="Modo razonamiento"
-        >
-          🧠 {think ? "on" : "off"}
-        </button>
+        {mode === "chat" && (
+          <button
+            type="button"
+            onClick={() => setThink(!think)}
+            className="text-xs px-3 py-2 rounded-full shrink-0"
+            style={{
+              background: think ? "var(--accent-subtle)" : "var(--surface-2)",
+              color: think ? "var(--accent)" : "var(--text-3)",
+            }}
+            title="Modo razonamiento"
+          >
+            🧠 {think ? "on" : "off"}
+          </button>
+        )}
         <input
           className="input"
-          placeholder="Pregunta a AION…"
+          placeholder={mode === "chat" ? "Pregunta a AION…" : "Tarea para el agente…"}
           value={input}
           onChange={(e) => setInput(e.target.value)}
         />

@@ -29,19 +29,17 @@ export type ChatEvent =
   | { kind: "done"; tokens: number; tps: number }
   | { kind: "error"; text: string };
 
-/** Llama al puente de chat y entrega cada evento SSE a `onEvent`. */
-export async function chatStream(
-  prompt: string,
-  think: boolean,
-  onEvent: (e: ChatEvent) => void,
-): Promise<void> {
-  const res = await fetch(`${BRIDGE_URL}/api/chat`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt, think }),
-  });
-  if (!res.body) throw new Error("sin cuerpo de respuesta");
+export type AgentEvent =
+  | { kind: "thought"; text: string }
+  | { kind: "action"; text: string }
+  | { kind: "observation"; text: string }
+  | { kind: "answer"; text: string; steps: number }
+  | { kind: "done" }
+  | { kind: "error"; text: string };
 
+/** Lee un cuerpo SSE y entrega cada evento `data:` parseado a `onEvent`. */
+async function readSse<T>(res: Response, onEvent: (e: T) => void): Promise<void> {
+  if (!res.body) throw new Error("sin cuerpo de respuesta");
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
@@ -55,10 +53,37 @@ export async function chatStream(
       const line = part.trim();
       if (!line.startsWith("data:")) continue;
       try {
-        onEvent(JSON.parse(line.slice(5).trim()) as ChatEvent);
+        onEvent(JSON.parse(line.slice(5).trim()) as T);
       } catch {
         /* fragmento parcial */
       }
     }
   }
+}
+
+/** Chat con streaming de razonamiento + respuesta. */
+export async function chatStream(
+  prompt: string,
+  think: boolean,
+  onEvent: (e: ChatEvent) => void,
+): Promise<void> {
+  const res = await fetch(`${BRIDGE_URL}/api/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt, think }),
+  });
+  await readSse(res, onEvent);
+}
+
+/** Agente ReAct con herramientas: emite pasos (thought/action/observation) + answer. */
+export async function agentStream(
+  task: string,
+  onEvent: (e: AgentEvent) => void,
+): Promise<void> {
+  const res = await fetch(`${BRIDGE_URL}/api/agent`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ task }),
+  });
+  await readSse(res, onEvent);
 }
