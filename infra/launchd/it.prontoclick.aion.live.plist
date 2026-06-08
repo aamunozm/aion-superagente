@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  AION — agente de vida en segundo plano (macOS launchd).
+  Despierta a AION cada hora para un breve ciclo de vida autónomo
+  (curiosidad → ejecutar → soñar → reflexionar), de forma acotada.
+
+  Instalar:
+    cp infra/launchd/it.prontoclick.aion.live.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/it.prontoclick.aion.live.plist
+  Detener:
+    launchctl unload ~/Library/LaunchAgents/it.prontoclick.aion.live.plist
+
+  Requiere Ollama corriendo (modelo gemma4-reason). Ajusta las rutas a tu usuario.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>it.prontoclick.aion.live</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/arielmarquez/Desktop/AION.app/Contents/MacOS/aion-core</string>
+    <string>live</string>
+    <string>2</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AION_MEMORY</key>
+    <string>/Users/arielmarquez/Desktop/Proyecto-AI-Local/data/memory.jsonl</string>
+    <key>AION_AUDIT</key>
+    <string>/Users/arielmarquez/Desktop/Proyecto-AI-Local/data/audit.jsonl</string>
+    <key>AION_LOG</key>
+    <string>warn</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/arielmarquez/Desktop/Proyecto-AI-Local</string>
+
+  <!-- Cada 3600s (1h) despierta para un ciclo de vida breve. -->
+  <key>StartInterval</key>
+  <integer>3600</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/aion-live.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/aion-live.err</string>
+
+  <!-- Prioridad baja: no molesta mientras trabajas. -->
+  <key>Nice</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

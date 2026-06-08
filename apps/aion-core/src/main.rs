@@ -485,12 +485,12 @@ async fn run_sleep() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Bucle de VIDA autónomo y acotado: AION actúa sin que se lo pidan.
-/// Cada ciclo: 🌙 sueña (consolida memoria) · 📚 estudia (genera un insight y lo
-/// guarda) · 🪞 reflexiona (auto-modelo). Todo auditado, con circuit breaker y
-/// número de ciclos limitado. Se detiene con Ctrl-C.
+/// Bucle de VIDA autónomo completo: AION actúa sin que se lo pidan.
+/// En cada ciclo la **curiosidad elige** una actividad (razonar/estudiar/evolucionar),
+/// el **agente la ejecuta** y el resultado **realimenta la curiosidad**; además
+/// 🌙 sueña (consolida) y 🪞 reflexiona. Acotado, con circuit breaker, todo auditado.
 async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
-    use aion_cognition::SelfModel;
+    use aion_cognition::{CuriosityEngine, SelfModel};
     use aion_memory::ConsolidationConfig;
 
     let engine = OllamaEngine::default_local();
@@ -501,6 +501,8 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
 
     let audit = aion_telemetry::AuditLog::default_local();
     let mut self_model = SelfModel::default();
+    let mut curiosity = CuriosityEngine::new(8);
+    let activities = ["razonar", "estudiar", "evolucionar"];
     let mut consecutive_errors = 0u32;
     const BREAKER: u32 = 3;
 
@@ -512,53 +514,46 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
     for cycle in 1..=cycles {
         println!("── ciclo {cycle}/{cycles} ────────────────────────");
 
-        // 🌙 SOÑAR: consolidar memoria de largo plazo.
+        // 🎯 CURIOSIDAD elige la actividad (mayor learning progress / no explorada).
+        let goal = curiosity.next_goal(&activities).unwrap_or("estudiar");
+        println!(
+            "🎯 curiosidad elige: {goal}  (LP={:+.2})",
+            curiosity.learning_progress(goal)
+        );
+
+        // 🤖 EJECUTAR la actividad elegida.
+        let (success, detail) = match goal {
+            "razonar" => agent_once(&engine, "¿Cuánto es 37*21+8? Usa la calculadora.").await,
+            "evolucionar" => self_evolve_once(&engine).await,
+            _ => study_once(&engine).await,
+        };
+        println!("   {} {goal}: {detail}", if success { "✅" } else { "❌" });
+
+        // 🔁 REALIMENTAR curiosidad + auto-modelo.
+        curiosity.record(goal, success);
+        self_model.observe(success);
+        audit.record(
+            "daemon",
+            goal,
+            format!("{}: {detail}", if success { "ok" } else { "fail" }),
+        );
+        if success {
+            consecutive_errors = 0;
+        } else {
+            consecutive_errors += 1;
+            if consecutive_errors >= BREAKER {
+                println!("🛑 circuit breaker: demasiados fallos, deteniendo el bucle.");
+                audit.record("daemon", "breaker_tripped", "demasiados fallos");
+                break;
+            }
+        }
+
+        // 🌙 SOÑAR (consolidar) y 🪞 REFLEXIONAR.
         if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
             if let Ok(r) = mem.consolidate(&ConsolidationConfig::default()) {
-                println!(
-                    "🌙 sueño: {} → {} recuerdos (🔗{} ✂️{})",
-                    r.before, r.after, r.merged, r.pruned
-                );
-                audit.record("daemon", "dream", format!("{}→{}", r.before, r.after));
+                println!("🌙 sueño: {} → {} recuerdos", r.before, r.after);
             }
         }
-
-        // 📚 ESTUDIAR: generar un insight propio y guardarlo en memoria.
-        let req = GenerateRequest {
-            messages: vec![Message::user(
-                "Genera UNA idea breve y concreta para mejorarte como agente de IA local. Una sola frase.",
-            )],
-            think: false,
-            temperature: Some(0.9),
-            max_tokens: Some(80),
-        };
-        match engine.generate(req).await {
-            Ok(msg) => {
-                let insight = msg.content.trim().to_string();
-                println!("📚 estudio: {insight}");
-                if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
-                    let _ = mem.store(&format!("[insight] {insight}")).await;
-                }
-                audit.record("daemon", "study", &insight);
-                self_model.observe(true);
-                consecutive_errors = 0;
-            }
-            Err(e) => {
-                println!("⚠️  estudio falló: {e}");
-                self_model.observe(false);
-                consecutive_errors += 1;
-                audit.record("daemon", "error", e.to_string());
-                if consecutive_errors >= BREAKER {
-                    println!(
-                        "🛑 circuit breaker: demasiados errores, deteniendo el bucle de vida."
-                    );
-                    audit.record("daemon", "breaker_tripped", "demasiados errores");
-                    break;
-                }
-            }
-        }
-
-        // 🪞 REFLEXIONAR.
         println!("🪞 {}\n", self_model.introspect());
 
         if cycle < cycles {
@@ -569,6 +564,105 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
     audit.record("daemon", "live_stop", "fin del bucle");
     println!("💤 AION vuelve al reposo. (lo aprendido quedó en su memoria y en el audit log)");
     Ok(())
+}
+
+/// Ejecuta el agente ReAct (silencioso) sobre una tarea; devuelve (éxito, respuesta).
+async fn agent_once(engine: &OllamaEngine, task: &str) -> (bool, String) {
+    use aion_orchestrator::{CalculatorTool, ReActAgent, ToolRegistry};
+    use aion_skills::{SkillManifest, WasmSkillHost, SUM_TO_WAT};
+    use std::sync::Arc;
+
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(CalculatorTool));
+    if let Ok(h) = WasmSkillHost::new() {
+        if h.register(
+            SkillManifest {
+                name: "sum_to".into(),
+                description: "suma 1..=n".into(),
+            },
+            SUM_TO_WAT,
+        )
+        .is_ok()
+        {
+            tools.register(Arc::new(skill_tool::SkillTool::new(
+                Arc::new(h),
+                "sum_to",
+                "Suma 1..=n (skill WASM). Entrada: n.",
+            )));
+        }
+    }
+    let agent = ReActAgent::new(engine, &tools, EventBus::default());
+    match agent.run(task).await {
+        Ok(run) if !run.answer.starts_with("No pude") => (true, run.answer),
+        Ok(run) => (false, run.answer),
+        Err(e) => (false, e.to_string()),
+    }
+}
+
+/// Un intento de auto-evolución (el LLM escribe la skill 'square', gated).
+async fn self_evolve_once(engine: &OllamaEngine) -> (bool, String) {
+    use aion_evolution::{Candidate, EvolutionEngine};
+    use aion_skills::{SkillManifest, WasmSkillHost};
+    use std::sync::Arc;
+
+    let prompt = "Escribe un módulo WebAssembly WAT que exporte `run` (param i64, result i64) \
+        que devuelva n*n. Ejemplo válido: (module (func (export \"run\") (param $n i64) (result i64) \
+        (i64.mul (local.get $n) (i64.const 2)))). Responde SOLO el módulo WAT.";
+    let msg = match engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.3),
+            max_tokens: Some(256),
+        })
+        .await
+    {
+        Ok(m) => m,
+        Err(e) => return (false, e.to_string()),
+    };
+    let Some(code) = extract_wat(&msg.content) else {
+        return (false, "el LLM no produjo WAT válido".into());
+    };
+    let Ok(live) = WasmSkillHost::new() else {
+        return (false, "no se pudo crear el host".into());
+    };
+    let mut evo = EvolutionEngine::new(Arc::new(live));
+    match evo
+        .propose(Candidate {
+            manifest: SkillManifest {
+                name: "square".into(),
+                description: "n*n".into(),
+            },
+            code,
+            tests: vec![(2, 4), (3, 9), (5, 25)],
+        })
+        .await
+    {
+        Ok(r) => (r.accepted, r.reason),
+        Err(e) => (false, e.to_string()),
+    }
+}
+
+/// Genera un insight de auto-mejora y lo guarda en memoria; devuelve (éxito, insight).
+async fn study_once(engine: &OllamaEngine) -> (bool, String) {
+    let req = GenerateRequest {
+        messages: vec![Message::user(
+            "Genera UNA idea breve y concreta para mejorarte como agente de IA local. Una sola frase.",
+        )],
+        think: false,
+        temperature: Some(0.9),
+        max_tokens: Some(80),
+    };
+    match engine.generate(req).await {
+        Ok(msg) => {
+            let insight = msg.content.trim().to_string();
+            if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+                let _ = mem.store(&format!("[insight] {insight}")).await;
+            }
+            (!insight.is_empty(), insight)
+        }
+        Err(e) => (false, e.to_string()),
+    }
 }
 
 /// Demo de cognición: curiosidad (learning progress), auto-modelo y calibración.
