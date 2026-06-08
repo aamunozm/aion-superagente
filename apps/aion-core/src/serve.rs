@@ -32,6 +32,8 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tracing::Level;
 
 #[derive(Clone)]
 struct AppState {
@@ -62,6 +64,11 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/memory/remember", post(memory_remember))
         .route("/api/memory/sleep", post(memory_sleep))
         .layer(cors)
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

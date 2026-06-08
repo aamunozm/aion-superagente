@@ -14,6 +14,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tracing::Level;
 
 const JWT_TTL_SECS: i64 = 3600;
 
@@ -32,6 +34,11 @@ pub fn router(state: AppState) -> Router {
         .route("/billing/checkout", post(billing::checkout))
         .route("/billing/webhook", post(billing::webhook))
         .layer(cors)
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
         .with_state(state)
 }
 
