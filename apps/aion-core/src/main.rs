@@ -81,6 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("cognition") => {
             run_cognition();
         }
+        Some("live") => {
+            let cycles: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2);
+            run_live(cycles).await?;
+        }
         _ => smoke_test(&info),
     }
     Ok(())
@@ -478,6 +482,92 @@ async fn run_sleep() -> Result<(), Box<dyn std::error::Error>> {
         "☀️  despierta · {} → {} recuerdos (snapshot en {path}.bak)",
         report.before, report.after
     );
+    Ok(())
+}
+
+/// Bucle de VIDA autónomo y acotado: AION actúa sin que se lo pidan.
+/// Cada ciclo: 🌙 sueña (consolida memoria) · 📚 estudia (genera un insight y lo
+/// guarda) · 🪞 reflexiona (auto-modelo). Todo auditado, con circuit breaker y
+/// número de ciclos limitado. Se detiene con Ctrl-C.
+async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
+    use aion_cognition::SelfModel;
+    use aion_memory::ConsolidationConfig;
+
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+
+    let audit = aion_telemetry::AuditLog::default_local();
+    let mut self_model = SelfModel::default();
+    let mut consecutive_errors = 0u32;
+    const BREAKER: u32 = 3;
+
+    audit.record("daemon", "live_start", format!("{cycles} ciclos"));
+    println!(
+        "🌱 AION despierta — bucle de vida autónomo ({cycles} ciclos). Ctrl-C para detener.\n"
+    );
+
+    for cycle in 1..=cycles {
+        println!("── ciclo {cycle}/{cycles} ────────────────────────");
+
+        // 🌙 SOÑAR: consolidar memoria de largo plazo.
+        if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+            if let Ok(r) = mem.consolidate(&ConsolidationConfig::default()) {
+                println!(
+                    "🌙 sueño: {} → {} recuerdos (🔗{} ✂️{})",
+                    r.before, r.after, r.merged, r.pruned
+                );
+                audit.record("daemon", "dream", format!("{}→{}", r.before, r.after));
+            }
+        }
+
+        // 📚 ESTUDIAR: generar un insight propio y guardarlo en memoria.
+        let req = GenerateRequest {
+            messages: vec![Message::user(
+                "Genera UNA idea breve y concreta para mejorarte como agente de IA local. Una sola frase.",
+            )],
+            think: false,
+            temperature: Some(0.9),
+            max_tokens: Some(80),
+        };
+        match engine.generate(req).await {
+            Ok(msg) => {
+                let insight = msg.content.trim().to_string();
+                println!("📚 estudio: {insight}");
+                if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+                    let _ = mem.store(&format!("[insight] {insight}")).await;
+                }
+                audit.record("daemon", "study", &insight);
+                self_model.observe(true);
+                consecutive_errors = 0;
+            }
+            Err(e) => {
+                println!("⚠️  estudio falló: {e}");
+                self_model.observe(false);
+                consecutive_errors += 1;
+                audit.record("daemon", "error", e.to_string());
+                if consecutive_errors >= BREAKER {
+                    println!(
+                        "🛑 circuit breaker: demasiados errores, deteniendo el bucle de vida."
+                    );
+                    audit.record("daemon", "breaker_tripped", "demasiados errores");
+                    break;
+                }
+            }
+        }
+
+        // 🪞 REFLEXIONAR.
+        println!("🪞 {}\n", self_model.introspect());
+
+        if cycle < cycles {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
+    audit.record("daemon", "live_stop", "fin del bucle");
+    println!("💤 AION vuelve al reposo. (lo aprendido quedó en su memoria y en el audit log)");
     Ok(())
 }
 
