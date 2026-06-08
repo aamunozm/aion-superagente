@@ -1,0 +1,19 @@
+[package]
+name = "aion-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "AION core binary: assembles all crates and exposes the IPC layer to the UI."
+
+[[bin]]
+name = "aion-core"
+path = "src/main.rs"
+
+[dependencies]
+aion-kernel.workspace = true
+aion-telemetry.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+chrono = { workspace = true }

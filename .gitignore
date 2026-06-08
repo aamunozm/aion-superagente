@@ -1,0 +1,40 @@
+# Rust
+/target
+**/target
+Cargo.lock.bak
+
+# Node
+node_modules
+.pnpm-store
+.next
+out
+dist
+.turbo
+
+# Tauri
+apps/desktop/src-tauri/target
+apps/desktop/src-tauri/gen
+
+# Env / secretos
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Modelos / datos locales (no versionar pesos ni DBs)
+*.gguf
+*.lance
+*.sqlite
+*.db
+/data
+local-data/
+
+# OS / editor
+.DS_Store
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# Logs
+*.log

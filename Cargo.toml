@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aion-kernel",
+    "crates/aion-telemetry",
+    "crates/aion-llm",
+    "crates/aion-memory",
+    "crates/aion-orchestrator",
+    "crates/aion-skills",
+    "crates/aion-cognition",
+    "crates/aion-evolution",
+    "crates/aion-browser",
+    "crates/aion-sync",
+    "crates/aion-control-client",
+    "apps/aion-core",
+    # "apps/control-plane",  # se habilita en F1
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Ariel Marquez <info@prontoclick.it>"]
+repository = "https://github.com/prontoclick/aion"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Núcleo async
+tokio = { version = "1", features = ["full"] }
+# Serialización
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Errores
+thiserror = "2"
+anyhow = "1"
+# Observabilidad
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# Utilidades
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Crates internos
+aion-kernel = { path = "crates/aion-kernel" }
+aion-telemetry = { path = "crates/aion-telemetry" }
+aion-llm = { path = "crates/aion-llm" }
+aion-memory = { path = "crates/aion-memory" }
+aion-orchestrator = { path = "crates/aion-orchestrator" }
+aion-skills = { path = "crates/aion-skills" }
+aion-cognition = { path = "crates/aion-cognition" }
+aion-evolution = { path = "crates/aion-evolution" }
+aion-browser = { path = "crates/aion-browser" }
+aion-sync = { path = "crates/aion-sync" }
+aion-control-client = { path = "crates/aion-control-client" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

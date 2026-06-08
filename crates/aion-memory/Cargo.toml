@@ -1,0 +1,15 @@
+[package]
+name = "aion-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "AION memory: LanceDB vector store + short/long-term + (F4) Darwinian consolidation."
+
+[dependencies]
+aion-kernel.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true

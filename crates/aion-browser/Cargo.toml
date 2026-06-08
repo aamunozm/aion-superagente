@@ -1,0 +1,15 @@
+[package]
+name = "aion-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "AION agentic browser (F5): browser-use sidecar then chromiumoxide (CDP)."
+
+[dependencies]
+aion-kernel.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true

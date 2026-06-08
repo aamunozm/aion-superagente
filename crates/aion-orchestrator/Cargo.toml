@@ -1,0 +1,15 @@
+[package]
+name = "aion-orchestrator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "AION agent orchestrator: ReAct loop + pub/sub bus + planner + arbiter."
+
+[dependencies]
+aion-kernel.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true

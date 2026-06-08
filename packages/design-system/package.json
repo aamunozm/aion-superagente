@@ -1,0 +1,19 @@
+{
+  "name": "@aion/design-system",
+  "version": "0.0.1",
+  "private": true,
+  "description": "AION design system — tokens and primitives. Premium-minimalist identity (ink + plasma teal).",
+  "type": "module",
+  "main": "src/tokens/tokens.ts",
+  "exports": {
+    "./tokens": "./src/tokens/tokens.ts",
+    "./tokens.css": "./src/tokens/tokens.css"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

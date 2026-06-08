@@ -1,0 +1,124 @@
+/* ============================================================================
+   AION — Design System Tokens
+   Identidad propia, inspirada en la filosofía premium de CEO·Intelligence
+   (minimalismo Apple, 1 acento focal, escala de 6 roles, dark mode invertido).
+   Diferenciador AION: acento "plasma" teal vivo (inteligencia viva/evolución).
+   ============================================================================ */
+
+:root {
+  /* ── Superficies (light) ─────────────────────────────── */
+  --bg:        #FFFFFF;
+  --surface:   #FFFFFF;
+  --surface-1: #FAFAFA;
+  --surface-2: #F5F5F5;
+  --surface-3: #EFEFEF;
+
+  /* ── Bordes ──────────────────────────────────────────── */
+  --border:   #E8E8E8;
+  --border-2: #D8D8D8;
+
+  /* ── Texto ───────────────────────────────────────────── */
+  --text-1: #0A0A0A;   /* titulares, KPI */
+  --text-2: #555555;   /* body secundario */
+  --text-3: #999999;   /* labels, muted */
+
+  /* ── Base / ink (slate-900, neutro premium) ──────────── */
+  --ink:       #0F172A;
+  --ink-hover: #1E293B;
+
+  /* ── Acento focal ÚNICO de AION (plasma teal) ────────── */
+  --accent:          #0FB5BA;   /* plasma teal — identidad AION */
+  --accent-hover:    #0C9499;
+  --accent-contrast: #041314;   /* texto sobre accent (AA) */
+  --accent-subtle:   rgba(15, 181, 186, 0.10);
+  --accent-border:   rgba(15, 181, 186, 0.32);
+
+  /* ── Primary (CTA, items activos) = ink ──────────────── */
+  --primary:          var(--ink);
+  --primary-hover:    var(--ink-hover);
+  --primary-contrast: #FFFFFF;
+  --brand: var(--primary);
+
+  /* ── Focus ring ──────────────────────────────────────── */
+  --focus-ring: rgba(15, 181, 186, 0.30);
+
+  /* ── Sombras (sutiles, Apple) ────────────────────────── */
+  --shadow-card:     none;
+  --shadow-elevated: 0 4px 20px rgba(0, 0, 0, 0.06);
+  --shadow-float:    0 8px 30px rgba(0, 0, 0, 0.10);
+
+  /* ── Movimiento (easing premium) ─────────────────────── */
+  --ease-premium:   cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring:    cubic-bezier(0.34, 1.56, 0.64, 1);
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --transition-base: var(--dur-base) var(--ease-premium);
+
+  /* ── Radios ──────────────────────────────────────────── */
+  --radius-input: 10px;
+  --radius-btn:   10px;
+  --radius-card:  12px;
+  --radius-pill:  9999px;
+
+  /* ── Estados (desaturados, sesiones largas) ──────────── */
+  --success: #16a34a; --success-ink: #15803d;
+  --warn:    #f59e0b; --warn-ink:    #b45309;
+  --danger:  #ef4444; --danger-ink:  #b91c1c;
+  --info:    #0ea5e9; --info-ink:    #0369a1;
+  --success-bg: color-mix(in srgb, var(--success) 12%, transparent);
+  --warn-bg:    color-mix(in srgb, var(--warn)    14%, transparent);
+  --danger-bg:  color-mix(in srgb, var(--danger)  12%, transparent);
+  --info-bg:    color-mix(in srgb, var(--info)    12%, transparent);
+
+  /* ── Estados cognitivos AION (telemetría del agente) ─── */
+  --cog-thinking:  #0FB5BA;   /* razonando */
+  --cog-dreaming:  #8B7DB8;   /* consolidando (sueño) */
+  --cog-evolving:  #5B8FA8;   /* auto-mejora */
+  --cog-curious:   #C49A3D;   /* explorando (curiosidad) */
+  --cog-idle:      #7A7A7A;   /* en reposo */
+}
+
+.dark {
+  --bg:        #1A1A1A;
+  --surface:   #262626;
+  --surface-1: #333333;
+  --surface-2: #3F3F3F;
+  --surface-3: #4A4A4A;
+
+  --border:   rgba(255, 255, 255, 0.10);
+  --border-2: rgba(255, 255, 255, 0.16);
+
+  --text-1: #FFFFFF;
+  --text-2: #D0D0D0;
+  --text-3: #A0A0A0;
+
+  /* Acento más brillante sobre oscuro */
+  --accent:        #2DD4D9;
+  --accent-hover:  #4DE0E5;
+  --accent-subtle: rgba(45, 212, 217, 0.14);
+  --accent-border: rgba(45, 212, 217, 0.36);
+  --focus-ring:    rgba(45, 212, 217, 0.36);
+
+  /* Primary invierte a superficie clara (pill premium) */
+  --primary:          #F1F5F9;
+  --primary-hover:    #E2E8F0;
+  --primary-contrast: #0F172A;
+  --brand: var(--primary);
+
+  --shadow-elevated: 0 4px 20px rgba(0, 0, 0, 0.25);
+  --shadow-float:    0 8px 30px rgba(0, 0, 0, 0.35);
+
+  --success: #22c55e; --success-ink: #4ade80;
+  --warn:    #fbbf24; --warn-ink:    #fcd34d;
+  --danger:  #f87171; --danger-ink:  #fca5a5;
+  --info:    #38bdf8; --info-ink:    #7dd3fc;
+}
+
+/* ── Escala tipográfica de 6 roles ─────────────────────── */
+.t-title       { font-size: 15px; line-height: 20px; font-weight: 600; }
+.t-section     { font-size: 13px; line-height: 18px; font-weight: 600; }
+.t-body-strong { font-size: 12px; line-height: 18px; font-weight: 500; }
+.t-body        { font-size: 12px; line-height: 18px; font-weight: 400; }
+.t-meta        { font-size: 11px; line-height: 15px; font-weight: 400; }
+.t-micro       { font-size: 10px; line-height: 13px; font-weight: 600;
+                 text-transform: uppercase; letter-spacing: 0.04em; }

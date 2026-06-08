@@ -1,0 +1,15 @@
+[package]
+name = "aion-evolution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "AION self-improvement (F5): gated loop + canary + rollback + circuit breakers."
+
+[dependencies]
+aion-kernel.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true

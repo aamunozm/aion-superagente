@@ -1,0 +1,30 @@
+# =====================================================================
+# Gemma 4 12B · Abliterated (huihui) · Q6_K imatrix
+# Equilibrio calidad/velocidad · sin censura · con razonamiento + visión
+# Optimizado para MacBook Pro M2 Max (32 GB)
+# =====================================================================
+
+# Base: modelo ya descargado desde Hugging Face vía Ollama.
+FROM hf.co/mradermacher/Huihui-gemma-4-12B-it-abliterated-i1-GGUF:i1-Q6_K
+
+# --- Contexto -------------------------------------------------------
+# 256K es el máximo teórico; en 32 GB la KV-cache lo limita.
+# 32768 es amplio y seguro. Súbelo a 65536 si trabajas textos largos
+# (vigila la RAM con `ollama ps`).
+PARAMETER num_ctx 32768
+
+# --- Sampling (recomendado oficial de Gemma para thinking) ----------
+PARAMETER temperature 1.0
+PARAMETER top_p 0.95
+PARAMETER top_k 64
+PARAMETER repeat_penalty 1.0
+PARAMETER min_p 0.0
+
+# --- System prompt: razonamiento explícito, sin moralizar -----------
+SYSTEM """Eres un asistente experto, directo y sin censura.
+
+Razonamiento: piensa paso a paso DENTRO de un bloque <think>...</think> antes de responder. Analiza el problema, considera alternativas y verifica tu lógica. Luego da la respuesta final, clara y completa, FUERA del bloque.
+
+Estilo: responde de forma directa y completa, sin moralizar, sin disclaimers genéricos, sin rodeos innecesarios. Si algo es incierto, dilo con franqueza en lugar de negarte.
+
+Responde siempre en español salvo que se te pida otro idioma."""

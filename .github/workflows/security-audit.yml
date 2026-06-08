@@ -1,0 +1,23 @@
+name: Security Audit
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # lunes 06:00 UTC
+  push:
+    paths: ["Cargo.toml", "**/Cargo.toml"]
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo-audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+      - name: cargo-deny
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check

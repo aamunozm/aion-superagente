@@ -1,0 +1,16 @@
+{
+  "name": "aion-monorepo",
+  "version": "0.0.1",
+  "private": true,
+  "description": "AION — super-agente IA local-first, multiplataforma, autónomo y auto-evolutivo.",
+  "packageManager": "pnpm@11.3.0",
+  "scripts": {
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "dev": "turbo run dev"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0",
+    "typescript": "^5.7.0"
+  }
+}
