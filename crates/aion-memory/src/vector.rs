@@ -78,6 +78,16 @@ impl VectorMemory {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Devuelve el contenido de todos los recuerdos (orden de inserción).
+    pub fn contents(&self) -> Vec<String> {
+        self.records
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.content.clone())
+            .collect()
+    }
 }
 
 #[async_trait]

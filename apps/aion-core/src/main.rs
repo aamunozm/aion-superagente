@@ -72,6 +72,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("self-evolve") => {
             run_self_evolve().await?;
         }
+        Some("history") => {
+            run_history()?;
+        }
         _ => smoke_test(&info),
     }
     Ok(())
@@ -448,6 +451,29 @@ async fn run_sleep() -> Result<(), Box<dyn std::error::Error>> {
         "☀️  despierta · {} → {} recuerdos (snapshot en {path}.bak)",
         report.before, report.after
     );
+    Ok(())
+}
+
+/// Historial de conversaciones guardadas en la memoria de largo plazo.
+fn run_history() -> Result<(), Box<dyn std::error::Error>> {
+    let path = memory_path();
+    let mem = VectorMemory::persistent_local(&path)?;
+    let convos: Vec<String> = mem
+        .contents()
+        .into_iter()
+        .filter(|c| c.starts_with("[conversación]"))
+        .collect();
+    println!(
+        "🗂  Historial de conversaciones ({}) · {path}\n",
+        convos.len()
+    );
+    for (i, c) in convos.iter().enumerate() {
+        let line = c.trim_start_matches("[conversación]").trim();
+        println!("{:>3}. {}", i + 1, line);
+    }
+    if convos.is_empty() {
+        println!("(aún no hay conversaciones guardadas — chatea y se guardarán solas)");
+    }
     Ok(())
 }
 

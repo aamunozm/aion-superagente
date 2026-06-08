@@ -82,6 +82,9 @@ async fn chat(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
     let engine = st.engine.clone();
+    let prompt = body.prompt.clone();
+    // Acumula la respuesta para guardarla en memoria al terminar.
+    let answer_acc = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
 
     tokio::spawn(async move {
         let req = GenerateRequest {
@@ -91,6 +94,7 @@ async fn chat(
             max_tokens: None,
         };
         let tx2 = tx.clone();
+        let acc = answer_acc.clone();
         let result = engine
             .generate_stream(
                 req,
@@ -100,6 +104,7 @@ async fn chat(
                             serde_json::json!({ "kind": "thinking", "text": text })
                         }
                         StreamChunk::Answer { text } => {
+                            acc.lock().unwrap().push_str(text);
                             serde_json::json!({ "kind": "answer", "text": text })
                         }
                         StreamChunk::Done { tokens, tokens_per_sec } => {
@@ -116,6 +121,17 @@ async fn chat(
                 tx.try_send(Event::default().data(
                     serde_json::json!({ "kind": "error", "text": e.to_string() }).to_string(),
                 ));
+            return;
+        }
+        // Auto-memoria: guarda el intercambio en la memoria de largo plazo.
+        let answer = answer_acc.lock().unwrap().clone();
+        if !answer.trim().is_empty() {
+            if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+                let mut a = answer;
+                a.truncate(600);
+                let entry = format!("[conversación] yo: {prompt} · AION: {a}");
+                let _ = mem.store(&entry).await;
+            }
         }
     });
 
