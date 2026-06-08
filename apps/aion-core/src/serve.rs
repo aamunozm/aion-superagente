@@ -9,11 +9,15 @@
 //! En el empaquetado Tauri esto puede correr embebido o reemplazarse por
 //! comandos Tauri; el contrato (eventos) es el mismo.
 
+use crate::memory_tool::MemoryTool;
+use crate::skill_tool::SkillTool;
 use aion_kernel::events::{AionEvent, EventBus};
-use aion_kernel::traits::{GenerateRequest, LlmEngine, StreamChunk};
+use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, StreamChunk};
 use aion_kernel::types::Message;
 use aion_llm::OllamaEngine;
+use aion_memory::{ConsolidationConfig, VectorMemory};
 use aion_orchestrator::{CalculatorTool, ReActAgent, ToolRegistry};
+use aion_skills::{SkillManifest, WasmSkillHost, SUM_TO_WAT};
 use axum::{
     extract::State,
     response::sse::{Event, Sse},
@@ -52,6 +56,9 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/health", get(health))
         .route("/api/chat", post(chat))
         .route("/api/agent", post(agent))
+        .route("/api/memory", get(memory_stats))
+        .route("/api/memory/remember", post(memory_remember))
+        .route("/api/memory/sleep", post(memory_sleep))
         .layer(cors)
         .with_state(state);
 
@@ -131,6 +138,31 @@ async fn agent(
         let engine = OllamaEngine::default_local();
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(CalculatorTool));
+
+        // Skill WASM (sandbox) como herramienta.
+        if let Ok(skill_host) = WasmSkillHost::new() {
+            if skill_host
+                .register(
+                    SkillManifest {
+                        name: "sum_to".into(),
+                        description: "suma 1..=n".into(),
+                    },
+                    SUM_TO_WAT,
+                )
+                .is_ok()
+            {
+                tools.register(Arc::new(SkillTool::new(
+                    Arc::new(skill_host),
+                    "sum_to",
+                    "Suma todos los enteros de 1 hasta n (skill WASM en sandbox). Entrada: n.",
+                )));
+            }
+        }
+        // Memoria de largo plazo como herramienta.
+        if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+            tools.register(Arc::new(MemoryTool::new(Arc::new(mem), 3)));
+        }
+
         let bus = EventBus::default();
 
         // Reenvía los eventos del bus a SSE mientras corre el agente.
@@ -176,6 +208,49 @@ async fn agent(
 
     let stream = ReceiverStream::new(rx).map(Ok);
     Sse::new(stream)
+}
+
+fn memory_path() -> String {
+    std::env::var("AION_MEMORY").unwrap_or_else(|_| "data/memory.jsonl".to_string())
+}
+
+/// Estadísticas de la memoria de largo plazo.
+async fn memory_stats() -> Json<serde_json::Value> {
+    match VectorMemory::persistent_local(memory_path()) {
+        Ok(m) => Json(serde_json::json!({ "count": m.len(), "path": memory_path() })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct RememberBody {
+    text: String,
+}
+
+/// Guarda un recuerdo en la memoria persistente.
+async fn memory_remember(Json(body): Json<RememberBody>) -> Json<serde_json::Value> {
+    let mem = match VectorMemory::persistent_local(memory_path()) {
+        Ok(m) => m,
+        Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+    };
+    match mem.store(&body.text).await {
+        Ok(id) => Json(serde_json::json!({ "ok": true, "id": id, "count": mem.len() })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// Ejecuta el ciclo de consolidación darwiniana ("sueño").
+async fn memory_sleep() -> Json<serde_json::Value> {
+    let mem = match VectorMemory::persistent_local(memory_path()) {
+        Ok(m) => m,
+        Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+    };
+    match mem.consolidate(&ConsolidationConfig::default()) {
+        Ok(r) => Json(serde_json::json!({
+            "before": r.before, "merged": r.merged, "pruned": r.pruned, "after": r.after
+        })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
 }
 
 // Pequeño helper para mapear el stream a Result sin traer todo StreamExt.

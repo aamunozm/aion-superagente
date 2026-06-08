@@ -87,3 +87,27 @@ export async function agentStream(
   });
   await readSse(res, onEvent);
 }
+
+// ── Memoria de largo plazo ──────────────────────────────────────────────
+
+export type MemoryStats = { count: number; path: string };
+export type SleepReport = { before: number; merged: number; pruned: number; after: number };
+
+async function jsonCall<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${BRIDGE_URL}${path}`, init);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data as T;
+}
+
+export const memoryStats = () => jsonCall<MemoryStats>("/api/memory");
+
+export const memoryRemember = (text: string) =>
+  jsonCall<{ ok: boolean; count: number }>("/api/memory/remember", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+
+export const memorySleep = () =>
+  jsonCall<SleepReport>("/api/memory/sleep", { method: "POST" });

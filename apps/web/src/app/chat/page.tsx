@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import Link from "next/link";
 import { agentStream, chatStream, type AgentEvent, type ChatEvent } from "@/lib/api";
 
 type Step = { kind: "thought" | "action" | "observation"; text: string };
@@ -74,7 +75,10 @@ export default function ChatPage() {
         <span className="text-xs" style={{ color: "var(--text-3)" }}>
           {busy ? "trabajando…" : "gemma4-reason · local"}
         </span>
-        <div className="ml-auto flex gap-1 p-1 rounded-full" style={{ background: "var(--surface-2)" }}>
+        <Link href="/memory" className="ml-auto text-xs mr-3" style={{ color: "var(--accent)" }}>
+          🧠 Memoria
+        </Link>
+        <div className="flex gap-1 p-1 rounded-full" style={{ background: "var(--surface-2)" }}>
           {(["chat", "agent"] as const).map((m) => (
             <button
               key={m}
