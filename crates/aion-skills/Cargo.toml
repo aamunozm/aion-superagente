@@ -10,6 +10,11 @@ description = "AION skills: Extism WASM host + registry + deny-all sandbox polic
 [dependencies]
 aion-kernel.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
+wasmtime = "27"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

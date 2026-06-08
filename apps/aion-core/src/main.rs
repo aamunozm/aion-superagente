@@ -56,6 +56,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let query = args[1..].join(" ");
             run_recall(&query).await?;
         }
+        Some("skill") => {
+            let n: i64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(100);
+            run_skill(n).await?;
+        }
         _ => smoke_test(&info),
     }
     Ok(())
@@ -186,6 +190,33 @@ async fn run_agent(task: &str) -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     printer.abort();
     println!("\n💬 {}\n\x1b[2m[{} pasos]\x1b[0m", run.answer, run.steps);
+    Ok(())
+}
+
+/// Skill F3: ejecuta una skill WASM en sandbox deny-all (suma 1..=n).
+async fn run_skill(n: i64) -> Result<(), Box<dyn std::error::Error>> {
+    use aion_kernel::traits::SkillHost;
+    use aion_skills::{SkillManifest, WasmSkillHost, SUM_TO_WAT};
+
+    let host = WasmSkillHost::new()?;
+    host.register(
+        SkillManifest {
+            name: "sum_to".into(),
+            description: "suma 1..=n".into(),
+        },
+        SUM_TO_WAT,
+    )?;
+
+    println!("🧩 skills disponibles:");
+    for s in host.list().await? {
+        println!("   · {s}");
+    }
+    println!("\n▶  invocando sum_to(n={n}) en sandbox WASM (deny-all)…");
+    let out = host.invoke("sum_to", serde_json::json!({ "n": n })).await?;
+    println!("✅ resultado: {}", out.output["result"]);
+    println!(
+        "\x1b[2m(código WASM ejecutado sin acceso a disco/red — radio de daño acotado)\x1b[0m"
+    );
     Ok(())
 }
 

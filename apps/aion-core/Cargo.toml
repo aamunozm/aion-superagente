@@ -17,6 +17,7 @@ aion-telemetry.workspace = true
 aion-llm.workspace = true
 aion-memory.workspace = true
 aion-orchestrator.workspace = true
+aion-skills.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 chrono = { workspace = true }
