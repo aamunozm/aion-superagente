@@ -48,6 +48,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let task = args[1..].join(" ");
             run_agent(&task).await?;
         }
+        Some("remember") => {
+            let text = args[1..].join(" ");
+            run_remember(&text).await?;
+        }
+        Some("recall") => {
+            let query = args[1..].join(" ");
+            run_recall(&query).await?;
+        }
         _ => smoke_test(&info),
     }
     Ok(())
@@ -178,6 +186,42 @@ async fn run_agent(task: &str) -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     printer.abort();
     println!("\n💬 {}\n\x1b[2m[{} pasos]\x1b[0m", run.answer, run.steps);
+    Ok(())
+}
+
+/// Ruta del archivo de memoria persistente (configurable por AION_MEMORY).
+fn memory_path() -> String {
+    std::env::var("AION_MEMORY").unwrap_or_else(|_| "data/memory.jsonl".to_string())
+}
+
+/// Guarda un recuerdo en la memoria persistente (sobrevive a reinicios).
+async fn run_remember(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let path = memory_path();
+    let mem = VectorMemory::persistent_local(&path)?;
+    let id = mem.store(text).await?;
+    println!(
+        "🧠 recordado [{}] · memoria contiene {} recuerdos · {path}",
+        &id[..8],
+        mem.len()
+    );
+    Ok(())
+}
+
+/// Recupera de la memoria persistente los recuerdos más relevantes.
+async fn run_recall(query: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let path = memory_path();
+    let mem = VectorMemory::persistent_local(&path)?;
+    println!(
+        "📂 memoria cargada: {} recuerdos ({path})\n🔎 {query}\n",
+        mem.len()
+    );
+    let hits = mem.retrieve(query, 3).await?;
+    if hits.is_empty() {
+        println!("(memoria vacía)");
+    }
+    for h in hits {
+        println!("  · ({:.2}) {}", h.score, h.content);
+    }
     Ok(())
 }
 
