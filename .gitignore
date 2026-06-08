@@ -14,7 +14,8 @@ dist
 # Tauri
 apps/desktop/src-tauri/target
 apps/desktop/src-tauri/gen
-apps/desktop/src-tauri/binaries   # sidecars generados por build-sidecars.sh
+# sidecars generados por build-sidecars.sh (artefactos, no versionar)
+apps/desktop/src-tauri/binaries/
 
 # Env / secretos
 .env
