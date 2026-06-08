@@ -5,11 +5,18 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "AION memory: LanceDB vector store + short/long-term + (F4) Darwinian consolidation."
+description = "AION memory: vector store (embeddings + retrieval), short/long-term + (F4) Darwinian consolidation."
 
 [dependencies]
 aion-kernel.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
+tokio = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

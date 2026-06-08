@@ -1,18 +1,22 @@
 //! Binario `aion-core`: punto de entrada del núcleo de AION.
 //!
-//! En F0 hace el "smoke test" del sistema: inicializa telemetría, verifica la
-//! integridad del kernel, levanta el bus de eventos, emite `CoreStarted` y sale.
-//! En F1 expondrá la capa IPC (Tauri commands + channels) hacia la UI.
+//! Subcomandos:
+//! - (sin args)         smoke test F0: telemetría + kernel + bus + salida limpia.
+//! - `chat <prompt...>` F1: chat real con el LLM local (streaming de razonamiento
+//!   y respuesta) usando `OllamaEngine` contra `gemma4-reason`.
 
+use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, StreamChunk};
+use aion_kernel::types::Message;
 use aion_kernel::{kernel_info, AionEvent, EventBus};
+use aion_llm::OllamaEngine;
+use aion_memory::VectorMemory;
 use chrono::Utc;
+use std::io::Write;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Observabilidad
     aion_telemetry::init();
 
-    // 2. Verificación del kernel (en F5 se comparará el hash firmado)
     let info = kernel_info();
     tracing::info!(
         kernel = info.name,
@@ -21,20 +25,145 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "núcleo AION verificado"
     );
 
-    // 3. Bus de eventos pub/sub
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("chat") => {
+            let prompt = args[1..].join(" ");
+            run_chat(&prompt).await?;
+        }
+        Some("rag") => {
+            let query = args[1..].join(" ");
+            run_rag(&query).await?;
+        }
+        _ => smoke_test(&info),
+    }
+    Ok(())
+}
+
+/// Smoke test de F0: bus de eventos + arranque limpio.
+fn smoke_test(info: &aion_kernel::KernelInfo) {
     let bus = EventBus::default();
     let mut rx = bus.subscribe();
-
-    // 4. Emitir evento de arranque y confirmarlo desde un suscriptor
     bus.publish(AionEvent::CoreStarted {
         kernel_version: info.version.to_string(),
         at: Utc::now(),
     });
-
     if let Ok(AionEvent::CoreStarted { kernel_version, .. }) = rx.try_recv() {
         tracing::info!(%kernel_version, "✅ AION core arrancó correctamente");
     }
-
     tracing::info!("smoke test F0 completado — saliendo limpio");
+}
+
+/// Chat F1: streaming de razonamiento + respuesta contra el LLM local.
+async fn run_chat(prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let engine = OllamaEngine::default_local();
+    engine.health().await.map_err(|e| {
+        format!("LLM local no disponible ({e}). ¿Está Ollama corriendo con gemma4-reason?")
+    })?;
+
+    tracing::info!(engine = engine.id(), "iniciando chat");
+    println!("\n🧑 {prompt}\n");
+
+    let req = GenerateRequest {
+        messages: vec![Message::user(prompt)],
+        think: true,
+        temperature: Some(1.0),
+        max_tokens: None,
+    };
+
+    stream_to_stdout(&engine, req).await?;
+    Ok(())
+}
+
+/// RAG F1: indexa documentos locales, recupera contexto y responde con el LLM.
+/// Port del prototipo `legacy/gemma4-reasoning/rag_demo.py`.
+async fn run_rag(query: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+
+    // Base de conocimiento de ejemplo (en F2 vendrá de documentos del usuario).
+    let docs = [
+        "AION es un super-agente de IA local-first creado por Ariel Marquez (ProntoClick, Italia).",
+        "La arquitectura recomendada por defecto es un monolito modular antes que microservicios.",
+        "El núcleo de AION está escrito en Rust; la UI es Next.js vía Tauri y Capacitor.",
+        "El motor LLM por defecto en F1 es gemma4-reason (Gemma 4 12B abliterated) servido por Ollama.",
+        "La memoria vectorial usa embeddings de nomic-embed-text con recuperación por coseno.",
+        "El acento visual de AION es plasma teal; CEO-Intelligence usa dorado.",
+    ];
+
+    println!(
+        "📚 Indexando {} documentos (embeddings locales)...",
+        docs.len()
+    );
+    let memory = VectorMemory::default_local();
+    for d in &docs {
+        memory.store(d).await?;
+    }
+
+    let hits = memory.retrieve(query, 3).await?;
+    println!("🔎 Recuperados {} fragmentos relevantes.\n", hits.len());
+    let context = hits
+        .iter()
+        .map(|h| format!("- {}", h.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let prompt = format!(
+        "Usa SOLO el siguiente contexto para responder. Si no está, dilo.\n\n\
+         CONTEXTO:\n{context}\n\nPREGUNTA: {query}"
+    );
+    println!("🧑 {query}\n");
+
+    let req = GenerateRequest {
+        messages: vec![Message::user(prompt)],
+        think: false,
+        temperature: Some(0.7),
+        max_tokens: None,
+    };
+    stream_to_stdout(&engine, req).await?;
+    Ok(())
+}
+
+/// Imprime el streaming (razonamiento atenuado + respuesta) en stdout.
+async fn stream_to_stdout(
+    engine: &OllamaEngine,
+    req: GenerateRequest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut in_thinking = false;
+    let mut in_answer = false;
+    engine
+        .generate_stream(
+            req,
+            Box::new(move |chunk| match chunk {
+                StreamChunk::Thinking { text } => {
+                    if !in_thinking {
+                        print!("\x1b[2m🧠 ");
+                        in_thinking = true;
+                    }
+                    print!("{text}");
+                    let _ = std::io::stdout().flush();
+                }
+                StreamChunk::Answer { text } => {
+                    if in_thinking && !in_answer {
+                        print!("\x1b[0m\n\n💬 ");
+                    } else if !in_answer {
+                        print!("💬 ");
+                    }
+                    in_answer = true;
+                    print!("{text}");
+                    let _ = std::io::stdout().flush();
+                }
+                StreamChunk::Done {
+                    tokens,
+                    tokens_per_sec,
+                } => {
+                    println!("\n\n\x1b[2m[{tokens} tokens · {tokens_per_sec:.1} tok/s]\x1b[0m");
+                }
+            }),
+        )
+        .await?;
     Ok(())
 }

@@ -1,17 +1,12 @@
 //! # aion-llm
 //!
-//! Capa LLM. Implementa el trait `LlmEngine` del kernel. F1: OllamaEngine.
+//! Capa de inferencia LLM de AION. Implementa el trait [`aion_kernel::LlmEngine`].
 //!
-//! Estado: stub de F0. La implementación llega en su fase correspondiente
-//! (ver docs/PRD y el plan maestro). Depende de `aion-kernel` para los contratos.
+//! - F1: [`OllamaEngine`] — reusa el modelo `gemma4-reason` (Gemma 4 12B abliterated)
+//!   servido por Ollama en `:11434`. Soporta razonamiento (thinking) en streaming.
+//! - F2: `MistralRsEngine` (embebido) — pendiente.
+//! - F6: motores móviles (MLX/Candle) — pendiente.
 
-/// Marcador de versión del crate (placeholder hasta implementación).
-pub const CRATE: &str = "aion-llm";
+mod ollama;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_name_is_set() {
-        assert!(!super::CRATE.is_empty());
-    }
-}
+pub use ollama::OllamaEngine;
