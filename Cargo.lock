@@ -38,8 +38,10 @@ version = "0.0.1"
 dependencies = [
  "aion-kernel",
  "async-trait",
+ "reqwest",
  "serde",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -91,6 +93,7 @@ dependencies = [
 name = "aion-core"
 version = "0.0.1"
 dependencies = [
+ "aion-browser",
  "aion-evolution",
  "aion-kernel",
  "aion-llm",

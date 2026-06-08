@@ -8,6 +8,7 @@
 mod memory_tool;
 mod serve;
 mod skill_tool;
+mod web_tool;
 
 use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, StreamChunk};
 use aion_kernel::types::Message;
@@ -163,11 +164,13 @@ async fn run_rag(query: &str) -> Result<(), Box<dyn std::error::Error>> {
 /// Agente F2: bucle ReAct con herramientas (calculadora). Muestra los pasos
 /// (pensamiento/acción/observación) en vivo vía el bus de eventos.
 async fn run_agent(task: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use aion_browser::WebClient;
     use aion_orchestrator::{CalculatorTool, ReActAgent, ToolRegistry};
     use aion_skills::{SkillManifest, WasmSkillHost, SUM_TO_WAT};
     use memory_tool::MemoryTool;
     use skill_tool::SkillTool;
     use std::sync::Arc;
+    use web_tool::WebTool;
 
     let engine = OllamaEngine::default_local();
     engine
@@ -196,6 +199,7 @@ async fn run_agent(task: &str) -> Result<(), Box<dyn std::error::Error>> {
         "Suma todos los enteros de 1 hasta n (skill WASM en sandbox). Entrada: el número n.",
     )));
     tools.register(Arc::new(MemoryTool::new(memory, 3)));
+    tools.register(Arc::new(WebTool::new(Arc::new(WebClient::new()))));
 
     let bus = EventBus::default();
     let mut rx = bus.subscribe();

@@ -11,6 +11,8 @@
 
 use crate::memory_tool::MemoryTool;
 use crate::skill_tool::SkillTool;
+use crate::web_tool::WebTool;
+use aion_browser::WebClient;
 use aion_kernel::events::{AionEvent, EventBus};
 use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, StreamChunk};
 use aion_kernel::types::Message;
@@ -162,6 +164,8 @@ async fn agent(
         if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
             tools.register(Arc::new(MemoryTool::new(Arc::new(mem), 3)));
         }
+        // Capacidad web (leer URLs).
+        tools.register(Arc::new(WebTool::new(Arc::new(WebClient::new()))));
 
         let bus = EventBus::default();
 
