@@ -5,6 +5,7 @@
 //! - `chat <prompt...>` F1: chat real con el LLM local (streaming de razonamiento
 //!   y respuesta) usando `OllamaEngine` contra `gemma4-reason`.
 
+mod memory_tool;
 mod serve;
 mod skill_tool;
 
@@ -164,6 +165,7 @@ async fn run_rag(query: &str) -> Result<(), Box<dyn std::error::Error>> {
 async fn run_agent(task: &str) -> Result<(), Box<dyn std::error::Error>> {
     use aion_orchestrator::{CalculatorTool, ReActAgent, ToolRegistry};
     use aion_skills::{SkillManifest, WasmSkillHost, SUM_TO_WAT};
+    use memory_tool::MemoryTool;
     use skill_tool::SkillTool;
     use std::sync::Arc;
 
@@ -183,6 +185,9 @@ async fn run_agent(task: &str) -> Result<(), Box<dyn std::error::Error>> {
         SUM_TO_WAT,
     )?;
 
+    // Memoria de largo plazo (persistente) como herramienta del agente.
+    let memory = Arc::new(VectorMemory::persistent_local(memory_path())?);
+
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(CalculatorTool));
     tools.register(Arc::new(SkillTool::new(
@@ -190,6 +195,7 @@ async fn run_agent(task: &str) -> Result<(), Box<dyn std::error::Error>> {
         "sum_to",
         "Suma todos los enteros de 1 hasta n (skill WASM en sandbox). Entrada: el número n.",
     )));
+    tools.register(Arc::new(MemoryTool::new(memory, 3)));
 
     let bus = EventBus::default();
     let mut rx = bus.subscribe();
