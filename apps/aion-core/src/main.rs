@@ -75,6 +75,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("history") => {
             run_history()?;
         }
+        Some("audit") => {
+            run_audit();
+        }
         _ => smoke_test(&info),
     }
     Ok(())
@@ -207,14 +210,19 @@ async fn run_agent(task: &str) -> Result<(), Box<dyn std::error::Error>> {
     tools.register(Arc::new(MemoryTool::new(memory, 3)));
     tools.register(Arc::new(WebTool::new(Arc::new(WebClient::new()))));
 
+    let audit = Arc::new(aion_telemetry::AuditLog::default_local());
     let bus = EventBus::default();
     let mut rx = bus.subscribe();
-    // Imprime los pasos del agente en vivo.
+    // Imprime los pasos del agente en vivo y audita las acciones.
+    let audit_p = audit.clone();
     let printer = tokio::spawn(async move {
         while let Ok(ev) = rx.recv().await {
             match ev {
                 AionEvent::ThoughtEmitted { text, .. } => println!("\x1b[2m🧠 {text}\x1b[0m"),
-                AionEvent::ActionRequested { action, .. } => println!("\x1b[36m🔧 {action}\x1b[0m"),
+                AionEvent::ActionRequested { action, .. } => {
+                    println!("\x1b[36m🔧 {action}\x1b[0m");
+                    audit_p.record("agent", "tool_call", action);
+                }
                 AionEvent::ObservationReceived { summary, .. } => {
                     println!("\x1b[33m👁  {summary}\x1b[0m")
                 }
@@ -224,11 +232,17 @@ async fn run_agent(task: &str) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     println!("🧑 {task}\n");
+    audit.record("agent", "task_start", task);
     let agent = ReActAgent::new(&engine, &tools, bus.clone());
     let run = agent.run(task).await?;
     // da tiempo a vaciar los eventos pendientes
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     printer.abort();
+    audit.record(
+        "agent",
+        "task_done",
+        format!("{} pasos · {}", run.steps, run.answer),
+    );
     println!("\n💬 {}\n\x1b[2m[{} pasos]\x1b[0m", run.answer, run.steps);
     Ok(())
 }
@@ -344,6 +358,7 @@ async fn run_self_evolve() -> Result<(), Box<dyn std::error::Error>> {
 
     let live = Arc::new(WasmSkillHost::new()?);
     let mut evo = EvolutionEngine::new(live.clone());
+    let audit = aion_telemetry::AuditLog::default_local();
 
     println!("🎯 Tarea para auto-implementar: {task}");
     println!("🧪 Oráculo (tests): {tests:?}\n");
@@ -388,6 +403,15 @@ async fn run_self_evolve() -> Result<(), Box<dyn std::error::Error>> {
             })
             .await?;
         println!("   {} — {}", verdict(report.accepted), report.reason);
+        audit.record(
+            "evolution",
+            if report.accepted {
+                "candidate_accepted"
+            } else {
+                "candidate_rejected"
+            },
+            format!("square (intento {attempt}): {}", report.reason),
+        );
 
         if report.accepted {
             let out = live.invoke("square", serde_json::json!(9)).await?;
@@ -452,6 +476,25 @@ async fn run_sleep() -> Result<(), Box<dyn std::error::Error>> {
         report.before, report.after
     );
     Ok(())
+}
+
+/// Muestra el audit log (acciones del agente y de la auto-evolución).
+fn run_audit() {
+    let log = aion_telemetry::AuditLog::default_local();
+    let entries = log.read_all();
+    println!("🔎 Audit log ({} entradas)\n", entries.len());
+    for e in &entries {
+        println!(
+            "  {} · [{}] {} — {}",
+            &e.ts[..19.min(e.ts.len())],
+            e.actor,
+            e.action,
+            e.detail
+        );
+    }
+    if entries.is_empty() {
+        println!("(vacío — usa el agente o `evolve`/`self-evolve` y se irá registrando)");
+    }
 }
 
 /// Historial de conversaciones guardadas en la memoria de largo plazo.

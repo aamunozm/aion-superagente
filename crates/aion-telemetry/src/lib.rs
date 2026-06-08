@@ -1,6 +1,8 @@
-//! Observabilidad de AION. En F0: tracing estructurado + filtro por env.
-//! En fases posteriores se añade exportación OpenTelemetry (OTLP) y el audit log
-//! persistente de todas las acciones del agente y del bucle de evolución.
+//! Observabilidad de AION: tracing estructurado + **audit log persistente**
+//! de las acciones del agente y del bucle de evolución.
+
+mod audit;
+pub use audit::{AuditEntry, AuditLog};
 
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 

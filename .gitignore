@@ -43,3 +43,6 @@ local-data/
 
 # clave de firma de licencias (secreto local)
 data/license_signing_key.hex
+
+# audit log local
+data/audit.jsonl
