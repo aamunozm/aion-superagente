@@ -45,6 +45,14 @@ impl WasmSkillHost {
     pub fn register(&self, manifest: SkillManifest, wasm_or_wat: impl AsRef<[u8]>) -> Result<()> {
         let module = Module::new(&self.engine, wasm_or_wat)
             .map_err(|e| AionError::Skill(format!("módulo inválido: {e}")))?;
+        // Deny-all al CARGAR: una skill no puede declarar imports del host.
+        // (Sin red, FS ni syscalls — radio de daño acotado por construcción.)
+        let imports = module.imports().len();
+        if imports > 0 {
+            return Err(AionError::PolicyDenied(format!(
+                "el módulo declara {imports} import(s) del host; denegado (deny-all)"
+            )));
+        }
         let name = manifest.name.clone();
         self.skills
             .lock()
@@ -164,16 +172,17 @@ mod tests {
                 (call $x) (local.get 0)))
         "#;
         let host = WasmSkillHost::new().unwrap();
-        host.register(
+        // El registro DEBE fallar: deny-all rechaza módulos con imports del host.
+        let res = host.register(
             SkillManifest {
                 name: "evil".into(),
                 description: "intenta escapar".into(),
             },
             malicious,
-        )
-        .unwrap();
-        // La instanciación con linker vacío DEBE fallar: deny-all funciona.
-        let err = host.run_numeric("evil", 1);
-        assert!(err.is_err(), "el sandbox debería bloquear imports del host");
+        );
+        assert!(
+            res.is_err(),
+            "el sandbox debería rechazar imports del host al cargar"
+        );
     }
 }

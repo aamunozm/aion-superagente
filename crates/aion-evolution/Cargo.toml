@@ -9,7 +9,12 @@ description = "AION self-improvement (F5): gated loop + canary + rollback + circ
 
 [dependencies]
 aion-kernel.workspace = true
+aion-skills.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

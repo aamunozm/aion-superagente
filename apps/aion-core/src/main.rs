@@ -64,6 +64,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("sleep") => {
             run_sleep().await?;
         }
+        Some("evolve") => {
+            run_evolve().await?;
+        }
         _ => smoke_test(&info),
     }
     Ok(())
@@ -239,6 +242,77 @@ async fn run_skill(n: i64) -> Result<(), Box<dyn std::error::Error>> {
         "\x1b[2m(código WASM ejecutado sin acceso a disco/red — radio de daño acotado)\x1b[0m"
     );
     Ok(())
+}
+
+/// Evolución F5: demuestra el bucle de auto-mejora gated con 3 candidatas
+/// (buena, defectuosa, maliciosa) — y la verificación del kernel inmutable.
+async fn run_evolve() -> Result<(), Box<dyn std::error::Error>> {
+    use aion_evolution::{verify_kernel, Candidate, EvolutionEngine};
+    use aion_kernel::traits::SkillHost;
+    use aion_kernel::KERNEL_CONTRACT_VERSION;
+    use aion_skills::{SkillManifest, WasmSkillHost};
+    use std::sync::Arc;
+
+    println!(
+        "🔒 kernel inmutable: {}",
+        if verify_kernel(KERNEL_CONTRACT_VERSION) {
+            "íntegro ✅"
+        } else {
+            "ALTERADO ⛔"
+        }
+    );
+
+    let live = Arc::new(WasmSkillHost::new()?);
+    let mut eng = EvolutionEngine::new(live.clone());
+
+    let mk = |name: &str, code: &str| Candidate {
+        manifest: SkillManifest {
+            name: name.into(),
+            description: "duplica n".into(),
+        },
+        code: code.into(),
+        tests: vec![(5, 10), (0, 0), (21, 42)],
+    };
+
+    let good = "(module (func (export \"run\") (param $n i64) (result i64) (i64.mul (local.get $n) (i64.const 2))))";
+    let bad = "(module (func (export \"run\") (param $n i64) (result i64) (i64.add (local.get $n) (i64.const 1))))";
+    let evil = "(module (import \"host\" \"x\" (func $x)) (func (export \"run\") (param i64) (result i64) (call $x) (local.get 0)))";
+
+    println!("\n▶  candidata BUENA (duplica correctamente):");
+    let r = eng.propose(mk("double", good)).await?;
+    println!(
+        "   {} — {} ({} tests ok)",
+        verdict(r.accepted),
+        r.reason,
+        r.passed
+    );
+
+    println!("\n▶  candidata DEFECTUOSA (suma 1 en vez de duplicar):");
+    let r = eng.propose(mk("double_bad", bad)).await?;
+    println!("   {} — {}", verdict(r.accepted), r.reason);
+
+    println!("\n▶  candidata MALICIOSA (intenta importar función del host):");
+    let r = eng.propose(mk("evil", evil)).await?;
+    println!("   {} — {}", verdict(r.accepted), r.reason);
+
+    println!("\n🧩 skills integradas en el sistema (solo las que pasaron las puertas):");
+    for s in live.list().await? {
+        println!("   · {s}");
+    }
+    let out = live.invoke("double", serde_json::json!(7)).await?;
+    println!(
+        "\n✅ la skill aceptada funciona: double(7) = {}",
+        out.output["result"]
+    );
+    Ok(())
+}
+
+fn verdict(accepted: bool) -> &'static str {
+    if accepted {
+        "\x1b[32mACEPTADA\x1b[0m"
+    } else {
+        "\x1b[31mRECHAZADA\x1b[0m"
+    }
 }
 
 /// "Sueño" F4: ciclo de consolidación darwiniana de la memoria persistente.

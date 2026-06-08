@@ -91,6 +91,7 @@ dependencies = [
 name = "aion-core"
 version = "0.0.1"
 dependencies = [
+ "aion-evolution",
  "aion-kernel",
  "aion-llm",
  "aion-memory",
@@ -114,9 +115,12 @@ name = "aion-evolution"
 version = "0.0.1"
 dependencies = [
  "aion-kernel",
+ "aion-skills",
  "async-trait",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
