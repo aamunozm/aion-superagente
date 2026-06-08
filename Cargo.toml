@@ -13,7 +13,7 @@ members = [
     "crates/aion-sync",
     "crates/aion-control-client",
     "apps/aion-core",
-    # "apps/control-plane",  # se habilita en F1
+    "apps/control-plane",
 ]
 
 [workspace.package]
