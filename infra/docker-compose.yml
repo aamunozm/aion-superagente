@@ -1,0 +1,26 @@
+# Infra local de AION para producción del control-plane (cuando se active Postgres).
+# Uso: docker compose -f infra/docker-compose.yml up -d
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aion
+      POSTGRES_PASSWORD: aion
+      POSTGRES_DB: aion
+    ports:
+      - "5432:5432"
+    volumes:
+      - aion_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aion"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  aion_pg:
