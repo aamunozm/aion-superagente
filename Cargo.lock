@@ -53,6 +53,7 @@ dependencies = [
  "async-trait",
  "serde",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -96,6 +97,7 @@ name = "aion-core"
 version = "0.0.1"
 dependencies = [
  "aion-browser",
+ "aion-cognition",
  "aion-evolution",
  "aion-kernel",
  "aion-llm",

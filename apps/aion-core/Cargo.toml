@@ -20,6 +20,7 @@ aion-orchestrator.workspace = true
 aion-skills.workspace = true
 aion-evolution.workspace = true
 aion-browser.workspace = true
+aion-cognition.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 chrono = { workspace = true }

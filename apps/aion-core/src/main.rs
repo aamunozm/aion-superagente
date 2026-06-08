@@ -78,6 +78,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("audit") => {
             run_audit();
         }
+        Some("cognition") => {
+            run_cognition();
+        }
         _ => smoke_test(&info),
     }
     Ok(())
@@ -476,6 +479,54 @@ async fn run_sleep() -> Result<(), Box<dyn std::error::Error>> {
         report.before, report.after
     );
     Ok(())
+}
+
+/// Demo de cognición: curiosidad (learning progress), auto-modelo y calibración.
+fn run_cognition() {
+    use aion_cognition::{Calibration, CuriosityEngine, SelfModel};
+
+    println!("🧠 Subsistemas cognitivos de AION\n");
+
+    // 1) Curiosidad por learning progress (3 objetivos distintos).
+    let mut cur = CuriosityEngine::new(6);
+    for s in [true, true, true, true, true, true] {
+        cur.record("ya_dominado", s); // mastered
+    }
+    for s in [false, false, false, false, false, false] {
+        cur.record("imposible", s); // sin progreso
+    }
+    for s in [false, false, false, true, true, true] {
+        cur.record("en_aprendizaje", s); // progresando
+    }
+    println!("🎯 Curiosidad (learning progress):");
+    for g in ["ya_dominado", "imposible", "en_aprendizaje"] {
+        println!(
+            "   {g:14} competencia={:.0}%  LP={:+.2}",
+            cur.competence(g) * 100.0,
+            cur.learning_progress(g)
+        );
+    }
+    let next = cur.next_goal(&["ya_dominado", "imposible", "en_aprendizaje", "nunca_visto"]);
+    println!("   → siguiente objetivo elegido: {next:?}  (curiosidad)\n");
+
+    // 2) Auto-modelo.
+    let mut sm = SelfModel::default();
+    for s in [true, true, false, true, true, true, true, false, true, true] {
+        sm.observe(s);
+    }
+    println!("🪞 {}\n", sm.introspect());
+
+    // 3) Metacognición (calibración).
+    let mut cal = Calibration::new();
+    cal.record(0.9, true);
+    cal.record(0.8, true);
+    cal.record(0.6, false);
+    cal.record(0.7, true);
+    println!(
+        "🤔 Metacognición: {} ({} muestras)",
+        cal.verdict(),
+        cal.samples()
+    );
 }
 
 /// Muestra el audit log (acciones del agente y de la auto-evolución).
