@@ -73,6 +73,7 @@ dependencies = [
  "aion-kernel",
  "aion-llm",
  "aion-memory",
+ "aion-orchestrator",
  "aion-telemetry",
  "axum",
  "chrono",
@@ -147,6 +148,7 @@ dependencies = [
  "async-trait",
  "serde",
  "thiserror",
+ "tokio",
  "tracing",
 ]
 

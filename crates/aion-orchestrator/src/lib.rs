@@ -1,17 +1,16 @@
 //! # aion-orchestrator
 //!
-//! Orquestador propio: bucle ReAct + bus pub/sub (patrón AutoAgents).
+//! Orquestador propio de AION (patrón AutoAgents): bucle **ReAct** (Reason+Act)
+//! con herramientas, publicando en el bus de eventos pub/sub del kernel.
 //!
-//! Estado: stub de F0. La implementación llega en su fase correspondiente
-//! (ver docs/PRD y el plan maestro). Depende de `aion-kernel` para los contratos.
+//! - F2 (actual): [`ReActAgent`] + [`ToolRegistry`] + herramientas nativas
+//!   (calculadora determinista). Inspira el bucle cognitivo de 4 fases (GWA).
+//! - F3: las skills WASM (Extism) se exponen como [`Tool`].
+//! - F4: integración con curiosidad (MAGELLAN) y memoria darwiniana.
 
-/// Marcador de versión del crate (placeholder hasta implementación).
-pub const CRATE: &str = "aion-orchestrator";
+mod calc;
+mod react;
+mod tool;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_name_is_set() {
-        assert!(!super::CRATE.is_empty());
-    }
-}
+pub use react::{AgentRun, ReActAgent};
+pub use tool::{CalculatorTool, Tool, ToolRegistry};

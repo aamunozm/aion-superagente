@@ -44,6 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| "127.0.0.1:8765".to_string());
             serve::run(&addr).await?;
         }
+        Some("agent") => {
+            let task = args[1..].join(" ");
+            run_agent(&task).await?;
+        }
         _ => smoke_test(&info),
     }
     Ok(())
@@ -133,6 +137,47 @@ async fn run_rag(query: &str) -> Result<(), Box<dyn std::error::Error>> {
         max_tokens: None,
     };
     stream_to_stdout(&engine, req).await?;
+    Ok(())
+}
+
+/// Agente F2: bucle ReAct con herramientas (calculadora). Muestra los pasos
+/// (pensamiento/acción/observación) en vivo vía el bus de eventos.
+async fn run_agent(task: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use aion_orchestrator::{CalculatorTool, ReActAgent, ToolRegistry};
+    use std::sync::Arc;
+
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(CalculatorTool));
+
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+    // Imprime los pasos del agente en vivo.
+    let printer = tokio::spawn(async move {
+        while let Ok(ev) = rx.recv().await {
+            match ev {
+                AionEvent::ThoughtEmitted { text, .. } => println!("\x1b[2m🧠 {text}\x1b[0m"),
+                AionEvent::ActionRequested { action, .. } => println!("\x1b[36m🔧 {action}\x1b[0m"),
+                AionEvent::ObservationReceived { summary, .. } => {
+                    println!("\x1b[33m👁  {summary}\x1b[0m")
+                }
+                _ => {}
+            }
+        }
+    });
+
+    println!("🧑 {task}\n");
+    let agent = ReActAgent::new(&engine, &tools, bus.clone());
+    let run = agent.run(task).await?;
+    // da tiempo a vaciar los eventos pendientes
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    printer.abort();
+    println!("\n💬 {}\n\x1b[2m[{} pasos]\x1b[0m", run.answer, run.steps);
     Ok(())
 }
 
