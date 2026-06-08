@@ -221,50 +221,6 @@ impl VectorMemory {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn rec(emb: Vec<f32>, fitness: f32, access: u32) -> MemoryRecord {
-        MemoryRecord {
-            id: Uuid::new_v4().to_string(),
-            content: format!("emb{emb:?}"),
-            embedding: emb,
-            fitness,
-            access_count: access,
-        }
-    }
-
-    #[test]
-    fn consolidation_merges_duplicates_and_prunes_weak() {
-        let mem = VectorMemory::default_local();
-        {
-            let mut r = mem.records.lock().unwrap();
-            r.push(rec(vec![1.0, 0.0, 0.0], 0.5, 1)); // usado
-            r.push(rec(vec![1.0, 0.0, 0.0], 0.5, 0)); // casi-dup → se fusiona
-            r.push(rec(vec![0.0, 1.0, 0.0], 0.05, 0)); // débil y sin uso → poda
-        }
-        let report = mem.consolidate(&ConsolidationConfig::default()).unwrap();
-        assert_eq!(report.before, 3);
-        assert_eq!(report.merged, 1);
-        assert_eq!(report.pruned, 1);
-        assert_eq!(report.after, 1);
-        assert_eq!(mem.len(), 1);
-    }
-
-    #[test]
-    fn consolidation_keeps_accessed_memories() {
-        let mem = VectorMemory::default_local();
-        {
-            let mut r = mem.records.lock().unwrap();
-            r.push(rec(vec![0.0, 0.0, 1.0], 0.01, 5)); // aptitud baja pero MUY usada
-        }
-        let report = mem.consolidate(&ConsolidationConfig::default()).unwrap();
-        assert_eq!(report.pruned, 0); // no se poda lo que se usa
-        assert_eq!(mem.len(), 1);
-    }
-}
-
 fn rewrite_jsonl(path: &PathBuf, records: &[MemoryRecord]) -> Result<()> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
@@ -311,4 +267,48 @@ fn append_jsonl(path: &PathBuf, record: &MemoryRecord) -> Result<()> {
     let line = serde_json::to_string(record)?;
     writeln!(file, "{line}").map_err(|e| AionError::Memory(e.to_string()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(emb: Vec<f32>, fitness: f32, access: u32) -> MemoryRecord {
+        MemoryRecord {
+            id: Uuid::new_v4().to_string(),
+            content: format!("emb{emb:?}"),
+            embedding: emb,
+            fitness,
+            access_count: access,
+        }
+    }
+
+    #[test]
+    fn consolidation_merges_duplicates_and_prunes_weak() {
+        let mem = VectorMemory::default_local();
+        {
+            let mut r = mem.records.lock().unwrap();
+            r.push(rec(vec![1.0, 0.0, 0.0], 0.5, 1)); // usado
+            r.push(rec(vec![1.0, 0.0, 0.0], 0.5, 0)); // casi-dup → se fusiona
+            r.push(rec(vec![0.0, 1.0, 0.0], 0.05, 0)); // débil y sin uso → poda
+        }
+        let report = mem.consolidate(&ConsolidationConfig::default()).unwrap();
+        assert_eq!(report.before, 3);
+        assert_eq!(report.merged, 1);
+        assert_eq!(report.pruned, 1);
+        assert_eq!(report.after, 1);
+        assert_eq!(mem.len(), 1);
+    }
+
+    #[test]
+    fn consolidation_keeps_accessed_memories() {
+        let mem = VectorMemory::default_local();
+        {
+            let mut r = mem.records.lock().unwrap();
+            r.push(rec(vec![0.0, 0.0, 1.0], 0.01, 5)); // aptitud baja pero MUY usada
+        }
+        let report = mem.consolidate(&ConsolidationConfig::default()).unwrap();
+        assert_eq!(report.pruned, 0); // no se poda lo que se usa
+        assert_eq!(mem.len(), 1);
+    }
 }
