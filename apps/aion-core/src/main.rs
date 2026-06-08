@@ -69,6 +69,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("evolve") => {
             run_evolve().await?;
         }
+        Some("self-evolve") => {
+            run_self_evolve().await?;
+        }
         _ => smoke_test(&info),
     }
     Ok(())
@@ -315,6 +318,109 @@ async fn run_evolve() -> Result<(), Box<dyn std::error::Error>> {
         out.output["result"]
     );
     Ok(())
+}
+
+/// Auto-evolución F5 (lazo cerrado): el LLM ESCRIBE una skill candidata y esta
+/// pasa por las puertas de seguridad gated. Si el código es inválido o falla los
+/// tests, se rechaza sin dañar el sistema — la autonomía es segura por diseño.
+async fn run_self_evolve() -> Result<(), Box<dyn std::error::Error>> {
+    use aion_evolution::{Candidate, EvolutionEngine};
+    use aion_kernel::traits::SkillHost;
+    use aion_skills::{SkillManifest, WasmSkillHost};
+    use std::sync::Arc;
+
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+
+    // Tarea a auto-implementar + su oráculo (tests).
+    let task = "eleva el número al cuadrado (devuelve n*n)";
+    let tests = vec![(2_i64, 4_i64), (3, 9), (5, 25), (0, 0)];
+
+    let live = Arc::new(WasmSkillHost::new()?);
+    let mut evo = EvolutionEngine::new(live.clone());
+
+    println!("🎯 Tarea para auto-implementar: {task}");
+    println!("🧪 Oráculo (tests): {tests:?}\n");
+
+    // Hasta 3 intentos: el LLM regenera si la candidata es rechazada.
+    for attempt in 1..=3 {
+        println!("── Intento {attempt}/3 ─────────────────────────────");
+        let prompt = format!(
+            "Escribe un módulo WebAssembly en formato WAT que exporte una función `run` \
+             que reciba un i64 y devuelva un i64, implementando: {task}.\n\n\
+             Ejemplo de formato VÁLIDO (esto duplica n):\n\
+             (module (func (export \"run\") (param $n i64) (result i64) \
+             (i64.mul (local.get $n) (i64.const 2))))\n\n\
+             Responde SOLO con el módulo WAT en una línea, sin explicación ni markdown."
+        );
+        let msg = engine
+            .generate(aion_kernel::traits::GenerateRequest {
+                messages: vec![Message::user(prompt)],
+                think: false,
+                temperature: Some(0.3),
+                max_tokens: Some(256),
+            })
+            .await?;
+
+        let Some(code) = extract_wat(&msg.content) else {
+            println!("🤖 el LLM no produjo un módulo WAT válido; reintentando…\n");
+            continue;
+        };
+        println!(
+            "🤖 candidata generada por el LLM:\n   {}\n",
+            code.replace('\n', " ")
+        );
+
+        let report = evo
+            .propose(Candidate {
+                manifest: SkillManifest {
+                    name: "square".into(),
+                    description: task.into(),
+                },
+                code,
+                tests: tests.clone(),
+            })
+            .await?;
+        println!("   {} — {}", verdict(report.accepted), report.reason);
+
+        if report.accepted {
+            let out = live.invoke("square", serde_json::json!(9)).await?;
+            println!(
+                "\n✅ El agente escribió y AION integró una skill nueva: square(9) = {}",
+                out.output["result"]
+            );
+            println!("\x1b[2m(código generado por el LLM, validado por sandbox+tests antes de integrarse)\x1b[0m");
+            return Ok(());
+        }
+        println!();
+    }
+    println!("⛔ Ninguna candidata superó las puertas. El sistema queda intacto (rollback). ");
+    println!("\x1b[2m(esto es el comportamiento seguro: nada inválido se integra)\x1b[0m");
+    Ok(())
+}
+
+/// Extrae un módulo WAT `(module ...)` balanceando paréntesis.
+fn extract_wat(text: &str) -> Option<String> {
+    let start = text.find("(module")?;
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, c) in text[start..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    end.map(|e| text[start..start + e].to_string())
 }
 
 fn verdict(accepted: bool) -> &'static str {
