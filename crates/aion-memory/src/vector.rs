@@ -130,6 +130,155 @@ impl MemoryStore for VectorMemory {
     }
 }
 
+/// Configuración del ciclo de consolidación ("sueño") darwiniano.
+#[derive(Debug, Clone)]
+pub struct ConsolidationConfig {
+    /// Similitud coseno por encima de la cual dos recuerdos se fusionan.
+    pub merge_threshold: f32,
+    /// Aptitud por debajo de la cual un recuerdo nunca accedido se poda.
+    pub prune_floor: f32,
+    /// Factor de decaimiento de aptitud aplicado a todos (olvido gradual).
+    pub decay: f32,
+}
+
+impl Default for ConsolidationConfig {
+    fn default() -> Self {
+        Self {
+            merge_threshold: 0.95,
+            prune_floor: 0.15,
+            decay: 0.9,
+        }
+    }
+}
+
+/// Resultado de un ciclo de consolidación.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConsolidationReport {
+    pub before: usize,
+    pub merged: usize,
+    pub pruned: usize,
+    pub after: usize,
+}
+
+impl VectorMemory {
+    /// Ciclo de "sueño" (consolidación darwiniana):
+    /// 1) decae la aptitud de todos (presión de olvido);
+    /// 2) **fusiona** recuerdos casi-duplicados (suma accesos, conserva el mejor);
+    /// 3) **poda** los de baja aptitud nunca accedidos.
+    ///
+    /// Conservador por diseño: si es persistente, guarda un snapshot `.bak`
+    /// antes de reescribir — nunca destruye sin copia de seguridad.
+    pub fn consolidate(&self, cfg: &ConsolidationConfig) -> Result<ConsolidationReport> {
+        let mut recs = self.records.lock().unwrap();
+        let before = recs.len();
+
+        // 1) Decaimiento de aptitud.
+        for r in recs.iter_mut() {
+            r.fitness *= cfg.decay;
+        }
+
+        // 2) Fusión de casi-duplicados (greedy contra los ya conservados).
+        let mut kept: Vec<MemoryRecord> = Vec::with_capacity(recs.len());
+        let mut merged = 0usize;
+        for r in recs.drain(..) {
+            if let Some(k) = kept
+                .iter_mut()
+                .find(|k| cosine(&k.embedding, &r.embedding) >= cfg.merge_threshold)
+            {
+                k.access_count += r.access_count;
+                k.fitness = k.fitness.max(r.fitness);
+                merged += 1;
+            } else {
+                kept.push(r);
+            }
+        }
+
+        // 3) Poda: fuera los de aptitud baja que nunca se usaron.
+        let after_merge = kept.len();
+        kept.retain(|r| r.fitness >= cfg.prune_floor || r.access_count > 0);
+        let pruned = after_merge - kept.len();
+
+        *recs = kept;
+        let after = recs.len();
+        let snapshot = recs.clone();
+        drop(recs);
+
+        // Persistencia: snapshot + reescritura completa.
+        if let Some(path) = &self.path {
+            if path.exists() {
+                let bak = path.with_extension("jsonl.bak");
+                let _ = std::fs::copy(path, &bak);
+            }
+            rewrite_jsonl(path, &snapshot)?;
+        }
+
+        Ok(ConsolidationReport {
+            before,
+            merged,
+            pruned,
+            after,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(emb: Vec<f32>, fitness: f32, access: u32) -> MemoryRecord {
+        MemoryRecord {
+            id: Uuid::new_v4().to_string(),
+            content: format!("emb{emb:?}"),
+            embedding: emb,
+            fitness,
+            access_count: access,
+        }
+    }
+
+    #[test]
+    fn consolidation_merges_duplicates_and_prunes_weak() {
+        let mem = VectorMemory::default_local();
+        {
+            let mut r = mem.records.lock().unwrap();
+            r.push(rec(vec![1.0, 0.0, 0.0], 0.5, 1)); // usado
+            r.push(rec(vec![1.0, 0.0, 0.0], 0.5, 0)); // casi-dup → se fusiona
+            r.push(rec(vec![0.0, 1.0, 0.0], 0.05, 0)); // débil y sin uso → poda
+        }
+        let report = mem.consolidate(&ConsolidationConfig::default()).unwrap();
+        assert_eq!(report.before, 3);
+        assert_eq!(report.merged, 1);
+        assert_eq!(report.pruned, 1);
+        assert_eq!(report.after, 1);
+        assert_eq!(mem.len(), 1);
+    }
+
+    #[test]
+    fn consolidation_keeps_accessed_memories() {
+        let mem = VectorMemory::default_local();
+        {
+            let mut r = mem.records.lock().unwrap();
+            r.push(rec(vec![0.0, 0.0, 1.0], 0.01, 5)); // aptitud baja pero MUY usada
+        }
+        let report = mem.consolidate(&ConsolidationConfig::default()).unwrap();
+        assert_eq!(report.pruned, 0); // no se poda lo que se usa
+        assert_eq!(mem.len(), 1);
+    }
+}
+
+fn rewrite_jsonl(path: &PathBuf, records: &[MemoryRecord]) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            std::fs::create_dir_all(dir).map_err(|e| AionError::Memory(e.to_string()))?;
+        }
+    }
+    let mut buf = String::new();
+    for r in records {
+        buf.push_str(&serde_json::to_string(r)?);
+        buf.push('\n');
+    }
+    std::fs::write(path, buf).map_err(|e| AionError::Memory(e.to_string()))
+}
+
 fn load_jsonl(path: &PathBuf) -> Result<Vec<MemoryRecord>> {
     if !path.exists() {
         return Ok(Vec::new());

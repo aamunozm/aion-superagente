@@ -12,7 +12,7 @@ mod embedder;
 mod vector;
 
 pub use embedder::OllamaEmbedder;
-pub use vector::{MemoryRecord, VectorMemory};
+pub use vector::{ConsolidationConfig, ConsolidationReport, MemoryRecord, VectorMemory};
 
 /// Calcula la similitud coseno entre dos vectores. Devuelve 0.0 si las
 /// dimensiones difieren o algún vector es nulo.

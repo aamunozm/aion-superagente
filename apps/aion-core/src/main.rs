@@ -61,6 +61,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let n: i64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(100);
             run_skill(n).await?;
         }
+        Some("sleep") => {
+            run_sleep().await?;
+        }
         _ => smoke_test(&info),
     }
     Ok(())
@@ -234,6 +237,26 @@ async fn run_skill(n: i64) -> Result<(), Box<dyn std::error::Error>> {
     println!("✅ resultado: {}", out.output["result"]);
     println!(
         "\x1b[2m(código WASM ejecutado sin acceso a disco/red — radio de daño acotado)\x1b[0m"
+    );
+    Ok(())
+}
+
+/// "Sueño" F4: ciclo de consolidación darwiniana de la memoria persistente.
+async fn run_sleep() -> Result<(), Box<dyn std::error::Error>> {
+    use aion_memory::ConsolidationConfig;
+    let path = memory_path();
+    let mem = VectorMemory::persistent_local(&path)?;
+    println!(
+        "🌙 AION entra en fase de sueño · {} recuerdos ({path})",
+        mem.len()
+    );
+    let report = mem.consolidate(&ConsolidationConfig::default())?;
+    println!("   decaimiento de aptitud aplicado");
+    println!("   🔗 fusionados (casi-duplicados): {}", report.merged);
+    println!("   ✂️  podados (débiles sin uso):    {}", report.pruned);
+    println!(
+        "☀️  despierta · {} → {} recuerdos (snapshot en {path}.bak)",
+        report.before, report.after
     );
     Ok(())
 }
