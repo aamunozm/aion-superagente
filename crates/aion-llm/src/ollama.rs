@@ -58,6 +58,36 @@ impl OllamaEngine {
             "options": options,
         })
     }
+
+    /// Genera una respuesta a partir de un prompt + una imagen (base64) — visión
+    /// multimodal. Requiere un modelo con visión (p. ej. gemma 4 abliterated).
+    pub async fn generate_with_image(&self, prompt: &str, image_b64: &str) -> Result<Message> {
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": [{ "role": "user", "content": prompt, "images": [image_b64] }],
+            "stream": false,
+            "think": false,
+        });
+        let resp = self
+            .http
+            .post(format!("{}/api/chat", self.base_url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AionError::Llm(format!("petición a Ollama falló: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(AionError::Llm(format!("Ollama devolvió {}", resp.status())));
+        }
+        let parsed: OllamaChatResponse = resp
+            .json()
+            .await
+            .map_err(|e| AionError::Llm(format!("respuesta inválida de Ollama: {e}")))?;
+        Ok(Message {
+            role: Role::Assistant,
+            content: parsed.message.content,
+            thinking: None,
+        })
+    }
 }
 
 #[async_trait]

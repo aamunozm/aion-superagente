@@ -88,6 +88,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("sync") => {
             run_sync_demo()?;
         }
+        Some("vision") => {
+            let path = args.get(1).cloned().unwrap_or_default();
+            let prompt = if args.len() > 2 {
+                args[2..].join(" ")
+            } else {
+                "Describe la imagen.".into()
+            };
+            run_vision(&path, &prompt).await?;
+        }
         _ => smoke_test(&info),
     }
     Ok(())
@@ -714,6 +723,30 @@ fn run_cognition() {
         cal.verdict(),
         cal.samples()
     );
+}
+
+/// Visión multimodal: AION describe/razona sobre una imagen local.
+async fn run_vision(path: &str, prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use base64::Engine as _;
+    if path.is_empty() {
+        return Err("uso: aion-core vision <ruta_imagen> [prompt]".into());
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("no se pudo leer {path}: {e}"))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+    // Modelo con visión (abliterated). Configurable con AION_VISION_MODEL.
+    let model = std::env::var("AION_VISION_MODEL")
+        .unwrap_or_else(|_| "huihui_ai/gemma-4-abliterated:12b".into());
+    let engine = OllamaEngine::new("http://localhost:11434", &model);
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+
+    println!("👁  AION mira: {path}\n🧑 {prompt}\n");
+    let msg = engine.generate_with_image(prompt, &b64).await?;
+    println!("💬 {}", msg.content.trim());
+    Ok(())
 }
 
 /// Demo de sincronización local-first cifrada E2E entre dos dispositivos.
