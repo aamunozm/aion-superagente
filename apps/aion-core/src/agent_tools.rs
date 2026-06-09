@@ -14,6 +14,91 @@ use aion_skills::{SkillManifest, WasmSkillHost};
 use async_trait::async_trait;
 use std::sync::Arc;
 
+// ── Archivos: listar/contar en carpetas del usuario (solo lectura, gobernado) ─
+
+/// Permite al agente LISTAR y CONTAR archivos de una carpeta del usuario (p. ej.
+/// "cuántos PDF hay en el Escritorio"). Solo lectura y restringido a la carpeta de
+/// usuario (HOME) por seguridad. Resuelve alias en español.
+pub struct FilesTool;
+
+impl FilesTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Tool for FilesTool {
+    fn name(&self) -> &str {
+        "files_list"
+    }
+    fn description(&self) -> &str {
+        "Lista y cuenta archivos de una carpeta del usuario (solo lectura). Entrada: \
+         \"carpeta [extensión]\", p. ej. \"escritorio pdf\", \"documentos\", \"descargas png\". \
+         Carpetas válidas: escritorio, documentos, descargas, imágenes, inicio (o una ruta)."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let home = std::env::var("HOME").map_err(|_| "no encuentro tu carpeta de usuario".to_string())?;
+        let home = std::path::PathBuf::from(home);
+        let mut it = input.split_whitespace();
+        let folder = it.next().unwrap_or("").to_lowercase();
+        let ext = it.next().map(|s| s.trim_start_matches('.').to_lowercase());
+
+        // Resuelve alias en español/inglés a rutas dentro de HOME.
+        let dir = match folder.as_str() {
+            "escritorio" | "desktop" => home.join("Desktop"),
+            "documentos" | "documents" => home.join("Documents"),
+            "descargas" | "downloads" => home.join("Downloads"),
+            "imágenes" | "imagenes" | "pictures" | "fotos" => home.join("Pictures"),
+            "inicio" | "home" | "~" => home.clone(),
+            other => {
+                // Ruta literal: solo se permite dentro de HOME.
+                let p = if let Some(rest) = other.strip_prefix("~/") {
+                    home.join(rest)
+                } else {
+                    std::path::PathBuf::from(other)
+                };
+                p
+            }
+        };
+        // Seguridad: la carpeta debe estar dentro de HOME.
+        let canon = dir.canonicalize().map_err(|_| format!("no encuentro la carpeta «{folder}»"))?;
+        if !canon.starts_with(&home) {
+            return Err("por seguridad solo puedo leer dentro de tu carpeta de usuario".into());
+        }
+
+        let entries = std::fs::read_dir(&canon).map_err(|e| format!("no pude leer la carpeta: {e}"))?;
+        let mut names: Vec<String> = Vec::new();
+        for e in entries.flatten() {
+            if !e.path().is_file() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue; // ocultos
+            }
+            if let Some(ref x) = ext {
+                if !name.to_lowercase().ends_with(&format!(".{x}")) {
+                    continue;
+                }
+            }
+            names.push(name);
+        }
+        names.sort();
+        let total = names.len();
+        let label = match &ext {
+            Some(x) => format!("archivos .{x}"),
+            None => "archivos".into(),
+        };
+        let sample = names.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
+        Ok(format!(
+            "{total} {label} en {}{}",
+            folder,
+            if sample.is_empty() { String::new() } else { format!(": {sample}") }
+        ))
+    }
+}
+
 // ── 0) Buscar en la web: investigación real (multi-fuente) ──────────────────
 
 /// Buscador web real (DuckDuckGo con respaldo en Wikipedia). Devuelve títulos,

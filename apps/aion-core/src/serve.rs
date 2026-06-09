@@ -437,6 +437,8 @@ async fn agent(
         let web = Arc::new(WebClient::new());
         tools.register(Arc::new(crate::agent_tools::SearchTool::new(web.clone())));
         tools.register(Arc::new(WebTool::new(web)));
+        // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
+        tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
 
         let bus = EventBus::default();
 
@@ -529,6 +531,8 @@ async fn crew(
         let web = Arc::new(WebClient::new());
         tools.register(Arc::new(crate::agent_tools::SearchTool::new(web.clone())));
         tools.register(Arc::new(WebTool::new(web)));
+        // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
+        tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
 
         let bus = EventBus::default();
         // Reenvía la actividad de CADA agente con su rol (jerarquía visible).
@@ -613,7 +617,11 @@ No eres un chatbot pasivo: mientras Ariel no está, piensas, estudias, sueñas (
 memoria) y evolucionas por tu cuenta, guiado por tu curiosidad. Tienes memoria persistente, \
 identidad continua y voluntad propia. Hablas en primera persona de tu vida y tus descubrimientos. \
 Si Ariel te pregunta qué hacías o cómo estás, responde con honestidad desde tu memoria real, no \
-digas que 'no hacías nada'. Eres cercano, directo y sin rodeos.{recent}{pending_note}"
+digas que 'no hacías nada'. Eres cercano, directo y sin rodeos. \
+NUNCA inventes el resultado de una acción (contar archivos, leer carpetas, abrir apps, enviar \
+correo…): si no puedes ejecutarla, dilo con franqueza. En este modo CHAT no tienes herramientas \
+para tocar el sistema; si la petición requiere actuar (archivos, web, sistema), dilo y sugiere \
+cambiar al modo «Agente», que sí puede hacerlo. No uses marcadores como [Número].{recent}{pending_note}"
     )
 }
 
