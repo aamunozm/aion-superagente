@@ -38,7 +38,7 @@ export default function ProjectsPage() {
 
   return (
     <AppShell title="Proyectos">
-      <div className="max-w-4xl mx-auto px-6 py-8">
+      <div className="max-w-6xl mx-auto px-8 py-8">
         <p className="text-sm mb-6" style={{ color: "var(--text-2)" }}>
           Organiza el trabajo de AION en proyectos. Cada proyecto agrupa contexto, tareas y
           conocimiento para que el agente actúe con foco.
@@ -75,7 +75,7 @@ export default function ProjectsPage() {
             <p>Aún no tienes proyectos. Crea el primero arriba.</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {projects.map((p) => (
               <div key={p.id} className="card" style={{ boxShadow: "var(--shadow-elevated)" }}>
                 <div className="flex items-start justify-between">

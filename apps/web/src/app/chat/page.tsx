@@ -157,7 +157,7 @@ export default function ChatPage() {
 
   return (
     <AppShell title="Chat">
-      <div className="flex flex-col h-full max-w-3xl mx-auto w-full px-4">
+      <div className="flex flex-col h-full max-w-4xl mx-auto w-full px-6">
       <div className="flex items-center gap-2 py-3 shrink-0">
         <span className="text-xs" style={{ color: "var(--text-3)" }}>
           {busy ? "AION trabajando…" : "gemma4-reason · local"}

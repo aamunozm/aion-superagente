@@ -13,10 +13,11 @@
     "windows": [
       {
         "title": "AION",
-        "width": 1100,
-        "height": 760,
-        "minWidth": 800,
-        "minHeight": 600,
+        "width": 1480,
+        "height": 940,
+        "minWidth": 1080,
+        "minHeight": 700,
+        "center": true,
         "theme": null
       }
     ],

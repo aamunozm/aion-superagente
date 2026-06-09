@@ -96,7 +96,7 @@ export default function MemoryPage() {
 
   return (
     <AppShell title="Memoria">
-      <div className="max-w-2xl mx-auto px-4 py-8">
+      <div className="max-w-3xl mx-auto px-8 py-8">
 
       <div className="card mb-6" style={{ boxShadow: "var(--shadow-elevated)" }}>
         <p className="text-sm" style={{ color: "var(--text-3)" }}>

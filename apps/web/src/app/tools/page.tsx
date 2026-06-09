@@ -58,12 +58,12 @@ export default function ToolsPage() {
 
   return (
     <AppShell title="Herramientas">
-      <div className="max-w-4xl mx-auto px-6 py-8">
+      <div className="max-w-6xl mx-auto px-8 py-8">
         <p className="text-sm mb-6" style={{ color: "var(--text-2)" }}>
           Conecta capacidades a AION. Las activas ya las usa el agente; las disponibles se
           activan concediendo permisos del sistema.
         </p>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           {TOOLS.map((t) => {
             const s = STATUS_STYLE[t.status];
             const on = t.status === "activa" || enabled[t.id];
