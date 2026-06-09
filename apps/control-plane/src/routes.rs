@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(|| async { "ok" }))
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
+        .route("/auth/reset", post(reset))
         .route("/auth/me", get(me))
         .route("/billing/license", get(license))
         .route("/billing/checkout", post(billing::checkout))
@@ -64,15 +65,70 @@ async fn register(State(st): State<AppState>, Json(body): Json<Credentials>) -> 
     };
     match st.store.create_user(&body.email, &hash) {
         Ok(user) => {
+            // Código de recuperación (local-first, sin email): se muestra UNA vez y
+            // solo se guarda su hash. Es la forma de recuperar la contraseña.
+            let recovery_code = gen_recovery_code();
+            if let Ok(rhash) = auth::hash_password(&recovery_code) {
+                let _ = st.store.set_recovery(&user.id, &rhash);
+            }
             let token = auth::issue_jwt(&st.jwt_secret, &user.id, &user.email, JWT_TTL_SECS)
                 .unwrap_or_default();
             (
                 StatusCode::CREATED,
-                Json(json!({"id": user.id, "email": user.email, "token": token})),
+                Json(json!({
+                    "id": user.id, "email": user.email, "token": token,
+                    "recovery_code": recovery_code
+                })),
             )
                 .into_response()
         }
         Err(e) => (StatusCode::CONFLICT, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+/// Genera un código de recuperación legible tipo XXXX-XXXX-XXXX.
+fn gen_recovery_code() -> String {
+    let raw = uuid::Uuid::new_v4().simple().to_string().to_uppercase();
+    format!("{}-{}-{}", &raw[0..4], &raw[4..8], &raw[8..12])
+}
+
+#[derive(Deserialize)]
+pub struct ResetReq {
+    email: String,
+    recovery_code: String,
+    new_password: String,
+}
+
+/// Recuperación: email + código de recuperación → nueva contraseña.
+async fn reset(State(st): State<AppState>, Json(body): Json<ResetReq>) -> impl IntoResponse {
+    if body.new_password.len() < 8 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "contraseña mínima 8 caracteres"})),
+        )
+            .into_response();
+    }
+    let user = match st.store.find_by_email(&body.email) {
+        Some(u) => u,
+        None => {
+            return (StatusCode::UNAUTHORIZED, Json(json!({"error": "email o código inválido"})))
+                .into_response()
+        }
+    };
+    let code = body.recovery_code.trim().to_uppercase();
+    if user.recovery_hash.is_empty() || !auth::verify_password(&code, &user.recovery_hash) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "email o código inválido"})))
+            .into_response();
+    }
+    let new_hash = match auth::hash_password(&body.new_password) {
+        Ok(h) => h,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response()
+        }
+    };
+    match st.store.update_password(&user.id, &new_hash) {
+        Ok(()) => (StatusCode::OK, Json(json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
     }
 }
 

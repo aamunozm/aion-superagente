@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import AppShell from "@/components/AppShell";
 import {
   memoryExport,
   memoryImport,
@@ -94,13 +94,8 @@ export default function MemoryPage() {
   }
 
   return (
-    <main className="min-h-screen max-w-2xl mx-auto px-4 py-8">
-      <header className="flex items-center gap-3 mb-8">
-        <h1 className="font-display text-2xl font-bold">Memoria de AION</h1>
-        <Link href="/chat" className="ml-auto text-sm" style={{ color: "var(--accent)" }}>
-          ← Chat
-        </Link>
-      </header>
+    <AppShell title="Memoria">
+      <div className="max-w-2xl mx-auto px-4 py-8">
 
       <div className="card mb-6" style={{ boxShadow: "var(--shadow-elevated)" }}>
         <p className="text-sm" style={{ color: "var(--text-3)" }}>
@@ -194,6 +189,7 @@ export default function MemoryPage() {
           {error} — ¿está corriendo <code>aion-core serve</code>?
         </p>
       )}
-    </main>
+      </div>
+    </AppShell>
   );
 }

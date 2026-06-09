@@ -14,6 +14,9 @@ pub struct User {
     pub email: String,
     pub password_hash: String,
     pub tier: String,
+    /// Hash (Argon2) del código de recuperación de contraseña (local-first, sin email).
+    #[serde(default)]
+    pub recovery_hash: String,
 }
 
 /// Contrato de persistencia de usuarios.
@@ -25,6 +28,10 @@ pub trait UserStore: Send + Sync {
     /// Cubierto por tests; el uso en producción llega con el webhook.
     #[allow(dead_code)]
     fn set_tier(&self, id: &str, tier: &str) -> Result<(), String>;
+    /// Guarda el hash del código de recuperación (al registrarse).
+    fn set_recovery(&self, id: &str, recovery_hash: &str) -> Result<(), String>;
+    /// Cambia la contraseña (al recuperar).
+    fn update_password(&self, id: &str, password_hash: &str) -> Result<(), String>;
 }
 
 /// Implementación en memoria (solo tests; no persiste entre reinicios).
@@ -45,6 +52,7 @@ impl UserStore for InMemoryStore {
             email: email.to_string(),
             password_hash: password_hash.to_string(),
             tier: "free".to_string(),
+            recovery_hash: String::new(),
         };
         users.insert(user.id.clone(), user.clone());
         Ok(user)
@@ -68,6 +76,20 @@ impl UserStore for InMemoryStore {
         let mut users = self.users.lock().unwrap();
         let u = users.get_mut(id).ok_or("usuario no encontrado")?;
         u.tier = tier.to_string();
+        Ok(())
+    }
+
+    fn set_recovery(&self, id: &str, recovery_hash: &str) -> Result<(), String> {
+        let mut users = self.users.lock().unwrap();
+        let u = users.get_mut(id).ok_or("usuario no encontrado")?;
+        u.recovery_hash = recovery_hash.to_string();
+        Ok(())
+    }
+
+    fn update_password(&self, id: &str, password_hash: &str) -> Result<(), String> {
+        let mut users = self.users.lock().unwrap();
+        let u = users.get_mut(id).ok_or("usuario no encontrado")?;
+        u.password_hash = password_hash.to_string();
         Ok(())
     }
 }
@@ -132,6 +154,7 @@ impl UserStore for FileStore {
             email: email.to_string(),
             password_hash: password_hash.to_string(),
             tier: "free".to_string(),
+            recovery_hash: String::new(),
         };
         // Append rápido + el flush completo garantiza consistencia.
         if let Some(dir) = self.path.parent() {
@@ -167,6 +190,24 @@ impl UserStore for FileStore {
         let mut users = self.users.lock().unwrap();
         let u = users.get_mut(id).ok_or("usuario no encontrado")?;
         u.tier = tier.to_string();
+        let snapshot = users.clone();
+        drop(users);
+        self.flush(&snapshot)
+    }
+
+    fn set_recovery(&self, id: &str, recovery_hash: &str) -> Result<(), String> {
+        let mut users = self.users.lock().unwrap();
+        let u = users.get_mut(id).ok_or("usuario no encontrado")?;
+        u.recovery_hash = recovery_hash.to_string();
+        let snapshot = users.clone();
+        drop(users);
+        self.flush(&snapshot)
+    }
+
+    fn update_password(&self, id: &str, password_hash: &str) -> Result<(), String> {
+        let mut users = self.users.lock().unwrap();
+        let u = users.get_mut(id).ok_or("usuario no encontrado")?;
+        u.password_hash = password_hash.to_string();
         let snapshot = users.clone();
         drop(users);
         self.flush(&snapshot)

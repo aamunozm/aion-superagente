@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import AppShell from "@/components/AppShell";
 import {
   agentStream,
   chatStream,
@@ -149,17 +149,13 @@ export default function ChatPage() {
   }
 
   return (
-    <main className="min-h-screen flex flex-col max-w-3xl mx-auto px-4">
-      <header className="flex items-center gap-2 py-4 border-b" style={{ borderColor: "var(--border)" }}>
-        <span className="w-2.5 h-2.5 rounded-full" style={{ background: busy ? "var(--accent)" : "var(--accent)" }} />
-        <span className="font-display font-semibold">AION</span>
+    <AppShell title="Chat">
+      <div className="flex flex-col h-full max-w-3xl mx-auto w-full px-4">
+      <div className="flex items-center gap-2 py-3 shrink-0">
         <span className="text-xs" style={{ color: "var(--text-3)" }}>
-          {busy ? "trabajando…" : "gemma4-reason · local"}
+          {busy ? "AION trabajando…" : "gemma4-reason · local"}
         </span>
-        <Link href="/memory" className="ml-auto text-xs mr-3" style={{ color: "var(--accent)" }}>
-          🧠 Memoria
-        </Link>
-        <div className="flex gap-1 p-1 rounded-full" style={{ background: "var(--surface-2)" }}>
+        <div className="ml-auto flex gap-1 p-1 rounded-full" style={{ background: "var(--surface-2)" }}>
           {(["chat", "agent"] as const).map((m) => (
             <button
               key={m}
@@ -174,7 +170,7 @@ export default function ChatPage() {
             </button>
           ))}
         </div>
-      </header>
+      </div>
 
       <div className="flex-1 overflow-y-auto py-6 flex flex-col gap-6">
         {!modelReady && (
@@ -277,6 +273,7 @@ export default function ChatPage() {
           {busy ? "…" : "Enviar"}
         </button>
       </form>
-    </main>
+      </div>
+    </AppShell>
   );
 }

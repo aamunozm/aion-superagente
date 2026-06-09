@@ -5,7 +5,12 @@ export const CONTROL_URL =
 export const BRIDGE_URL =
   process.env.NEXT_PUBLIC_BRIDGE_URL ?? "http://127.0.0.1:8765";
 
-export type AuthResult = { id: string; email: string; token: string };
+export type AuthResult = {
+  id: string;
+  email: string;
+  token: string;
+  recovery_code?: string;
+};
 
 async function authCall(path: string, email: string, password: string): Promise<AuthResult> {
   const res = await fetch(`${CONTROL_URL}${path}`, {
@@ -22,6 +27,18 @@ export const register = (email: string, password: string) =>
   authCall("/auth/register", email, password);
 export const login = (email: string, password: string) =>
   authCall("/auth/login", email, password);
+
+/// Recuperación de contraseña (local-first): email + código de recuperación + nueva.
+export const resetPassword = async (email: string, code: string, newPassword: string) => {
+  const res = await fetch(`${CONTROL_URL}/auth/reset`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, recovery_code: code, new_password: newPassword }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? "código o email inválido");
+  return data as { ok: boolean };
+};
 
 export type ChatEvent =
   | { kind: "thinking"; text: string }
