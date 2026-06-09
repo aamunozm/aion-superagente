@@ -79,6 +79,10 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
              con franqueza que no pudiste obtenerlo; jamás rellenes con un valor plausible ni \
              con marcadores como [Número]. Tampoco uses 'remember' para guardar algo que no \
              confirmaste.\n\
+             • MEMORIA SOLO PARA LO DURADERO: usa 'remember' únicamente para conocimiento \
+             estable (preferencias, decisiones, aprendizajes del usuario). NUNCA memorices \
+             estado efímero que caduca (cuántos archivos hay, qué equipos están en la red, la \
+             hora): eso se recalcula con la herramienta cada vez.\n\
              • No inventes 'Observation' (yo la añado).\n\
              • ARCHIVOS/CARPETAS del usuario (contar, listar, «cuántos PDF hay en el \
              escritorio»): usa SIEMPRE files_list. NUNCA uses web_search, memory_search ni \

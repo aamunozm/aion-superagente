@@ -367,12 +367,15 @@ async fn chat(
         let answer = answer_acc.lock().unwrap().clone();
         if !answer.trim().is_empty() {
             convo.lock().unwrap().push(Message::assistant(&answer));
-            // Auto-memoria: guarda el intercambio en la memoria de largo plazo.
-            if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
-                let mut a = answer;
-                a.truncate(600);
-                let entry = format!("[conversación] yo: {prompt} · AION: {a}");
-                let _ = mem.store(&entry).await;
+            // Auto-memoria: solo guarda CONOCIMIENTO DURADERO, nunca estado efímero
+            // (conteos de archivos, escaneos de red, hora…) que envejece mal.
+            if worth_long_term(&prompt, &answer) {
+                if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+                    let mut a = answer;
+                    a.truncate(600);
+                    let entry = format!("[conversación] yo: {prompt} · AION: {a}");
+                    let _ = mem.store(&entry).await;
+                }
             }
         }
     });
@@ -798,6 +801,35 @@ fn is_trivial_query(prompt: &str) -> bool {
         return true;
     }
     p.is_empty() || p.len() < 4
+}
+
+/// ¿Este intercambio merece ir a la memoria de LARGO PLAZO? La memoria permanente
+/// es para lo ESTABLE (quién eres, preferencias, decisiones, aprendizajes), no para
+/// el ESTADO ACTUAL del sistema, que cambia y envejece mal: cuántos archivos hay en
+/// una carpeta, qué equipos están en la red ahora, la hora, el clima… Eso se calcula
+/// en el momento con una herramienta; memorizarlo solo genera datos obsoletos.
+fn worth_long_term(prompt: &str, answer: &str) -> bool {
+    let p = prompt.trim().to_lowercase();
+    // Saludos / chitchat → no es conocimiento.
+    if is_trivial_query(prompt) {
+        return false;
+    }
+    // Estado efímero: conteos y consultas de "ahora mismo" que caducan.
+    const EPHEMERAL: [&str; 22] = [
+        "cuántos", "cuantos", "cuántas", "cuantas", "archivos", "documentos", "pdf",
+        "carpeta", "escritorio", "descargas", "equipos", "dispositivos", "conectados",
+        "red local", "ip", "qué hora", "que hora", "fecha de hoy", "clima", "tiempo hace",
+        "batería", "bateria",
+    ];
+    if EPHEMERAL.iter().any(|k| p.contains(k)) {
+        return false;
+    }
+    // Si la respuesta es básicamente una lista/escaneo de estado, tampoco.
+    let a = answer.to_lowercase();
+    if a.contains("equipos conectados en la red") || a.contains("archivos .") {
+        return false;
+    }
+    true
 }
 
 /// ¿La pregunta MERECE razonamiento profundo? Activar el "thinking" de gemma para
