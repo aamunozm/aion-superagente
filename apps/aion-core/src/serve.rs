@@ -68,6 +68,17 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         convo: Arc::new(std::sync::Mutex::new(Vec::new())),
     };
 
+    // PRECARGA: deja el modelo local caliente en memoria para que el PRIMER mensaje
+    // no pague la carga (2–9 s). En segundo plano para no bloquear el arranque.
+    tokio::spawn(async {
+        let p = crate::provider::load();
+        if p.kind != "external" {
+            OllamaEngine::new(OllamaEngine::base_url_from_env(), &p.model)
+                .warmup()
+                .await;
+        }
+    });
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -276,14 +287,25 @@ async fn chat(
     let mode = crate::prompts::route(&*engine, &body.prompt).await;
     // EMPATÍA: adapta el tono al estado del usuario (frustración, prisa, confusión…).
     let empathy = crate::empathy::directive(&crate::empathy::read_state(&body.prompt));
+    // ¿Razonamiento profundo? Solo si el usuario lo pidió Y la pregunta lo amerita.
+    let deep = body.think && needs_deep_thinking(&body.prompt);
+    // Cuando razona, que lo haga CONCISO: evita la divagación (varios "intentos",
+    // repeticiones) que dispara los tokens sin mejorar la calidad.
+    let think_note = if deep {
+        "\n\nAl razonar: hazlo BREVE y enfocado. Una sola línea de pensamiento, sin repetir \
+         ni explorar múltiples intentos. Ve directo a la conclusión."
+    } else {
+        ""
+    };
     let self_ctx = format!(
-        "{}\n\n{}{}{}",
+        "{}\n\n{}{}{}{}",
         self_awareness_prompt(),
         crate::prompts::persona(&mode),
         match &empathy {
             Some(d) => format!("\n\n{d}"),
             None => String::new(),
         },
+        think_note,
         if grounding.is_empty() {
             String::new()
         } else {
@@ -307,7 +329,7 @@ async fn chat(
             // Razona solo si el usuario lo pidió Y la pregunta lo amerita: lo trivial
             // (saludo, recordar el nombre) responde al instante sin cadena de pensamiento.
             messages,
-            think: body.think && needs_deep_thinking(&prompt),
+            think: deep,
             temperature: Some(1.0),
             max_tokens: None,
         };

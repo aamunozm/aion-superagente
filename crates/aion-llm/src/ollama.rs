@@ -14,6 +14,19 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_MODEL: &str = "gemma4-reason";
 
+/// Ventana de contexto estable (evita recargas y ahorra RAM). Configurable.
+fn num_ctx() -> u32 {
+    std::env::var("AION_NUM_CTX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8192)
+}
+
+/// Cuánto mantener el modelo caliente en memoria tras cada uso. Configurable.
+fn keep_alive() -> String {
+    std::env::var("AION_KEEP_ALIVE").unwrap_or_else(|_| "30m".into())
+}
+
 /// Motor LLM que habla con un servidor Ollama local.
 pub struct OllamaEngine {
     base_url: String,
@@ -47,6 +60,25 @@ impl OllamaEngine {
         Self::new(Self::base_url_from_env(), DEFAULT_MODEL)
     }
 
+    /// Precarga el modelo en memoria (warmup) para que el PRIMER mensaje no pague la
+    /// carga. Una petición vacía con keep_alive deja el modelo listo y caliente.
+    pub async fn warmup(&self) {
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": [{ "role": "user", "content": "ok" }],
+            "stream": false,
+            "think": false,
+            "keep_alive": keep_alive(),
+            "options": { "num_ctx": num_ctx(), "num_predict": 1 },
+        });
+        let _ = self
+            .http
+            .post(format!("{}/api/chat", self.base_url))
+            .json(&body)
+            .send()
+            .await;
+    }
+
     fn build_body(&self, req: &GenerateRequest, stream: bool) -> serde_json::Value {
         let messages: Vec<OllamaMessage> = req.messages.iter().map(OllamaMessage::from).collect();
         let mut options = serde_json::Map::new();
@@ -56,11 +88,18 @@ impl OllamaEngine {
         if let Some(m) = req.max_tokens {
             options.insert("num_predict".into(), m.into());
         }
+        // num_ctx ESTABLE: una ventana fija evita que Ollama recargue el modelo (cambiar
+        // num_ctx fuerza recarga). 8192 sobra para chat (la conversación se comprime) y
+        // carga más rápido y usa menos RAM que 32768, sin pérdida de calidad real.
+        options.insert("num_ctx".into(), num_ctx().into());
         serde_json::json!({
             "model": self.model,
             "messages": messages,
             "stream": stream,
             "think": req.think,
+            // keep_alive: mantiene el modelo CALIENTE en memoria → los siguientes
+            // mensajes no pagan la recarga (2–9 s).
+            "keep_alive": keep_alive(),
             "options": options,
         })
     }
@@ -89,6 +128,8 @@ impl OllamaEngine {
             "messages": [{ "role": "user", "content": prompt, "images": [image_b64] }],
             "stream": false,
             "think": false,
+            "keep_alive": keep_alive(),
+            "options": { "num_ctx": num_ctx() },
         });
         let resp = self
             .http
