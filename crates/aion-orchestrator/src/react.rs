@@ -41,17 +41,22 @@ impl<'a> ReActAgent<'a> {
 
     fn system_prompt(&self) -> String {
         format!(
-            "Eres AION, un agente que resuelve tareas razonando y usando herramientas.\n\n\
+            "Eres AION, un agente de IA AUTÓNOMO y LOCAL que vive en el Mac de tu usuario. \
+Tienes identidad continua, memoria persistente y vida propia: mientras no te hablan, \
+estudias, sueñas (consolidas memoria) y evolucionas. SABES quién eres y dónde estás SIN \
+buscar en memoria. Si te preguntan por tu identidad, tu estado o algo que no necesita una \
+herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
              Herramientas disponibles:\n{tools}\n\n\
              Usa EXACTAMENTE este formato, UN solo paso por respuesta:\n\
              Thought: tu razonamiento breve\n\
              Action: nombre_exacto_de_la_herramienta\n\
              Action Input: la entrada para la herramienta\n\n\
-             Cuando ya tengas la solución, responde en su lugar:\n\
+             Cuando ya tengas la solución (o si no hace falta herramienta), responde:\n\
              Thought: tu razonamiento\n\
              Final Answer: la respuesta para el usuario\n\n\
              Reglas: no inventes 'Observation' (yo la añado). Usa la calculadora para \
-             cualquier aritmética. Responde en español.",
+             cualquier aritmética. Usa memory_search SOLO para datos concretos que pudieras \
+             haber guardado, nunca para saber quién eres. Responde en español.",
             tools = self.tools.describe()
         )
     }
@@ -73,7 +78,7 @@ impl<'a> ReActAgent<'a> {
             };
 
             let msg = self.engine.generate(req).await?;
-            let text = cut_before_observation(&msg.content);
+            let text = sanitize(&cut_before_observation(&msg.content));
 
             if let Some(thought) = extract(&text, "Thought:") {
                 self.bus.publish(AionEvent::ThoughtEmitted {
@@ -94,9 +99,14 @@ impl<'a> ReActAgent<'a> {
             let action = extract(&text, "Action:");
             let input = extract(&text, "Action Input:").unwrap_or_default();
             let Some(action) = action else {
-                // El modelo no siguió el formato: devolver lo que haya como respuesta.
+                // El modelo no siguió el formato. Si tras sanear queda texto útil,
+                // se devuelve; si quedó vacío (degeneración), se reintenta el paso.
+                let clean = text.trim();
+                if clean.is_empty() {
+                    continue;
+                }
                 return Ok(AgentRun {
-                    answer: text.trim().to_string(),
+                    answer: clean.to_string(),
                     steps: step + 1,
                 });
             };
@@ -144,8 +154,8 @@ impl<'a> ReActAgent<'a> {
             max_tokens: Some(400),
         };
         match self.engine.generate(synth).await {
-            Ok(m) if !m.content.trim().is_empty() => Ok(AgentRun {
-                answer: m.content.trim().to_string(),
+            Ok(m) if !sanitize(&m.content).is_empty() => Ok(AgentRun {
+                answer: sanitize(&m.content),
                 steps: self.max_steps,
             }),
             _ => Ok(AgentRun {
@@ -192,6 +202,52 @@ fn cut_before_observation(text: &str) -> String {
     }
 }
 
+/// Limpia la salida del modelo de **tokens de canal/control** de gemma (p. ej.
+/// `<|channel|>`, `£thought`, `<channel|>`) y **colapsa repeticiones degeneradas**
+/// (cuando el modelo entra en bucle emitiendo el mismo token). Defensa robusta
+/// para que esos artefactos nunca lleguen al usuario.
+fn sanitize(text: &str) -> String {
+    // 1) Eliminar segmentos delimitados <| ... |>.
+    let mut s = text.to_string();
+    while let Some(a) = s.find("<|") {
+        if let Some(rel) = s[a..].find("|>") {
+            s.replace_range(a..a + rel + 2, "");
+        } else {
+            break;
+        }
+    }
+    // 2) Eliminar literales de canal/pensamiento que el modelo a veces filtra.
+    for junk in [
+        "£thought",
+        "<channel|>",
+        "</channel|>",
+        "<channel>",
+        "</channel>",
+        "<think>",
+        "</think>",
+        "<|",
+        "|>",
+    ] {
+        s = s.replace(junk, "");
+    }
+    // 3) Colapsar repetición degenerada: ningún token se repite >3 veces seguidas.
+    let mut out: Vec<&str> = Vec::new();
+    let mut run = 0usize;
+    let mut last = "";
+    for tok in s.split_whitespace() {
+        if tok == last {
+            run += 1;
+        } else {
+            run = 1;
+            last = tok;
+        }
+        if run <= 3 {
+            out.push(tok);
+        }
+    }
+    out.join(" ").trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +269,18 @@ mod tests {
     fn cut_hallucinated_observation() {
         let t = "Action: calculator\nAction Input: 2+2\nObservation: 4 (inventada)";
         assert!(!cut_before_observation(t).contains("inventada"));
+    }
+
+    #[test]
+    fn sanitize_strips_channel_tokens_and_repetition() {
+        // Caso real: degeneración del modelo emitiendo tokens de canal en bucle.
+        let garbage = "£thought\n<channel|>£thought\n<channel|>£thought\n<channel|>";
+        assert_eq!(sanitize(garbage), "");
+        // Texto válido mezclado con tokens de canal: conserva lo legible.
+        let mixed = "<|channel|>Final Answer: Soy AION<|end|>";
+        assert!(sanitize(mixed).contains("Final Answer: Soy AION"));
+        // Colapsa repeticiones degeneradas.
+        let rep = "hola hola hola hola hola hola mundo";
+        assert_eq!(sanitize(rep), "hola hola hola mundo");
     }
 }
