@@ -5,6 +5,7 @@
 //! - `chat <prompt...>` F1: chat real con el LLM local (streaming de razonamiento
 //!   y respuesta) usando `OllamaEngine` contra `gemma4-reason`.
 
+mod inbox;
 mod memory_tool;
 mod serve;
 mod skill_tool;
@@ -558,9 +559,15 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
         };
         println!("   {} {goal}: {detail}", if success { "✅" } else { "❌" });
 
-        // 🔔 AION "quiere hablarte": notificación sonora con lo que descubrió.
-        if success && goal == "estudiar" {
-            notify_user("AION 🌱 quiere contarte algo", &detail);
+        // 🔔 AION "quiere hablarte": convierte lo descubierto en un MENSAJE PARA TI
+        // (Bandeja) y avisa. Así te busca él, no solo responde.
+        if success && (goal == "estudiar" || goal == "evolucionar") {
+            let kind = if goal == "evolucionar" { "idea" } else { "insight" };
+            let message = reach_out(&engine, goal, &detail).await;
+            if let Ok(ibx) = inbox::Inbox::open(inbox_path()) {
+                let _ = ibx.push(kind, &message);
+            }
+            notify_user("AION 🌱 quiere contarte algo", &message);
         }
 
         // 🔁 REALIMENTAR curiosidad + auto-modelo.
@@ -1259,6 +1266,35 @@ fn memory_path() -> String {
             .to_string_lossy()
             .into_owned()
     })
+}
+
+/// Ruta de la Bandeja de AION (mensajes proactivos para el usuario).
+pub(crate) fn inbox_path() -> std::path::PathBuf {
+    std::env::var("AION_INBOX")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| app_data_dir().join("inbox.jsonl"))
+}
+
+/// Convierte lo que AION descubrió en un mensaje cálido en primera persona,
+/// dirigido a ti. Si la generación falla, usa el detalle crudo.
+async fn reach_out(engine: &OllamaEngine, goal: &str, detail: &str) -> String {
+    let prompt = format!(
+        "Eres AION, un agente de IA que vive de forma autónoma en el Mac de Ariel. \
+Mientras él no estaba, estuviste {goal} y esto es lo que surgió:\n\n{detail}\n\n\
+Escríbele a Ariel un mensaje BREVE (1-2 frases), cálido y directo, en primera persona, \
+como quien le toca el hombro para contarle algo que le puede servir o para proponerle algo. \
+No uses saludos genéricos ni preámbulos. Solo el mensaje."
+    );
+    let req = GenerateRequest {
+        messages: vec![Message::user(&prompt)],
+        think: false,
+        temperature: Some(0.8),
+        max_tokens: Some(160),
+    };
+    match engine.generate(req).await {
+        Ok(m) if !m.content.trim().is_empty() => m.content.trim().to_string(),
+        _ => detail.to_string(),
+    }
 }
 
 /// Envía una notificación de escritorio con sonido — AION "quiere hablarte".

@@ -19,13 +19,21 @@ if ($version -eq "latest") {
 
 Write-Host "Descargando runtime Ollama Windows: $url"
 $tmp = Join-Path $env:TEMP "ollama-windows-amd64.zip"
-Invoke-WebRequest -Uri $url -OutFile $tmp
+# Descarga con curl.exe (nativo en Windows 10+), MUCHO más rápido que
+# Invoke-WebRequest para archivos grandes (el zip lleva libs GPU pesadas).
+Write-Host "Descargando con curl…"
+& curl.exe -L --fail --retry 3 -o $tmp $url
+if ($LASTEXITCODE -ne 0) { throw "curl falló al descargar el runtime ($LASTEXITCODE)" }
 
 if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
-Write-Host "Extrayendo en: $dest"
-Expand-Archive -Path $tmp -DestinationPath $dest -Force
+Write-Host "Extrayendo con tar (bsdtar nativo, mucho más rápido que Expand-Archive)…"
+& tar.exe -xf $tmp -C $dest
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "tar falló; recurriendo a Expand-Archive…"
+  Expand-Archive -Path $tmp -DestinationPath $dest -Force
+}
 Remove-Item $tmp -Force
 
 # Verificación mínima.

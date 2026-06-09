@@ -122,3 +122,23 @@ export const memoryImport = (jsonl: string) =>
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonl }),
   });
+
+// ── Bandeja de AION (mensajes proactivos del agente hacia ti) ───────────────
+
+export type InboxMessage = {
+  id: string;
+  at: string;
+  kind: string;
+  text: string;
+  read: boolean;
+};
+
+export const inboxList = () =>
+  jsonCall<{ unread: InboxMessage[]; unread_count: number; all: InboxMessage[] }>("/api/inbox");
+
+export const inboxRead = (id?: string) =>
+  jsonCall<{ ok: boolean }>("/api/inbox/read", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(id ? { id } : {}),
+  });

@@ -1,8 +1,24 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { agentStream, chatStream, type AgentEvent, type ChatEvent } from "@/lib/api";
+import {
+  agentStream,
+  chatStream,
+  inboxList,
+  inboxRead,
+  type AgentEvent,
+  type ChatEvent,
+  type InboxMessage,
+} from "@/lib/api";
+
+const INBOX_ICON: Record<string, string> = {
+  insight: "💡",
+  idea: "✨",
+  pregunta: "❓",
+  saludo: "👋",
+  alerta: "⚠️",
+};
 
 type Step = { kind: "thought" | "action" | "observation"; text: string };
 type Turn = {
@@ -26,7 +42,35 @@ export default function ChatPage() {
   const [think, setThink] = useState(true);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
+  const [reachouts, setReachouts] = useState<InboxMessage[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
+
+  // Bandeja: AION te habla primero. Carga al abrir y sondea cada 30s.
+  useEffect(() => {
+    let alive = true;
+    async function poll() {
+      try {
+        const r = await inboxList();
+        if (!alive) return;
+        if (r.unread.length > 0) {
+          setReachouts((prev) => {
+            const seen = new Set(prev.map((m) => m.id));
+            const fresh = r.unread.filter((m) => !seen.has(m.id));
+            if (fresh.length) inboxRead().catch(() => {});
+            return fresh.length ? [...prev, ...fresh] : prev;
+          });
+        }
+      } catch {
+        /* núcleo aún no disponible: reintenta en el siguiente tick */
+      }
+    }
+    poll();
+    const id = setInterval(poll, 30000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
@@ -96,7 +140,27 @@ export default function ChatPage() {
       </header>
 
       <div className="flex-1 overflow-y-auto py-6 flex flex-col gap-6">
-        {turns.length === 0 && (
+        {reachouts.length > 0 && (
+          <div className="flex flex-col gap-2">
+            <p className="text-xs font-medium" style={{ color: "var(--accent)" }}>
+              🌱 AION te escribió mientras no estabas
+            </p>
+            {reachouts.map((m) => (
+              <div
+                key={m.id}
+                className="card max-w-[90%] self-start"
+                style={{ borderColor: "var(--accent)", borderWidth: 1 }}
+              >
+                <p className="text-xs mb-1" style={{ color: "var(--accent)" }}>
+                  {INBOX_ICON[m.kind] ?? "🌱"} {m.kind} ·{" "}
+                  {new Date(m.at).toLocaleString()}
+                </p>
+                <p className="whitespace-pre-wrap">{m.text}</p>
+              </div>
+            ))}
+          </div>
+        )}
+        {turns.length === 0 && reachouts.length === 0 && (
           <p className="text-center text-sm mt-20" style={{ color: "var(--text-3)" }}>
             {mode === "chat"
               ? "Chat: AION razona localmente, sin enviar tus datos a nadie."

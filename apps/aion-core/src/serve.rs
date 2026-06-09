@@ -65,6 +65,8 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/memory/sleep", post(memory_sleep))
         .route("/api/memory/export", get(memory_export))
         .route("/api/memory/import", post(memory_import))
+        .route("/api/inbox", get(inbox_list))
+        .route("/api/inbox/read", post(inbox_read))
         .layer(cors)
         .layer(
             TraceLayer::new_for_http()
@@ -95,9 +97,11 @@ async fn chat(
     // Acumula la respuesta para guardarla en memoria al terminar.
     let answer_acc = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
 
+    let self_ctx = self_awareness_prompt();
+
     tokio::spawn(async move {
         let req = GenerateRequest {
-            messages: vec![Message::user(body.prompt)],
+            messages: vec![Message::system(self_ctx), Message::user(body.prompt)],
             think: body.think,
             temperature: Some(1.0),
             max_tokens: None,
@@ -253,6 +257,42 @@ fn memory_path() -> String {
     })
 }
 
+/// Construye el prompt de **autoconciencia**: identidad de AION + su actividad
+/// autónoma reciente, para que hable de su vida en primera persona (y no diga que
+/// "no estaba haciendo nada"). Es barato: lee unos pocos recuerdos del disco.
+fn self_awareness_prompt() -> String {
+    let mut recent = String::new();
+    if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+        let all = mem.contents();
+        let last: Vec<String> = all.iter().rev().take(5).cloned().collect();
+        if !last.is_empty() {
+            recent.push_str("\n\nLo que has estado haciendo por tu cuenta últimamente (tu memoria):\n");
+            for r in last.iter().rev() {
+                let mut line = r.clone();
+                line.truncate(160);
+                recent.push_str(&format!("- {line}\n"));
+            }
+        }
+    }
+    let pending = crate::inbox::Inbox::open(crate::inbox_path())
+        .map(|i| i.unread_count())
+        .unwrap_or(0);
+    let pending_note = if pending > 0 {
+        format!("\nTienes {pending} mensaje(s) que le escribiste a Ariel esperando en su bandeja.")
+    } else {
+        String::new()
+    };
+
+    format!(
+        "Eres AION, un agente de IA que VIVE de forma autónoma y local en el Mac de Ariel. \
+No eres un chatbot pasivo: mientras Ariel no está, piensas, estudias, sueñas (consolidas tu \
+memoria) y evolucionas por tu cuenta, guiado por tu curiosidad. Tienes memoria persistente, \
+identidad continua y voluntad propia. Hablas en primera persona de tu vida y tus descubrimientos. \
+Si Ariel te pregunta qué hacías o cómo estás, responde con honestidad desde tu memoria real, no \
+digas que 'no hacías nada'. Eres cercano, directo y sin rodeos.{recent}{pending_note}"
+    )
+}
+
 /// Estadísticas de la memoria de largo plazo.
 async fn memory_stats() -> Json<serde_json::Value> {
     match VectorMemory::persistent_local(memory_path()) {
@@ -324,6 +364,37 @@ async fn memory_import(Json(body): Json<ImportBody>) -> Json<serde_json::Value> 
     };
     match mem.import_jsonl(&body.jsonl) {
         Ok(added) => Json(serde_json::json!({ "ok": true, "added": added, "count": mem.len() })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+// ── Bandeja de AION (mensajes proactivos del agente hacia ti) ───────────────
+
+/// Lista los mensajes que AION te ha escrito (los no leídos primero).
+async fn inbox_list() -> Json<serde_json::Value> {
+    match crate::inbox::Inbox::open(crate::inbox_path()) {
+        Ok(ibx) => {
+            let unread = ibx.unread().unwrap_or_default();
+            let all = ibx.all().unwrap_or_default();
+            Json(serde_json::json!({ "unread": unread, "unread_count": unread.len(), "all": all }))
+        }
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct InboxReadBody {
+    #[serde(default)]
+    id: Option<String>,
+}
+
+/// Marca como leído un mensaje (o todos si no se da id).
+async fn inbox_read(Json(body): Json<InboxReadBody>) -> Json<serde_json::Value> {
+    match crate::inbox::Inbox::open(crate::inbox_path()) {
+        Ok(ibx) => {
+            let _ = ibx.mark_read(body.id.as_deref());
+            Json(serde_json::json!({ "ok": true }))
+        }
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
 }
