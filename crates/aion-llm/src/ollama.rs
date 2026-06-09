@@ -36,9 +36,15 @@ impl OllamaEngine {
         }
     }
 
-    /// Motor con los valores por defecto de AION (localhost + gemma4-reason).
+    /// URL del runtime Ollama: `AION_OLLAMA_URL` si está definida (p. ej. el
+    /// Ollama embebido en un puerto privado), si no el valor por defecto.
+    pub fn base_url_from_env() -> String {
+        std::env::var("AION_OLLAMA_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+    }
+
+    /// Motor con los valores por defecto de AION (URL configurable + gemma4-reason).
     pub fn default_local() -> Self {
-        Self::new(DEFAULT_BASE_URL, DEFAULT_MODEL)
+        Self::new(Self::base_url_from_env(), DEFAULT_MODEL)
     }
 
     fn build_body(&self, req: &GenerateRequest, stream: bool) -> serde_json::Value {

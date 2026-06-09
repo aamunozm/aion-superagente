@@ -23,7 +23,8 @@ impl OllamaEmbedder {
     }
 
     pub fn default_local() -> Self {
-        Self::new(DEFAULT_BASE_URL, DEFAULT_MODEL)
+        let url = std::env::var("AION_OLLAMA_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        Self::new(url, DEFAULT_MODEL)
     }
 
     /// Devuelve el embedding de un texto.

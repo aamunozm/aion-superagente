@@ -19,8 +19,20 @@ fn main() {
         .manage(Sidecars::default())
         .setup(|app| {
             let mut children = Vec::new();
+            // Ollama embebido en un puerto PRIVADO (no choca con uno externo).
+            let ollama_host = "127.0.0.1:11919";
+            let ollama_url = format!("http://{ollama_host}");
 
-            // Control-plane (auth/licencias) en :8787.
+            // 1) Motor LLM: Ollama EMBEBIDO (el usuario no instala nada).
+            match app.shell().sidecar("ollama") {
+                Ok(cmd) => match cmd.args(["serve"]).env("OLLAMA_HOST", ollama_host).spawn() {
+                    Ok((_rx, child)) => children.push(child),
+                    Err(e) => eprintln!("AION: no se pudo lanzar ollama embebido: {e}"),
+                },
+                Err(e) => eprintln!("AION: sidecar ollama no encontrado: {e}"),
+            }
+
+            // 2) Control-plane (auth/licencias) en :8787.
             match app.shell().sidecar("aion-control-plane") {
                 Ok(cmd) => match cmd.spawn() {
                     Ok((_rx, child)) => children.push(child),
@@ -29,9 +41,13 @@ fn main() {
                 Err(e) => eprintln!("AION: sidecar control-plane no encontrado: {e}"),
             }
 
-            // Núcleo (chat/agente/memoria) como puente HTTP en :8765.
+            // 3) Núcleo (chat/agente/memoria) en :8765, apuntando al Ollama embebido.
             match app.shell().sidecar("aion-core") {
-                Ok(cmd) => match cmd.args(["serve", "127.0.0.1:8765"]).spawn() {
+                Ok(cmd) => match cmd
+                    .args(["serve", "127.0.0.1:8765"])
+                    .env("AION_OLLAMA_URL", &ollama_url)
+                    .spawn()
+                {
                     Ok((_rx, child)) => children.push(child),
                     Err(e) => eprintln!("AION: no se pudo lanzar el núcleo: {e}"),
                 },
