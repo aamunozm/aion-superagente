@@ -160,6 +160,51 @@ impl VectorMemory {
         Ok(n)
     }
 
+    /// **Reindexa** la memoria si el modelo de embeddings cambió: re-embebe todo
+    /// recuerdo cuya dimensión no coincida con la del modelo actual (p. ej. al pasar
+    /// de nomic 768-dim a BGE-M3 1024-dim). Sin esto, los vectores viejos y nuevos no
+    /// son comparables y la recuperación se rompe. Idempotente y barato si no hay nada
+    /// que migrar (solo un embed de sondeo). Devuelve cuántos recuerdos se reindexaron.
+    pub async fn reindex_if_needed(&self) -> Result<usize> {
+        // Dimensión objetivo del modelo actual (sondeo).
+        let probe = self.embedder.embed("dimension probe").await?;
+        let target = probe.len();
+        if target == 0 {
+            return Ok(0);
+        }
+        // Recoge los que necesitan re-embeber (sin mantener el lock cruzando await).
+        let stale: Vec<(String, String)> = {
+            let recs = self.records.lock().unwrap();
+            recs.iter()
+                .filter(|r| r.embedding.len() != target)
+                .map(|r| (r.id.clone(), r.content.clone()))
+                .collect()
+        };
+        if stale.is_empty() {
+            return Ok(0);
+        }
+        let mut new_vecs: Vec<(String, Vec<f32>)> = Vec::with_capacity(stale.len());
+        for (id, content) in &stale {
+            let v = self.embedder.embed(content).await?;
+            new_vecs.push((id.clone(), v));
+        }
+        let mut recs = self.records.lock().unwrap();
+        let map: std::collections::HashMap<String, Vec<f32>> = new_vecs.into_iter().collect();
+        let mut n = 0;
+        for r in recs.iter_mut() {
+            if let Some(v) = map.get(&r.id) {
+                r.embedding = v.clone();
+                n += 1;
+            }
+        }
+        if n > 0 {
+            if let Some(path) = &self.path {
+                rewrite_jsonl(path, &recs)?;
+            }
+        }
+        Ok(n)
+    }
+
     /// **Exporta** toda la memoria como JSONL (un recuerdo por línea, con su
     /// embedding incluido). Sirve para llevar la memoria a otro PC/Mac.
     pub fn export_jsonl(&self) -> String {

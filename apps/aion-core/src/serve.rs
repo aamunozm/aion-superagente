@@ -79,6 +79,18 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // REINDEXADO: si cambió el modelo de embeddings (p. ej. nomic→BGE-M3), re-embebe
+    // los recuerdos viejos UNA vez al arrancar para que la recuperación funcione.
+    tokio::spawn(async {
+        if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+            match mem.reindex_if_needed().await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(n, "memoria reindexada con el nuevo modelo de embeddings"),
+                Err(e) => tracing::warn!("reindexado de memoria falló: {e}"),
+            }
+        }
+    });
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -443,6 +455,7 @@ async fn agent(
         // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
+        tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
 
         let bus = EventBus::default();
 
@@ -480,7 +493,9 @@ async fn agent(
                 ctx.push_str(&format!("- {n}: {d}\n"));
             }
         }
-        let agent = ReActAgent::new(&*engine, &tools, bus.clone()).with_context(ctx);
+        let agent = ReActAgent::new(&*engine, &tools, bus.clone())
+            .with_context(ctx)
+            .with_verify(true);
         let result = agent.run(&body.task).await;
         fwd.abort();
 
@@ -538,6 +553,7 @@ async fn crew(
         // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
+        tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
 
         let bus = EventBus::default();
         // Reenvía la actividad de CADA agente con su rol (jerarquía visible).

@@ -23,6 +23,9 @@ pub struct ReActAgent<'a> {
     name: String,
     /// Conocimiento relevante (de su memoria) inyectado para que APLIQUE lo que sabe.
     context: Option<String>,
+    /// Si verifica la respuesta final contra las observaciones reales de las
+    /// herramientas (juez de groundedness) antes de devolverla. Anti-alucinación.
+    verify: bool,
 }
 
 impl<'a> ReActAgent<'a> {
@@ -34,7 +37,14 @@ impl<'a> ReActAgent<'a> {
             max_steps: 8,
             name: "aion".to_string(),
             context: None,
+            verify: false,
         }
+    }
+
+    /// Activa la verificación de la respuesta final (juez de groundedness).
+    pub fn with_verify(mut self, verify: bool) -> Self {
+        self.verify = verify;
+        self
     }
 
     pub fn with_max_steps(mut self, n: usize) -> Self {
@@ -137,6 +147,14 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
 
             // ¿Respuesta final?
             if let Some(answer) = extract(&text, "Final Answer:") {
+                // VERIFICACIÓN: si hubo observaciones de herramientas, un juez comprueba
+                // que la respuesta esté RESPALDADA por ellas (no inventada). Solo añade
+                // una llamada cuando de verdad se usaron herramientas.
+                let answer = if self.verify && !scratchpad.trim().is_empty() {
+                    self.verify_answer(task, &scratchpad, &answer).await
+                } else {
+                    answer
+                };
                 return Ok(AgentRun {
                     answer,
                     steps: step + 1,
@@ -210,6 +228,50 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
                 answer: "No pude completar la tarea en los pasos disponibles.".into(),
                 steps: self.max_steps,
             }),
+        }
+    }
+}
+
+impl ReActAgent<'_> {
+    /// Juez de groundedness: comprueba que la respuesta final esté respaldada por las
+    /// observaciones reales de las herramientas. Si detecta datos inventados (no
+    /// presentes en las observaciones), devuelve una respuesta corregida; si está
+    /// respaldada, la deja igual. Una sola llamada extra.
+    async fn verify_answer(&self, task: &str, scratchpad: &str, answer: &str) -> String {
+        let req = GenerateRequest {
+            messages: vec![
+                Message::system(
+                    "Eres un VERIFICADOR estricto. Te doy una tarea, las OBSERVACIONES \
+                     reales de herramientas y una RESPUESTA. Comprueba que cada dato concreto \
+                     de la respuesta (números, conteos, nombres, IPs, listas) aparezca en las \
+                     observaciones. Si TODO está respaldado, responde exactamente 'OK'. Si algo \
+                     está inventado o no respaldado, responde 'CORREGIR: ' seguido de la \
+                     respuesta corregida usando SOLO lo que sí aparece en las observaciones (o \
+                     diciendo con franqueza que no se pudo obtener). No añadas nada más.",
+                ),
+                Message::user(format!(
+                    "Tarea: {task}\n\nOBSERVACIONES reales:\n{scratchpad}\n\nRESPUESTA a verificar:\n{answer}"
+                )),
+            ],
+            think: false,
+            temperature: Some(0.0),
+            max_tokens: Some(400),
+        };
+        match self.engine.generate(req).await {
+            Ok(m) => {
+                let v = sanitize(&m.content);
+                let t = v.trim();
+                if t.eq_ignore_ascii_case("OK") || t.is_empty() {
+                    answer.to_string()
+                } else if let Some(rest) = t.strip_prefix("CORREGIR:") {
+                    let fixed = rest.trim();
+                    if fixed.is_empty() { answer.to_string() } else { fixed.to_string() }
+                } else {
+                    // El juez devolvió texto sin el prefijo: úsalo solo si parece corrección.
+                    answer.to_string()
+                }
+            }
+            Err(_) => answer.to_string(), // si el juez falla, no bloquea la respuesta
         }
     }
 }

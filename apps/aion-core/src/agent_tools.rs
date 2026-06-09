@@ -262,6 +262,66 @@ impl Tool for NetTool {
     }
 }
 
+// ── Leer un archivo de texto del usuario (solo lectura, gobernado) ──────────
+
+/// Lee el contenido de un archivo de texto del usuario (memoria tipo filesystem:
+/// Letta 2025 mostró que dar al agente grep/leer ficheros iguala o supera a memorias
+/// especializadas). Solo lectura, restringido a HOME, con tope de tamaño.
+pub struct FileReadTool;
+
+impl FileReadTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for FileReadTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for FileReadTool {
+    fn name(&self) -> &str {
+        "file_read"
+    }
+    fn description(&self) -> &str {
+        "Lee el contenido de un archivo de texto del usuario. Entrada: la ruta \
+         (admite ~). Solo lectura, dentro de tu carpeta de usuario. Útil para leer \
+         notas, código o documentos antes de responder."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let home = std::env::var("HOME").map_err(|_| "no encuentro tu carpeta de usuario".to_string())?;
+        let home = std::path::PathBuf::from(&home);
+        let raw = input.trim();
+        if raw.is_empty() {
+            return Err("indica la ruta del archivo".into());
+        }
+        let p = if let Some(rest) = raw.strip_prefix("~/") {
+            home.join(rest)
+        } else {
+            std::path::PathBuf::from(raw)
+        };
+        let canon = p.canonicalize().map_err(|_| format!("no encuentro el archivo «{raw}»"))?;
+        if !canon.starts_with(&home) {
+            return Err("por seguridad solo puedo leer dentro de tu carpeta de usuario".into());
+        }
+        if !canon.is_file() {
+            return Err("eso no es un archivo".into());
+        }
+        let meta = std::fs::metadata(&canon).map_err(|e| e.to_string())?;
+        if meta.len() > 200_000 {
+            return Err("el archivo es demasiado grande (>200 KB) para leerlo de una vez".into());
+        }
+        let content = std::fs::read_to_string(&canon)
+            .map_err(|_| "no pude leerlo (¿es binario?)".to_string())?;
+        let mut out = content;
+        out.truncate(8000); // tope de contexto
+        Ok(out)
+    }
+}
+
 // ── 0) Buscar en la web: investigación real (multi-fuente) ──────────────────
 
 /// Buscador web real (DuckDuckGo con respaldo en Wikipedia). Devuelve títulos,

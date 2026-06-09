@@ -7,6 +7,7 @@
 
 mod agent_tools;
 mod empathy;
+mod evals;
 mod inbox;
 mod memory_tool;
 mod onboarding;
@@ -98,6 +99,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("bench") => {
             run_bench().await?;
+        }
+        Some("eval") => {
+            let k: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5);
+            evals::run(k).await?;
         }
         Some("models-ensure") => {
             run_models_ensure();
@@ -1584,7 +1589,9 @@ fn run_models_ensure() {
     let bin = std::env::var("AION_OLLAMA_BIN").unwrap_or_else(|_| "ollama".to_string());
     let modelfile = std::env::var("AION_MODELFILE").unwrap_or_default();
     const CHAT: &str = "gemma4-reason";
-    const EMBED: &str = "nomic-embed-text";
+    // BGE-M3: embeddings multilingües reales (español). Sustituye a nomic-embed-text.
+    let embed = std::env::var("AION_EMBED_MODEL").unwrap_or_else(|_| "bge-m3".to_string());
+    let embed: &str = &embed;
 
     // OLLAMA_HOST se hereda del proceso padre (lo fija el shell de escritorio).
     let list = || -> Option<String> {
@@ -1607,7 +1614,7 @@ fn run_models_ensure() {
     }
 
     let need_chat = !have.contains(CHAT);
-    let need_embed = !have.contains(EMBED);
+    let need_embed = !have.contains(embed);
     if !need_chat && !need_embed {
         tracing::info!("modelos ya presentes — bootstrap omitido");
         return;
@@ -1621,7 +1628,7 @@ fn run_models_ensure() {
 
     if need_embed {
         let ok = Command::new(&bin)
-            .args(["pull", EMBED])
+            .args(["pull", embed])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);

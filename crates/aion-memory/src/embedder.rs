@@ -1,10 +1,15 @@
-//! Generación de embeddings vía Ollama (`/api/embeddings`, modelo `nomic-embed-text`).
+//! Generación de embeddings vía Ollama (`/api/embeddings`).
+//!
+//! Modelo por defecto: **BGE-M3** (`bge-m3`). Sustituye a `nomic-embed-text`, que en
+//! español/multilingüe rinde muy mal (Recall@1 ~0.15 vs ~0.94 de BGE-M3, benchmark
+//! mar-2026). BGE-M3 es MIT, 1024 dim, contexto 8192, y corre en Ollama. Cambiable
+//! con `AION_EMBED_MODEL` (p. ej. `qwen3-embedding:4b`).
 
 use aion_kernel::{AionError, Result};
 use serde::Deserialize;
 
 const DEFAULT_BASE_URL: &str = "http://localhost:11434";
-const DEFAULT_MODEL: &str = "nomic-embed-text";
+const DEFAULT_MODEL: &str = "bge-m3";
 
 /// Cliente de embeddings local.
 pub struct OllamaEmbedder {
@@ -24,7 +29,14 @@ impl OllamaEmbedder {
 
     pub fn default_local() -> Self {
         let url = std::env::var("AION_OLLAMA_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        Self::new(url, DEFAULT_MODEL)
+        let model = std::env::var("AION_EMBED_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        Self::new(url, model)
+    }
+
+    /// Nombre del modelo de embeddings en uso (para marcar la memoria y detectar
+    /// cuándo hay que reindexar tras un cambio de modelo).
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     /// Devuelve el embedding de un texto.
