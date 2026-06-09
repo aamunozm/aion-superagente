@@ -21,7 +21,7 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: pnpm }
+        with: { node-version: 22, cache: pnpm }
       - name: Instalar Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
       - name: Instalar Ollama (fuente del runtime a vendorizar)
@@ -47,7 +47,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: pnpm }
+        with: { node-version: 22, cache: pnpm }
       - name: Instalar Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
       - name: Vendorizar runtime Ollama (Windows x64)
