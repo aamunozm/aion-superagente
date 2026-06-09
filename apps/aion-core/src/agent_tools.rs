@@ -161,15 +161,18 @@ impl Tool for SkillForgeTool {
                         name: spec.name.clone(),
                         description: spec.description.clone(),
                     },
-                    code,
+                    code: code.clone(),
                     tests: spec.tests.clone(),
                 })
                 .await
                 .map_err(|e| e.to_string())?;
             if report.accepted {
+                // PERSISTE la skill: sobrevive a reinicios y queda disponible para
+                // siempre → la caja de herramientas de AION crece con el tiempo.
+                let _ = crate::skill_store::save(&spec.name, &spec.description, &code);
                 return Ok(format!(
-                    "✅ skill «{}» creada y validada ({} tests ok). Ya puedes usarla con \
-                     skill_invoke. (código auto-generado, aprobado por sandbox+tests)",
+                    "✅ skill «{}» creada, validada ({} tests ok) y GUARDADA para el futuro. \
+                     Úsala con skill_invoke. (código auto-generado, aprobado por sandbox+tests)",
                     spec.name, report.passed
                 ));
             }

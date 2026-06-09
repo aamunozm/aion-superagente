@@ -195,6 +195,12 @@ async fn agent(
                 },
                 SUM_TO_WAT,
             );
+            // Carga las skills que AION se ha forjado en sesiones anteriores: su
+            // caja de herramientas CRECE y dispone de ellas para nuevas tareas.
+            let loaded = crate::skill_store::load_all(&host);
+            if loaded > 0 {
+                tracing::info!(loaded, "skills persistidas cargadas");
+            }
             // El agente se escribe skills nuevas (validadas en sandbox+tests).
             tools.register(Arc::new(crate::agent_tools::SkillForgeTool::new(
                 Arc::new(OllamaEngine::default_local()),
@@ -233,7 +239,18 @@ async fn agent(
             }
         });
 
-        let agent = ReActAgent::new(&engine, &tools, bus.clone());
+        // Aterriza al agente en lo que YA SABE: conocimiento relevante a la tarea
+        // + catálogo de skills que se ha forjado. Así aplica su saber y sus
+        // herramientas para hacerlo mejor (autónomo + acumulativo).
+        let mut ctx = relevant_knowledge(&body.task).await;
+        let skills = crate::skill_store::catalog();
+        if !skills.is_empty() {
+            ctx.push_str("\nSkills que ya te has forjado (úsalas con skill_invoke si aplican):\n");
+            for (n, d) in skills {
+                ctx.push_str(&format!("- {n}: {d}\n"));
+            }
+        }
+        let agent = ReActAgent::new(&engine, &tools, bus.clone()).with_context(ctx);
         let result = agent.run(&body.task).await;
         fwd.abort();
 

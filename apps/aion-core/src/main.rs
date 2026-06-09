@@ -9,6 +9,7 @@ mod agent_tools;
 mod inbox;
 mod memory_tool;
 mod serve;
+mod skill_store;
 mod skill_tool;
 mod web_tool;
 
@@ -436,10 +437,14 @@ async fn run_self_evolve() -> Result<(), Box<dyn std::error::Error>> {
                     name: "square".into(),
                     description: task.into(),
                 },
-                code,
+                code: code.clone(),
                 tests: tests.clone(),
             })
             .await?;
+        // Persiste la skill autoevolucionada para que perdure (toolbox crece).
+        if report.accepted {
+            let _ = skill_store::save("square", task, &code);
+        }
         println!("   {} — {}", verdict(report.accepted), report.reason);
         audit.record(
             "evolution",

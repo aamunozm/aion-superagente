@@ -21,6 +21,8 @@ pub struct ReActAgent<'a> {
     bus: EventBus,
     max_steps: usize,
     name: String,
+    /// Conocimiento relevante (de su memoria) inyectado para que APLIQUE lo que sabe.
+    context: Option<String>,
 }
 
 impl<'a> ReActAgent<'a> {
@@ -31,11 +33,20 @@ impl<'a> ReActAgent<'a> {
             bus,
             max_steps: 8,
             name: "aion".to_string(),
+            context: None,
         }
     }
 
     pub fn with_max_steps(mut self, n: usize) -> Self {
         self.max_steps = n;
+        self
+    }
+
+    /// Aterriza al agente en su conocimiento acumulado (memoria/skills) para que
+    /// lo aplique a la tarea — así es mejor con el tiempo, no parte de cero.
+    pub fn with_context(mut self, context: impl Into<String>) -> Self {
+        let c = context.into();
+        self.context = if c.trim().is_empty() { None } else { Some(c) };
         self
     }
 
@@ -56,8 +67,17 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
              Final Answer: la respuesta para el usuario\n\n\
              Reglas: no inventes 'Observation' (yo la añado). Usa la calculadora para \
              cualquier aritmética. Usa memory_search SOLO para datos concretos que pudieras \
-             haber guardado, nunca para saber quién eres. Responde en español.",
-            tools = self.tools.describe()
+             haber guardado, nunca para saber quién eres. \
+             Si careces de una capacidad de cálculo que necesitas, créatela con skill_forge \
+             y úsala (sé creativo combinando lo que sabes y tus skills). Responde en español.\
+             {context}",
+            tools = self.tools.describe(),
+            context = match &self.context {
+                Some(c) => format!(
+                    "\n\nCONOCIMIENTO QUE YA TIENES (aplícalo a esta tarea para hacerlo mejor):\n{c}"
+                ),
+                None => String::new(),
+            }
         )
     }
 
