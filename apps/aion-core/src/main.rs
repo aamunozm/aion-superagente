@@ -627,12 +627,26 @@ async fn self_evolve_once(engine: &OllamaEngine) -> (bool, String) {
     use aion_skills::{SkillManifest, WasmSkillHost};
     use std::sync::Arc;
 
-    let prompt = "Escribe un módulo WebAssembly WAT que exporte `run` (param i64, result i64) \
-        que devuelva n*n. Ejemplo válido: (module (func (export \"run\") (param $n i64) (result i64) \
-        (i64.mul (local.get $n) (i64.const 2)))). Responde SOLO el módulo WAT.";
+    // Prompt explícito: el cuerpo DEBE multiplicar n por sí mismo. El ejemplo de
+    // sintaxis usa otra operación (suma) para no inducir a copiarlo.
+    let base = "Escribe un módulo WebAssembly en formato WAT que exporte una función `run` \
+        que reciba un i64 `n` y devuelva n AL CUADRADO, es decir n multiplicado por sí mismo. \
+        Debes usar `i64.mul` con `(local.get $n)` DOS veces (no por una constante). \
+        Sintaxis (ejemplo de OTRA operación, NO lo copies): \
+        (module (func (export \"run\") (param $n i64) (result i64) (i64.add (local.get $n) (local.get $n)))). \
+        Responde SOLO el módulo WAT, sin explicación ni markdown.";
 
     let mut last = "sin intentos".to_string();
+    let mut prev_code: Option<String> = None;
     for _ in 0..3 {
+        // Auto-corrección: si el intento anterior falló, mostrarle su error.
+        let prompt = match &prev_code {
+            Some(c) => format!(
+                "{base}\n\nTu intento anterior fue:\n{c}\nResultó INCORRECTO ({last}). \
+                 Recuerda: el cuerpo debe ser (i64.mul (local.get $n) (local.get $n)). Corrígelo."
+            ),
+            None => base.to_string(),
+        };
         let msg = match engine
             .generate(GenerateRequest {
                 messages: vec![Message::user(prompt)],
@@ -652,6 +666,7 @@ async fn self_evolve_once(engine: &OllamaEngine) -> (bool, String) {
             last = "el LLM no produjo WAT válido".into();
             continue;
         };
+        prev_code = Some(code.clone());
         let Ok(live) = WasmSkillHost::new() else {
             return (false, "no se pudo crear el host".into());
         };
