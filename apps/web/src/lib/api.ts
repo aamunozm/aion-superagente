@@ -111,3 +111,14 @@ export const memoryRemember = (text: string) =>
 
 export const memorySleep = () =>
   jsonCall<SleepReport>("/api/memory/sleep", { method: "POST" });
+
+/// Descarga la memoria como archivo JSONL (para llevarla a otro PC/Mac).
+export const memoryExport = () => fetch(`${BRIDGE_URL}/api/memory/export`);
+
+/// Importa memoria desde un archivo JSONL (fusiona, omite duplicados).
+export const memoryImport = (jsonl: string) =>
+  jsonCall<{ ok: boolean; added: number; count: number }>("/api/memory/import", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonl }),
+  });

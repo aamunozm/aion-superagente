@@ -63,6 +63,8 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/memory", get(memory_stats))
         .route("/api/memory/remember", post(memory_remember))
         .route("/api/memory/sleep", post(memory_sleep))
+        .route("/api/memory/export", get(memory_export))
+        .route("/api/memory/import", post(memory_import))
         .layer(cors)
         .layer(
             TraceLayer::new_for_http()
@@ -286,6 +288,42 @@ async fn memory_sleep() -> Json<serde_json::Value> {
         Ok(r) => Json(serde_json::json!({
             "before": r.before, "merged": r.merged, "pruned": r.pruned, "after": r.after
         })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// **Exporta** la memoria como archivo JSONL descargable (para llevarla a otro PC/Mac).
+async fn memory_export() -> impl axum::response::IntoResponse {
+    let body = match VectorMemory::persistent_local(memory_path()) {
+        Ok(m) => m.export_jsonl(),
+        Err(_) => String::new(),
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "application/x-ndjson"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"aion-memory.jsonl\"",
+            ),
+        ],
+        body,
+    )
+}
+
+#[derive(Deserialize)]
+struct ImportBody {
+    /// Contenido JSONL (formato de export). Se fusiona con la memoria actual.
+    jsonl: String,
+}
+
+/// **Importa** memoria desde un archivo JSONL (fusiona, omite duplicados por id).
+async fn memory_import(Json(body): Json<ImportBody>) -> Json<serde_json::Value> {
+    let mem = match VectorMemory::persistent_local(memory_path()) {
+        Ok(m) => m,
+        Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+    };
+    match mem.import_jsonl(&body.jsonl) {
+        Ok(added) => Json(serde_json::json!({ "ok": true, "added": added, "count": mem.len() })),
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
 }

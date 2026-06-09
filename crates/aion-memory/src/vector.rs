@@ -88,6 +88,47 @@ impl VectorMemory {
             .map(|r| r.content.clone())
             .collect()
     }
+
+    /// **Exporta** toda la memoria como JSONL (un recuerdo por línea, con su
+    /// embedding incluido). Sirve para llevar la memoria a otro PC/Mac.
+    pub fn export_jsonl(&self) -> String {
+        self.records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|r| serde_json::to_string(r).ok())
+            .map(|s| s + "\n")
+            .collect()
+    }
+
+    /// **Importa** memoria desde JSONL (formato de `export_jsonl`). Fusiona: omite
+    /// los recuerdos cuyo `id` ya existe (idempotente). No requiere re-embeddings
+    /// porque los vectores viajan en el archivo. Devuelve cuántos se añadieron.
+    pub fn import_jsonl(&self, text: &str) -> Result<usize> {
+        let mut records = self.records.lock().unwrap();
+        let existing: std::collections::HashSet<String> =
+            records.iter().map(|r| r.id.clone()).collect();
+        let mut added = 0usize;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let rec: MemoryRecord = match serde_json::from_str(line) {
+                Ok(r) => r,
+                Err(_) => continue, // línea inválida: se ignora, no rompe la importación
+            };
+            if existing.contains(&rec.id) {
+                continue;
+            }
+            if let Some(path) = &self.path {
+                append_jsonl(path, &rec)?;
+            }
+            records.push(rec);
+            added += 1;
+        }
+        Ok(added)
+    }
 }
 
 #[async_trait]
