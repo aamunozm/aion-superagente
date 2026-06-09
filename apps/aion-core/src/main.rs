@@ -91,6 +91,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("bench") => {
             run_bench().await?;
         }
+        Some("models-ensure") => {
+            run_models_ensure();
+        }
         Some("vision") => {
             let path = args.get(1).cloned().unwrap_or_default();
             let prompt = if args.len() > 2 {
@@ -1249,6 +1252,85 @@ fn notify_user(title: &str, message: &str) {
         .arg("-e")
         .arg(script)
         .status();
+}
+
+/// Bootstrap de modelos en primer arranque — MULTIPLATAFORMA (Mac/Windows).
+///
+/// Usa el binario Ollama EMBEBIDO (ruta en `AION_OLLAMA_BIN`) para asegurar que
+/// existan `gemma4-reason` (razonamiento) y `nomic-embed-text` (embeddings). Si
+/// faltan, los descarga/crea (`ollama pull` / `ollama create -f Modelfile`) y avisa
+/// al usuario. Idempotente: si ya existen, no hace nada. Reemplaza al script bash
+/// para funcionar también en Windows (donde no hay bash).
+fn run_models_ensure() {
+    use std::process::Command;
+    use std::time::Duration;
+
+    let bin = std::env::var("AION_OLLAMA_BIN").unwrap_or_else(|_| "ollama".to_string());
+    let modelfile = std::env::var("AION_MODELFILE").unwrap_or_default();
+    const CHAT: &str = "gemma4-reason";
+    const EMBED: &str = "nomic-embed-text";
+
+    // OLLAMA_HOST se hereda del proceso padre (lo fija el shell de escritorio).
+    let list = || -> Option<String> {
+        Command::new(&bin)
+            .arg("list")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+
+    // Esperar a que el servidor Ollama embebido responda (máx ~60 s).
+    let mut have = String::new();
+    for _ in 0..60 {
+        if let Some(out) = list() {
+            have = out;
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    let need_chat = !have.contains(CHAT);
+    let need_embed = !have.contains(EMBED);
+    if !need_chat && !need_embed {
+        tracing::info!("modelos ya presentes — bootstrap omitido");
+        return;
+    }
+
+    notify_user(
+        "AION",
+        "Preparando la IA por primera vez (descarga ~9 GB). Te avisaré al terminar.",
+    );
+    tracing::info!(need_chat, need_embed, "descargando modelos (primer arranque)");
+
+    if need_embed {
+        let ok = Command::new(&bin)
+            .args(["pull", EMBED])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            notify_user("AION", "Error descargando el modelo de embeddings.");
+        }
+    }
+
+    if need_chat {
+        let mut cmd = Command::new(&bin);
+        cmd.args(["create", CHAT]);
+        if !modelfile.is_empty() {
+            cmd.args(["-f", &modelfile]);
+        }
+        let ok = cmd.status().map(|s| s.success()).unwrap_or(false);
+        if ok {
+            notify_user("AION", "¡Listo! AION ya está preparado para conversar.");
+            tracing::info!("modelo {CHAT} listo");
+        } else {
+            notify_user("AION", "Error preparando el modelo de IA.");
+            tracing::error!("fallo al crear {CHAT}");
+        }
+    } else {
+        notify_user("AION", "¡Listo! AION ya está preparado.");
+    }
 }
 
 /// Guarda un recuerdo en la memoria persistente (sobrevive a reinicios).

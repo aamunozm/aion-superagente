@@ -50,25 +50,21 @@ fn main() {
                     {
                         Ok(child) => {
                             *app.state::<Sidecars>().ollama.lock().unwrap() = Some(child);
-                            // Bootstrap de modelos en primer arranque (segundo plano).
-                            // Si faltan los modelos, los descarga/crea con el binario
-                            // embebido y avisa al usuario; si ya existen, no hace nada.
-                            if let (Ok(script), Ok(modelfile)) = (
-                                app.path().resolve(
-                                    "bootstrap/first-run-models.sh",
-                                    tauri::path::BaseDirectory::Resource,
-                                ),
-                                app.path().resolve(
-                                    "bootstrap/Modelfile.aion",
-                                    tauri::path::BaseDirectory::Resource,
-                                ),
+                            // Bootstrap de modelos en primer arranque (segundo plano,
+                            // MULTIPLATAFORMA): el núcleo asegura los modelos con el
+                            // binario ollama embebido. Idempotente si ya existen.
+                            if let Ok(modelfile) = app.path().resolve(
+                                "bootstrap/Modelfile.aion",
+                                tauri::path::BaseDirectory::Resource,
                             ) {
-                                let _ = std::process::Command::new("/bin/bash")
-                                    .arg(script)
-                                    .arg(&ollama_bin)
-                                    .arg(modelfile)
-                                    .arg(OLLAMA_HOST)
-                                    .spawn();
+                                if let Ok(cmd) = app.shell().sidecar("aion-core") {
+                                    let _ = cmd
+                                        .args(["models-ensure"])
+                                        .env("OLLAMA_HOST", OLLAMA_HOST)
+                                        .env("AION_OLLAMA_BIN", ollama_bin.to_string_lossy().as_ref())
+                                        .env("AION_MODELFILE", modelfile.to_string_lossy().as_ref())
+                                        .spawn();
+                                }
                             }
                         }
                         Err(e) => eprintln!("AION: no se pudo lanzar Ollama embebido: {e}"),
