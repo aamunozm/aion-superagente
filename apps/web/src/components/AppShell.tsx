@@ -167,10 +167,10 @@ export default function AppShell({
       {/* ── CONTENIDO ───────────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0">
         <header
-          className="h-16 shrink-0 flex items-center px-6"
+          className="h-16 shrink-0 flex items-center px-8"
           style={{ borderBottom: "1px solid var(--border)" }}
         >
-          <h1 className="font-display font-semibold">{title}</h1>
+          <h1 className="font-display font-semibold text-[18px] tracking-tight">{title}</h1>
         </header>
         <main className="flex-1 min-h-0 overflow-y-auto">{children}</main>
       </div>

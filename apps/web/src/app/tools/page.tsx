@@ -59,7 +59,7 @@ export default function ToolsPage() {
   return (
     <AppShell title="Herramientas">
       <div className="max-w-6xl mx-auto px-8 py-8">
-        <p className="text-sm mb-6" style={{ color: "var(--text-2)" }}>
+        <p className="text-[15px] mb-7 max-w-2xl" style={{ color: "var(--text-2)" }}>
           Conecta capacidades a AION. Las activas ya las usa el agente; las disponibles se
           activan concediendo permisos del sistema.
         </p>
@@ -68,32 +68,32 @@ export default function ToolsPage() {
             const s = STATUS_STYLE[t.status];
             const on = t.status === "activa" || enabled[t.id];
             return (
-              <div key={t.id} className="module card-hover flex items-start gap-3">
-                <span className="icon-chip" style={{ background: TINT[t.tint].bg, color: TINT[t.tint].fg }}>
-                  <Icon name={t.icon} size={20} />
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <h3 className="font-display font-semibold">{t.name}</h3>
-                    <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: s.color }}>
-                      {s.label}
-                    </span>
-                  </div>
-                  <p className="text-sm mt-1" style={{ color: "var(--text-2)" }}>
-                    {t.desc}
-                  </p>
+              <div key={t.id} className="module card-hover flex flex-col" style={{ padding: 18 }}>
+                <div className="flex items-center justify-between mb-3">
+                  <span className="icon-chip" style={{ background: TINT[t.tint].bg, color: TINT[t.tint].fg }}>
+                    <Icon name={t.icon} size={20} />
+                  </span>
+                  <span
+                    className="text-[10px] font-semibold uppercase tracking-wide px-2 py-1 rounded-full"
+                    style={{ color: s.color, background: "var(--surface-1)" }}
+                  >
+                    {s.label}
+                  </span>
                 </div>
-                {t.status !== "proximamente" && (
+                <h3 className="font-display font-semibold text-[15px]">{t.name}</h3>
+                <p className="text-sm mt-1 flex-1" style={{ color: "var(--text-2)" }}>
+                  {t.desc}
+                </p>
+                {t.status === "disponible" && (
                   <button
-                    onClick={() => t.status !== "activa" && toggle(t.id)}
-                    className="text-xs px-3 py-1.5 rounded-full shrink-0"
+                    onClick={() => toggle(t.id)}
+                    className="text-xs px-3 py-1.5 rounded-full mt-3 self-start"
                     style={{
                       background: on ? "var(--accent-subtle)" : "var(--surface-2)",
-                      color: on ? "var(--accent)" : "var(--text-2)",
-                      cursor: t.status === "activa" ? "default" : "pointer",
+                      color: on ? "var(--gold-deep)" : "var(--text-2)",
                     }}
                   >
-                    {t.status === "activa" ? "Activa" : on ? "Conectada" : "Conectar"}
+                    {on ? "Conectada" : "Conectar"}
                   </button>
                 )}
               </div>

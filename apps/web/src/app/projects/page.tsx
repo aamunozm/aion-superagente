@@ -39,16 +39,16 @@ export default function ProjectsPage() {
   return (
     <AppShell title="Proyectos">
       <div className="max-w-6xl mx-auto px-8 py-8">
-        <p className="text-sm mb-6" style={{ color: "var(--text-2)" }}>
+        <p className="text-[15px] mb-7 max-w-2xl" style={{ color: "var(--text-2)" }}>
           Organiza el trabajo de AION en proyectos. Cada proyecto agrupa contexto, tareas y
           conocimiento para que el agente actúe con foco.
         </p>
 
-        <div className="card mb-8">
-          <h2 className="t-section mb-3" style={{ color: "var(--text-2)" }}>
-            Nuevo proyecto
+        <div className="card mb-10 max-w-3xl">
+          <h2 className="t-section mb-4" style={{ color: "var(--text-3)" }}>
+            NUEVO PROYECTO
           </h2>
-          <div className="flex flex-col gap-3">
+          <div className="grid md:grid-cols-2 gap-3 mb-3">
             <input
               className="input"
               placeholder="Nombre del proyecto"
@@ -61,10 +61,10 @@ export default function ProjectsPage() {
               value={desc}
               onChange={(e) => setDesc(e.target.value)}
             />
-            <button className="btn self-start" onClick={add}>
-              + Crear proyecto
-            </button>
           </div>
+          <button className="btn inline-flex items-center gap-1.5" onClick={add}>
+            <Icon name="plus" size={16} /> Crear proyecto
+          </button>
         </div>
 
         {projects.length === 0 ? (
