@@ -274,10 +274,16 @@ async fn chat(
     let grounding = relevant_knowledge(&body.prompt).await;
     // PROMPT DINÁMICO: elige el modo (persona) según lo que el usuario necesita.
     let mode = crate::prompts::route(&*engine, &body.prompt).await;
+    // EMPATÍA: adapta el tono al estado del usuario (frustración, prisa, confusión…).
+    let empathy = crate::empathy::directive(&crate::empathy::read_state(&body.prompt));
     let self_ctx = format!(
-        "{}\n\n{}{}",
+        "{}\n\n{}{}{}",
         self_awareness_prompt(),
         crate::prompts::persona(&mode),
+        match &empathy {
+            Some(d) => format!("\n\n{d}"),
+            None => String::new(),
+        },
         if grounding.is_empty() {
             String::new()
         } else {

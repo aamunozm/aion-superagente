@@ -6,6 +6,7 @@
 //!   y respuesta) usando `OllamaEngine` contra `gemma4-reason`.
 
 mod agent_tools;
+mod empathy;
 mod inbox;
 mod memory_tool;
 mod onboarding;
@@ -549,6 +550,7 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
         "investigar",
         "comprender",
         "optimizar",
+        "proponer",
     ];
     let mut consecutive_errors = 0u32;
     const BREAKER: u32 = 3;
@@ -575,16 +577,16 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
             "investigar" => research_once(&engine).await,
             "comprender" => synthesize_once(&engine).await,
             "optimizar" => optimize_prompt_once(&engine).await,
+            "proponer" => propose_improvement_once(&engine).await,
             _ => study_once(&engine).await,
         };
         println!("   {} {goal}: {detail}", if success { "✅" } else { "❌" });
 
         // 🔔 AION "quiere hablarte": convierte lo descubierto en un MENSAJE PARA TI
         // (Bandeja) y avisa. Así te busca él, no solo responde.
-        if success && matches!(goal, "estudiar" | "evolucionar" | "investigar" | "comprender") {
+        if success && matches!(goal, "estudiar" | "evolucionar" | "investigar" | "comprender" | "proponer") {
             let kind = match goal {
-                "evolucionar" => "idea",
-                "comprender" => "idea",
+                "evolucionar" | "comprender" | "proponer" => "idea",
                 _ => "insight",
             };
             let message = reach_out(&engine, goal, &detail).await;
@@ -815,6 +817,52 @@ async fn research_once(engine: &OllamaEngine) -> (bool, String) {
             .await;
     }
     (!summary.is_empty(), format!("{topic} → {summary}"))
+}
+
+/// `proponer`: AION estudia lo que ha aprendido y **propone una mejora concreta a su
+/// propio diseño/código**, la guarda (proposals.jsonl) y te la manda a la Bandeja.
+/// NO modifica su núcleo (inmutable por seguridad): es human-in-the-loop, tú decides.
+async fn propose_improvement_once(engine: &OllamaEngine) -> (bool, String) {
+    // Auto-descripción de alto nivel (lo que AION sabe de sí mismo) + lo aprendido.
+    const SELF: &str = "Eres AION: agente local en Rust (crates: kernel inmutable, llm, memory \
+con recuperación híbrida+grafo+temporal, orchestrator con ReAct y equipo multiagente, \
+skills WASM en sandbox, evolution gated con ratchet, cognition, browser, computer con \
+gobernanza). Te auto-extiendes con skills y prompts, no reescribes tu kernel.";
+    let learnings = match VectorMemory::persistent_local(memory_path()) {
+        Ok(m) => m.contents().into_iter().rev().take(8).collect::<Vec<_>>().join("\n- "),
+        Err(_) => String::new(),
+    };
+    let prompt = format!(
+        "{SELF}\n\nLo que has aprendido últimamente:\n- {learnings}\n\n\
+         Propón UNA mejora concreta y realista a tu propio diseño o código que te haría mejor \
+         agente. Formato: ÁREA · QUÉ · POR QUÉ · CÓMO (alto nivel). Sé específico y honesto; \
+         nada genérico."
+    );
+    match engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.8),
+            max_tokens: Some(280),
+        })
+        .await
+    {
+        Ok(m) => {
+            let proposal = m.content.trim().to_string();
+            if proposal.len() < 30 {
+                return (false, "no logré formular una propuesta sólida".into());
+            }
+            // Guarda la propuesta (para revisión humana) — no se aplica sola.
+            let path = app_data_dir().join("proposals.jsonl");
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                use std::io::Write as _;
+                let rec = serde_json::json!({ "at": Utc::now().to_rfc3339(), "proposal": proposal });
+                let _ = writeln!(f, "{rec}");
+            }
+            (true, proposal)
+        }
+        Err(e) => (false, e.to_string()),
+    }
 }
 
 /// `optimizar`: AION **mejora sus propios prompts** (OPRO/DSPy). Toma el modo menos
