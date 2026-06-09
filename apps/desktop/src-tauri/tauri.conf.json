@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm --filter @aion/web dev",
     "devUrl": "http://localhost:3000",
-    "beforeBuildCommand": "AION_TAURI=1 pnpm --filter @aion/web build",
+    "beforeBuildCommand": "pnpm --filter @aion/web build",
     "frontendDist": "../../web/out"
   },
   "app": {
