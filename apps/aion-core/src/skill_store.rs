@@ -12,14 +12,27 @@ struct StoredSkill {
     name: String,
     description: String,
     wat: String,
+    /// Nº de tests que superó la mejor versión aceptada (para el RATCHET).
+    #[serde(default)]
+    passed: usize,
 }
 
 fn store_path() -> PathBuf {
     crate::app_data_dir().join("skills.jsonl")
 }
 
+/// RATCHET: nº de tests que superó la MEJOR versión guardada de una skill. Una
+/// re-forja solo debe reemplazarla si iguala o supera esta marca (no regresar).
+pub fn best_passed(name: &str) -> usize {
+    load_records()
+        .into_iter()
+        .find(|s| s.name == name)
+        .map(|s| s.passed)
+        .unwrap_or(0)
+}
+
 /// Guarda una skill forjada (idempotente por nombre: reemplaza si ya existía).
-pub fn save(name: &str, description: &str, wat: &str) -> std::io::Result<()> {
+pub fn save(name: &str, description: &str, wat: &str, passed: usize) -> std::io::Result<()> {
     let path = store_path();
     let mut skills = load_records();
     skills.retain(|s| s.name != name);
@@ -27,6 +40,7 @@ pub fn save(name: &str, description: &str, wat: &str) -> std::io::Result<()> {
         name: name.to_string(),
         description: description.to_string(),
         wat: wat.to_string(),
+        passed,
     });
     let body: String = skills
         .iter()

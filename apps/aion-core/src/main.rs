@@ -441,9 +441,9 @@ async fn run_self_evolve() -> Result<(), Box<dyn std::error::Error>> {
                 tests: tests.clone(),
             })
             .await?;
-        // Persiste la skill autoevolucionada para que perdure (toolbox crece).
-        if report.accepted {
-            let _ = skill_store::save("square", task, &code);
+        // Persiste con RATCHET: solo si no regresa respecto a la mejor versión.
+        if report.accepted && report.passed >= skill_store::best_passed("square") {
+            let _ = skill_store::save("square", task, &code, report.passed);
         }
         println!("   {} — {}", verdict(report.accepted), report.reason);
         audit.record(

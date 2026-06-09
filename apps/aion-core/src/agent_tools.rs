@@ -167,12 +167,23 @@ impl Tool for SkillForgeTool {
                 .await
                 .map_err(|e| e.to_string())?;
             if report.accepted {
-                // PERSISTE la skill: sobrevive a reinicios y queda disponible para
-                // siempre → la caja de herramientas de AION crece con el tiempo.
-                let _ = crate::skill_store::save(&spec.name, &spec.description, &code);
+                // RATCHET (MOSS/Ratchet): no aceptar una versión que rinda por debajo
+                // de la mejor previa — la auto-mejora nunca regresa.
+                let best = crate::skill_store::best_passed(&spec.name);
+                if report.passed < best {
+                    last = format!(
+                        "candidata pasó {} tests pero la mejor versión previa pasó {best} (ratchet: no regreso)",
+                        report.passed
+                    );
+                    continue;
+                }
+                // PERSISTE la skill (con su marca): la caja de herramientas crece y
+                // solo mejora.
+                let _ =
+                    crate::skill_store::save(&spec.name, &spec.description, &code, report.passed);
                 return Ok(format!(
                     "✅ skill «{}» creada, validada ({} tests ok) y GUARDADA para el futuro. \
-                     Úsala con skill_invoke. (código auto-generado, aprobado por sandbox+tests)",
+                     Úsala con skill_invoke. (auto-generada, aprobada por sandbox+tests+ratchet)",
                     spec.name, report.passed
                 ));
             }
