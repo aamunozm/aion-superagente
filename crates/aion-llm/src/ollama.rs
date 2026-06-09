@@ -65,6 +65,22 @@ impl OllamaEngine {
         })
     }
 
+    /// ¿Está el modelo listo (ya existe en Ollama)? En el primer arranque de una
+    /// máquina nueva, el modelo se descarga (~9 GB); hasta entonces no está listo.
+    pub async fn model_ready(&self) -> bool {
+        let url = format!("{}/api/tags", self.base_url);
+        let Ok(resp) = self.http.get(&url).send().await else {
+            return false;
+        };
+        let Ok(text) = resp.text().await else {
+            return false;
+        };
+        // El nombre puede venir como "gemma4-reason" o "gemma4-reason:latest".
+        text.contains(&format!("\"{}\"", self.model))
+            || text.contains(&format!("{}:latest", self.model))
+            || text.contains(&format!("\"{}:", self.model))
+    }
+
     /// Genera una respuesta a partir de un prompt + una imagen (base64) — visión
     /// multimodal. Requiere un modelo con visión (p. ej. gemma 4 abliterated).
     pub async fn generate_with_image(&self, prompt: &str, image_b64: &str) -> Result<Message> {

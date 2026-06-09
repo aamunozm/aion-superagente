@@ -62,6 +62,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .allow_headers(Any);
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/api/status", get(status))
         .route("/api/chat", post(chat))
         .route("/api/chat/new", post(chat_reset))
         .route("/api/agent", post(agent))
@@ -89,6 +90,19 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
 async fn health(State(st): State<AppState>) -> Json<serde_json::Value> {
     let ok = st.engine.health().await.is_ok();
     Json(serde_json::json!({ "ok": ok, "engine": st.engine.id() }))
+}
+
+/// Estado de preparación: si el motor responde y si el MODELO ya está listo.
+/// En el primer arranque el modelo se descarga (~9 GB); la UI usa esto para
+/// mostrar "preparando…" en vez de un error 404 críptico.
+async fn status(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let engine_up = st.engine.health().await.is_ok();
+    let model_ready = engine_up && st.engine.model_ready().await;
+    Json(serde_json::json!({
+        "engine_up": engine_up,
+        "model_ready": model_ready,
+        "engine": st.engine.id(),
+    }))
 }
 
 /// Chat con streaming SSE. Cada evento lleva JSON `{kind, text}` o `{kind:"done",...}`.

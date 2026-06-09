@@ -7,6 +7,7 @@ import {
   chatStream,
   inboxList,
   inboxRead,
+  status,
   type AgentEvent,
   type ChatEvent,
   type InboxMessage,
@@ -43,7 +44,28 @@ export default function ChatPage() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
   const [reachouts, setReachouts] = useState<InboxMessage[]>([]);
+  const [modelReady, setModelReady] = useState(true);
   const endRef = useRef<HTMLDivElement>(null);
+
+  // Estado del modelo: en el 1er arranque se descarga (~9 GB). Mostramos un aviso
+  // claro en vez de un error 404. Sondea hasta que esté listo.
+  useEffect(() => {
+    let alive = true;
+    async function check() {
+      try {
+        const s = await status();
+        if (alive) setModelReady(s.model_ready);
+      } catch {
+        /* núcleo aún arrancando */
+      }
+    }
+    check();
+    const id = setInterval(check, 15000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
 
   // Bandeja: AION te habla primero. Carga al abrir y sondea cada 30s.
   useEffect(() => {
@@ -76,6 +98,21 @@ export default function ChatPage() {
     e.preventDefault();
     const prompt = input.trim();
     if (!prompt || busy) return;
+    if (!modelReady) {
+      setTurns((t) => [
+        ...t,
+        {
+          prompt,
+          mode,
+          thinking: "",
+          steps: [],
+          answer:
+            "🔄 Todavía estoy preparándome: descargando el modelo (~9 GB). Espera a la notificación «¡Listo!» y vuelve a intentarlo.",
+        },
+      ]);
+      setInput("");
+      return;
+    }
     setInput("");
     setBusy(true);
     const idx = turns.length;
@@ -140,6 +177,16 @@ export default function ChatPage() {
       </header>
 
       <div className="flex-1 overflow-y-auto py-6 flex flex-col gap-6">
+        {!modelReady && (
+          <div
+            className="card text-sm"
+            style={{ borderColor: "var(--accent)", borderWidth: 1, color: "var(--text-2)" }}
+          >
+            🔄 <strong>Preparando la IA…</strong> Estoy descargando el modelo (~9 GB). La
+            primera vez tarda unos minutos según tu conexión. En cuanto termine podrás
+            chatear (te avisaré con una notificación). Puedes dejar esta ventana abierta.
+          </div>
+        )}
         {reachouts.length > 0 && (
           <div className="flex flex-col gap-2">
             <p className="text-xs font-medium" style={{ color: "var(--accent)" }}>

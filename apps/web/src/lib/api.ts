@@ -133,6 +133,10 @@ export type InboxMessage = {
   read: boolean;
 };
 
+/// Estado de preparación del motor/modelo (para mostrar "descargando…" en 1er arranque).
+export const status = () =>
+  jsonCall<{ engine_up: boolean; model_ready: boolean; engine: string }>("/api/status");
+
 export const inboxList = () =>
   jsonCall<{ unread: InboxMessage[]; unread_count: number; all: InboxMessage[] }>("/api/inbox");
 
