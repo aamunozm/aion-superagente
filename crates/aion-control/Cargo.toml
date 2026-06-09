@@ -1,0 +1,19 @@
+[package]
+name = "aion-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "AION OS control drivers: pantalla (visión) + teclado/ratón, multiplataforma, SIEMPRE detrás del Governor de aion-computer."
+
+[dependencies]
+aion-kernel.workspace = true
+aion-computer.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+base64 = "0.22"
+enigo = "0.3"
+uuid.workspace = true

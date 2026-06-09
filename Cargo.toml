@@ -13,6 +13,7 @@ members = [
     "crates/aion-sync",
     "crates/aion-control-client",
     "crates/aion-computer",
+    "crates/aion-control",
     "apps/aion-core",
     "apps/control-plane",
 ]
@@ -55,6 +56,7 @@ aion-browser = { path = "crates/aion-browser" }
 aion-sync = { path = "crates/aion-sync" }
 aion-control-client = { path = "crates/aion-control-client" }
 aion-computer = { path = "crates/aion-computer" }
+aion-control = { path = "crates/aion-control" }
 
 [profile.release]
 opt-level = 3

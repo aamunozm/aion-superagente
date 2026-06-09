@@ -94,6 +94,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("models-ensure") => {
             run_models_ensure();
         }
+        Some("see") => {
+            let prompt = if args.len() > 1 {
+                args[1..].join(" ")
+            } else {
+                "Describe lo que ves en la pantalla.".into()
+            };
+            run_see(&prompt).await?;
+        }
+        Some("governance") => {
+            run_governance(&args[1..]);
+        }
         Some("vision") => {
             let path = args.get(1).cloned().unwrap_or_default();
             let prompt = if args.len() > 2 {
@@ -1343,6 +1354,97 @@ fn run_models_ensure() {
         }
     } else {
         notify_user("AION", "¡Listo! AION ya está preparado.");
+    }
+}
+
+/// `see`: AION **mira la pantalla** (captura → Gemma visión) bajo el Governor.
+async fn run_see(prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let computer = aion_control::Computer::open(app_data_dir().join("control"))?;
+    println!("👁  AION captura la pantalla…");
+    let b64 = computer
+        .look()
+        .map_err(|e| format!("no pude ver la pantalla ({e}). En macOS, concede 'Grabación de pantalla' a AION."))?;
+
+    let model = std::env::var("AION_VISION_MODEL")
+        .unwrap_or_else(|_| "huihui_ai/gemma-4-abliterated:12b".into());
+    let engine = OllamaEngine::new(OllamaEngine::base_url_from_env(), &model);
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+
+    println!("🧑 {prompt}\n");
+    let msg = engine.generate_with_image(prompt, &b64).await?;
+    println!("💬 {}", msg.content.trim());
+    Ok(())
+}
+
+/// `governance`: ver y ajustar las reglas (postura, pausa/kill switch, audit, papelera).
+fn run_governance(args: &[String]) {
+    let dir = app_data_dir().join("control");
+    let mut gov = match aion_computer::Governor::open(&dir) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("no pude abrir la gobernanza: {e}");
+            return;
+        }
+    };
+    match args.first().map(String::as_str) {
+        Some("pause") => {
+            let _ = gov.set_paused(true);
+            println!("🛑 AION EN PAUSA (kill switch): se deniega toda acción.");
+        }
+        Some("resume") => {
+            let _ = gov.set_paused(false);
+            println!("▶️  AION reanudado.");
+        }
+        Some("posture") => {
+            let p = match args.get(1).map(String::as_str) {
+                Some("conservative") => aion_computer::Posture::Conservative,
+                Some("balanced") => aion_computer::Posture::Balanced,
+                Some("max") => aion_computer::Posture::MaxAutonomy,
+                _ => {
+                    println!("uso: governance posture <conservative|balanced|max>");
+                    return;
+                }
+            };
+            let _ = gov.set_posture(p);
+            println!("✅ postura cambiada a {p:?}");
+        }
+        Some("audit") => {
+            let recs = gov.audit().all().unwrap_or_default();
+            let n = recs.len();
+            println!("📜 audit log: {n} acciones (últimas 15)");
+            for r in recs.iter().rev().take(15).rev() {
+                let dec = match &r.decision {
+                    aion_computer::Decision::Allow { .. } => "🟢 permitida",
+                    aion_computer::Decision::Confirm { .. } => "🟡 confirmar",
+                    aion_computer::Decision::Deny { .. } => "🔴 denegada",
+                };
+                println!(
+                    "  {} · {dec} · {} · {}",
+                    r.at.format("%H:%M:%S"),
+                    r.action.verb,
+                    r.action.summary
+                );
+            }
+        }
+        Some("trash") => {
+            let entries = gov.trash().entries().unwrap_or_default();
+            println!("🗑  papelera AION: {} elementos (recuperables 30 días)", entries.len());
+            for e in &entries {
+                println!("  [{}] {} · borrado {}", &e.id[..8], e.original_path, e.deleted_at.format("%Y-%m-%d"));
+            }
+        }
+        _ => {
+            let p = &gov.policy;
+            println!("⚖️  Gobernanza de AION");
+            println!("  Postura : {:?}", p.posture);
+            println!("  Pausa   : {}", if p.paused { "SÍ (kill switch)" } else { "no" });
+            println!("  Rutas protegidas : {}", p.protected_paths.len());
+            println!("  Líneas rojas     : {}", p.hard_deny.len());
+            println!("\nComandos: governance [pause|resume|posture <p>|audit|trash]");
+        }
     }
 }
 

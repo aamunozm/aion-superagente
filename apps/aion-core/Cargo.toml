@@ -22,6 +22,8 @@ aion-evolution.workspace = true
 aion-browser.workspace = true
 aion-cognition.workspace = true
 aion-sync.workspace = true
+aion-computer.workspace = true
+aion-control.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 chrono = { workspace = true }
