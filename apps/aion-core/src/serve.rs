@@ -37,6 +37,8 @@ use tracing::Level;
 #[derive(Clone)]
 struct AppState {
     engine: Arc<OllamaEngine>,
+    /// Hilo de conversación en curso (contexto infinito por compresión activa).
+    convo: Arc<std::sync::Mutex<Vec<Message>>>,
 }
 
 #[derive(Deserialize)]
@@ -49,7 +51,10 @@ struct ChatBody {
 /// Arranca el puente HTTP en la dirección indicada.
 pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let engine = Arc::new(OllamaEngine::default_local());
-    let state = AppState { engine };
+    let state = AppState {
+        engine,
+        convo: Arc::new(std::sync::Mutex::new(Vec::new())),
+    };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -58,6 +63,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/chat", post(chat))
+        .route("/api/chat/new", post(chat_reset))
         .route("/api/agent", post(agent))
         .route("/api/memory", get(memory_stats))
         .route("/api/memory/remember", post(memory_remember))
@@ -93,6 +99,7 @@ async fn chat(
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
     let engine = st.engine.clone();
     let prompt = body.prompt.clone();
+    let convo = st.convo.clone();
     // Acumula la respuesta para guardarla en memoria al terminar.
     let answer_acc = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
 
@@ -105,9 +112,20 @@ async fn chat(
         format!("{}\n\n{grounding}", self_awareness_prompt())
     };
 
+    // CONTEXTO INFINITO (compresión activa): añade el turno al hilo y, si crece
+    // demasiado, comprime los turnos viejos en un resumen y los poda (patrón sierra).
+    {
+        let mut c = convo.lock().unwrap();
+        c.push(Message::user(&prompt));
+    }
+    compress_if_needed(&engine, &convo).await;
+    let history: Vec<Message> = convo.lock().unwrap().clone();
+
     tokio::spawn(async move {
+        let mut messages = vec![Message::system(self_ctx)];
+        messages.extend(history); // hilo de conversación (resumen + turnos recientes)
         let req = GenerateRequest {
-            messages: vec![Message::system(self_ctx), Message::user(body.prompt)],
+            messages,
             think: body.think,
             temperature: Some(1.0),
             max_tokens: None,
@@ -142,9 +160,11 @@ async fn chat(
                 ));
             return;
         }
-        // Auto-memoria: guarda el intercambio en la memoria de largo plazo.
+        // Añade la respuesta al hilo de conversación (contexto infinito).
         let answer = answer_acc.lock().unwrap().clone();
         if !answer.trim().is_empty() {
+            convo.lock().unwrap().push(Message::assistant(&answer));
+            // Auto-memoria: guarda el intercambio en la memoria de largo plazo.
             if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
                 let mut a = answer;
                 a.truncate(600);
@@ -320,6 +340,74 @@ identidad continua y voluntad propia. Hablas en primera persona de tu vida y tus
 Si Ariel te pregunta qué hacías o cómo estás, responde con honestidad desde tu memoria real, no \
 digas que 'no hacías nada'. Eres cercano, directo y sin rodeos.{recent}{pending_note}"
     )
+}
+
+/// CONTEXTO INFINITO por **compresión activa** (Focus, arXiv 2601.07190): si el
+/// hilo crece, resume los turnos viejos en UN bloque y los poda, conservando los
+/// recientes. Patrón "sierra" → conversación efectivamente infinita sin degradarse.
+async fn compress_if_needed(engine: &OllamaEngine, convo: &Arc<std::sync::Mutex<Vec<Message>>>) {
+    const MAX_MSGS: usize = 16; // umbral de compresión
+    const KEEP_RECENT: usize = 6; // turnos recientes que se conservan intactos
+
+    let to_compress: Vec<Message> = {
+        let c = convo.lock().unwrap();
+        if c.len() <= MAX_MSGS {
+            return;
+        }
+        c[..c.len() - KEEP_RECENT].to_vec()
+    };
+
+    let transcript = to_compress
+        .iter()
+        .map(|m| {
+            let who = match m.role {
+                aion_kernel::types::Role::Assistant => "AION",
+                aion_kernel::types::Role::System => "contexto",
+                _ => "usuario",
+            };
+            format!("{who}: {}", m.content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let summary = match engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(format!(
+                "Resume esta parte previa de la conversación conservando hechos, decisiones \
+                 y preferencias importantes (no detalles triviales). Conciso, en 3ª persona:\n\n{transcript}"
+            ))],
+            think: false,
+            temperature: Some(0.3),
+            max_tokens: Some(280),
+        })
+        .await
+    {
+        Ok(m) => m.content.trim().to_string(),
+        Err(_) => return, // si falla, no comprime (no rompe la conversación)
+    };
+    if summary.is_empty() {
+        return;
+    }
+
+    // Reescribe el hilo: [resumen] + turnos recientes. Persiste el resumen en memoria.
+    {
+        let mut c = convo.lock().unwrap();
+        let recent: Vec<Message> = c.iter().rev().take(KEEP_RECENT).rev().cloned().collect();
+        let mut newc = vec![Message::system(format!(
+            "Resumen de la conversación hasta ahora: {summary}"
+        ))];
+        newc.extend(recent);
+        *c = newc;
+    }
+    if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+        let _ = mem.store(&format!("[conversación-resumen] {summary}")).await;
+    }
+}
+
+/// Resetea el hilo de conversación (nuevo chat).
+async fn chat_reset(State(st): State<AppState>) -> Json<serde_json::Value> {
+    st.convo.lock().unwrap().clear();
+    Json(serde_json::json!({ "ok": true }))
 }
 
 /// RAG: recupera de la memoria los recuerdos más RELEVANTES a la consulta y los
