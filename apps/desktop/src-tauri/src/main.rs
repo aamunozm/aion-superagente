@@ -36,11 +36,16 @@ fn main() {
             let ollama_url = format!("http://{OLLAMA_HOST}");
 
             // 1) Motor LLM: Ollama EMBEBIDO desde Resources/ollama-runtime/.
-            //    No es un sidecar Tauri porque necesita a su runner `llama-server`
-            //    y dylibs como vecinos en la MISMA carpeta (cargan vía @loader_path).
+            //    No es un sidecar Tauri porque necesita a su runner (llama-server +
+            //    librerías nativas) como vecinos en la MISMA carpeta.
+            let ollama_rel = if cfg!(windows) {
+                "ollama-runtime/ollama.exe"
+            } else {
+                "ollama-runtime/ollama"
+            };
             match app
                 .path()
-                .resolve("ollama-runtime/ollama", tauri::path::BaseDirectory::Resource)
+                .resolve(ollama_rel, tauri::path::BaseDirectory::Resource)
             {
                 Ok(ollama_bin) => {
                     match std::process::Command::new(&ollama_bin)

@@ -1220,9 +1220,22 @@ fn run_history() -> Result<(), Box<dyn std::error::Error>> {
 /// Directorio de datos estable de AION (~/Library/Application Support/AION),
 /// independiente del directorio de trabajo. Se crea si no existe.
 fn app_data_dir() -> std::path::PathBuf {
-    let base = std::env::var("HOME")
-        .map(|h| std::path::PathBuf::from(h).join("Library/Application Support/AION"))
-        .unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let base = if cfg!(windows) {
+        // Windows: %APPDATA%\AION
+        std::env::var("APPDATA")
+            .map(|a| std::path::PathBuf::from(a).join("AION"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("data"))
+    } else if cfg!(target_os = "macos") {
+        // macOS: ~/Library/Application Support/AION
+        std::env::var("HOME")
+            .map(|h| std::path::PathBuf::from(h).join("Library/Application Support/AION"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("data"))
+    } else {
+        // Linux/otros: ~/.local/share/AION
+        std::env::var("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".local/share/AION"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("data"))
+    };
     let _ = std::fs::create_dir_all(&base);
     base
 }

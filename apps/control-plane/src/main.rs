@@ -29,11 +29,8 @@ async fn main() {
     tracing::info!(public_key = %issuer.public_key_hex(), "clave pública de licencias (embeber en el cliente)");
 
     // Almacén de usuarios PERSISTENTE (las cuentas sobreviven a reinicios).
-    let users_path = std::env::var("AION_USERS").unwrap_or_else(|_| {
-        std::env::var("HOME")
-            .map(|h| format!("{h}/Library/Application Support/AION/users.jsonl"))
-            .unwrap_or_else(|_| "data/users.jsonl".into())
-    });
+    let users_path =
+        std::env::var("AION_USERS").unwrap_or_else(|_| app_data_file("users.jsonl"));
     let store = FileStore::open(&users_path);
     tracing::info!(%users_path, usuarios = store.len(), "store de usuarios cargado");
 
@@ -51,6 +48,26 @@ async fn main() {
     axum::serve(listener, app).await.expect("serve");
 }
 
+/// Ruta de un archivo dentro del directorio de datos de AION, MULTIPLATAFORMA
+/// (Windows %APPDATA%\AION, macOS ~/Library/Application Support/AION, Linux
+/// ~/.local/share/AION).
+fn app_data_file(name: &str) -> String {
+    let dir = if cfg!(windows) {
+        std::env::var("APPDATA")
+            .map(|a| std::path::PathBuf::from(a).join("AION"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("data"))
+    } else if cfg!(target_os = "macos") {
+        std::env::var("HOME")
+            .map(|h| std::path::PathBuf::from(h).join("Library/Application Support/AION"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("data"))
+    } else {
+        std::env::var("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".local/share/AION"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("data"))
+    };
+    dir.join(name).to_string_lossy().into_owned()
+}
+
 /// Carga la clave de firma de licencias desde disco (o `AION_LICENSE_KEY`),
 /// generándola y guardándola la primera vez. Garantiza una clave pública estable.
 fn load_or_create_issuer() -> LicenseIssuer {
@@ -59,11 +76,8 @@ fn load_or_create_issuer() -> LicenseIssuer {
             return issuer;
         }
     }
-    let path = std::env::var("AION_LICENSE_KEY_FILE").unwrap_or_else(|_| {
-        std::env::var("HOME")
-            .map(|h| format!("{h}/Library/Application Support/AION/license_signing_key.hex"))
-            .unwrap_or_else(|_| "data/license_signing_key.hex".into())
-    });
+    let path = std::env::var("AION_LICENSE_KEY_FILE")
+        .unwrap_or_else(|_| app_data_file("license_signing_key.hex"));
     if let Ok(hexk) = std::fs::read_to_string(&path) {
         if let Ok(issuer) = LicenseIssuer::from_hex(hexk.trim()) {
             return issuer;
