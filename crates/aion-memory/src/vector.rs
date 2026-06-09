@@ -154,19 +154,37 @@ impl MemoryStore for VectorMemory {
         let q = self.embedder.embed(query).await?;
         let mut scored: Vec<(f32, MemoryHit)> = {
             let mut recs = self.records.lock().unwrap();
+            let n = recs.len().max(1) as f32;
+            let max_access = recs.iter().map(|r| r.access_count).max().unwrap_or(0) as f32;
             let mut out = Vec::with_capacity(recs.len());
-            for r in recs.iter() {
-                let score = cosine(&q, &r.embedding);
+            for (i, r) in recs.iter().enumerate() {
+                // 1) Semántica (coseno, 0..1).
+                let sem = cosine(&q, &r.embedding).clamp(0.0, 1.0);
+                // 2) Léxica (solapamiento de palabras query↔contenido).
+                let lex = lexical_overlap(query, &r.content);
+                // 3) Recencia (posición: más nuevo → más alto).
+                let rec = if n > 1.0 { i as f32 / (n - 1.0) } else { 1.0 };
+                // 4) Importancia (fitness + uso normalizado).
+                let usage = if max_access > 0.0 {
+                    r.access_count as f32 / max_access
+                } else {
+                    0.0
+                };
+                let importance = (r.fitness * 0.7 + usage * 0.3).clamp(0.0, 1.0);
+                // Puntuación compuesta (estado del arte: relevancia × recencia × importancia).
+                let composite =
+                    0.55 * sem + 0.20 * lex + 0.15 * rec + 0.10 * importance;
                 out.push((
-                    score,
+                    composite,
                     MemoryHit {
                         id: r.id.clone(),
                         content: r.content.clone(),
-                        score,
+                        score: composite,
                     },
                 ));
             }
             out.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            // Refuerzo: lo recuperado sube uso+fitness (lo útil emerge).
             let top_ids: Vec<String> = out.iter().take(k).map(|(_, h)| h.id.clone()).collect();
             for r in recs.iter_mut() {
                 if top_ids.contains(&r.id) {
@@ -178,6 +196,29 @@ impl MemoryStore for VectorMemory {
         };
         scored.truncate(k);
         Ok(scored.into_iter().map(|(_, h)| h).collect())
+    }
+}
+
+/// Solapamiento léxico (Jaccard de palabras significativas, en minúsculas). Capta
+/// coincidencias exactas (nombres, términos) que el embedding semántico puede diluir.
+fn lexical_overlap(a: &str, b: &str) -> f32 {
+    fn words(s: &str) -> std::collections::HashSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 3) // ignora palabras muy cortas/funcionales
+            .map(|w| w.to_string())
+            .collect()
+    }
+    let (wa, wb) = (words(a), words(b));
+    if wa.is_empty() || wb.is_empty() {
+        return 0.0;
+    }
+    let inter = wa.intersection(&wb).count() as f32;
+    let union = wa.union(&wb).count() as f32;
+    if union > 0.0 {
+        inter / union
+    } else {
+        0.0
     }
 }
 

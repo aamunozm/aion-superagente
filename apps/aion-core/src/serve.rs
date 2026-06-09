@@ -325,21 +325,30 @@ digas que 'no hacías nada'. Eres cercano, directo y sin rodeos.{recent}{pending
 /// RAG: recupera de la memoria los recuerdos más RELEVANTES a la consulta y los
 /// formatea como contexto, para que AION aplique lo que ha aprendido/investigado.
 async fn relevant_knowledge(prompt: &str) -> String {
+    // 1) COMPUERTA ADAPTATIVA: no recuperar para saludos/trivialidades (evita ruido).
+    if is_trivial_query(prompt) {
+        return String::new();
+    }
     let Ok(mem) = VectorMemory::persistent_local(memory_path()) else {
         return String::new();
     };
-    let hits = match mem.retrieve(prompt, 4).await {
+    let hits = match mem.retrieve(prompt, 5).await {
         Ok(h) => h,
         Err(_) => return String::new(),
     };
-    // Solo lo suficientemente relevante (evita inyectar ruido).
-    let useful: Vec<_> = hits.into_iter().filter(|h| h.score > 0.35).collect();
+    // 2) Umbral dinámico sobre la puntuación híbrida: nos quedamos con lo que
+    //    realmente destaca (>= 0.30 absoluto y dentro del 75% del mejor).
+    let best = hits.first().map(|h| h.score).unwrap_or(0.0);
+    if best < 0.30 {
+        return String::new();
+    }
+    let cutoff = (best * 0.75).max(0.28);
+    let useful: Vec<_> = hits.into_iter().filter(|h| h.score >= cutoff).take(4).collect();
     if useful.is_empty() {
         return String::new();
     }
     let mut s = String::from(
-        "Conocimiento de TU memoria relevante para esta pregunta (aplícalo si ayuda, \
-         cítalo con naturalidad):\n",
+        "Conocimiento de TU memoria relevante para esto (aplícalo si ayuda, con naturalidad):\n",
     );
     for h in useful {
         let mut c = h.content.clone();
@@ -347,6 +356,20 @@ async fn relevant_knowledge(prompt: &str) -> String {
         s.push_str(&format!("- {c}\n"));
     }
     s
+}
+
+/// Heurística barata para decidir CUÁNDO no merece la pena consultar memoria
+/// (saludos, agradecimientos, entradas muy cortas sin contenido sustantivo).
+fn is_trivial_query(prompt: &str) -> bool {
+    let p = prompt.trim().to_lowercase();
+    let words = p.split_whitespace().count();
+    const GREETINGS: [&str; 10] = [
+        "hola", "buenas", "hey", "gracias", "ok", "vale", "adios", "adiós", "chao", "saludos",
+    ];
+    if words <= 2 && GREETINGS.iter().any(|g| p.starts_with(g)) {
+        return true;
+    }
+    p.is_empty() || p.len() < 4
 }
 
 /// Estadísticas de la memoria de largo plazo.
