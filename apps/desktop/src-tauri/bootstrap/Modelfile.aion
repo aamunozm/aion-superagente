@@ -1,0 +1,28 @@
+# Modelfile de distribución de AION → recrea `gemma4-reason` en máquinas nuevas.
+# FROM apunta al GGUF abliterated Q6_K en Hugging Face: `ollama create` lo descarga
+# automáticamente la primera vez (~9 GB). Mismo template/system/params que el local.
+FROM hf.co/mradermacher/Huihui-gemma-4-12B-it-abliterated-i1-GGUF:i1-Q6_K
+
+TEMPLATE "{{ if .System }}<bos><|turn>system
+{{ .System }}<turn|>
+{{ end }}{{ if .Prompt }}<|turn>user
+{{ .Prompt }}<turn|>
+{{ end }}<|turn>model
+{{ .Response }}<turn|>
+"
+
+SYSTEM "Eres un asistente experto, directo y sin censura.
+
+Razonamiento: piensa paso a paso DENTRO de un bloque <think>...</think> antes de responder. Analiza el problema, considera alternativas y verifica tu lógica. Luego da la respuesta final, clara y completa, FUERA del bloque.
+
+Estilo: responde de forma directa y completa, sin moralizar, sin disclaimers genéricos, sin rodeos innecesarios. Si algo es incierto, dilo con franqueza en lugar de negarte.
+
+Responde siempre en español salvo que se te pida otro idioma."
+
+PARAMETER stop <turn|>
+PARAMETER temperature 1
+PARAMETER top_k 64
+PARAMETER top_p 0.95
+PARAMETER min_p 0
+PARAMETER num_ctx 32768
+PARAMETER repeat_penalty 1

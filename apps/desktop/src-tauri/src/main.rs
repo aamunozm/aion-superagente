@@ -50,6 +50,26 @@ fn main() {
                     {
                         Ok(child) => {
                             *app.state::<Sidecars>().ollama.lock().unwrap() = Some(child);
+                            // Bootstrap de modelos en primer arranque (segundo plano).
+                            // Si faltan los modelos, los descarga/crea con el binario
+                            // embebido y avisa al usuario; si ya existen, no hace nada.
+                            if let (Ok(script), Ok(modelfile)) = (
+                                app.path().resolve(
+                                    "bootstrap/first-run-models.sh",
+                                    tauri::path::BaseDirectory::Resource,
+                                ),
+                                app.path().resolve(
+                                    "bootstrap/Modelfile.aion",
+                                    tauri::path::BaseDirectory::Resource,
+                                ),
+                            ) {
+                                let _ = std::process::Command::new("/bin/bash")
+                                    .arg(script)
+                                    .arg(&ollama_bin)
+                                    .arg(modelfile)
+                                    .arg(OLLAMA_HOST)
+                                    .spawn();
+                            }
                         }
                         Err(e) => eprintln!("AION: no se pudo lanzar Ollama embebido: {e}"),
                     }
