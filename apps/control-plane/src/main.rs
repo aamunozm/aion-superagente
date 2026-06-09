@@ -10,7 +10,7 @@ mod store;
 use aion_control_client::LicenseIssuer;
 use state::AppState;
 use std::sync::Arc;
-use store::InMemoryStore;
+use store::FileStore;
 
 #[tokio::main]
 async fn main() {
@@ -28,8 +28,17 @@ async fn main() {
     let issuer = load_or_create_issuer();
     tracing::info!(public_key = %issuer.public_key_hex(), "clave pública de licencias (embeber en el cliente)");
 
+    // Almacén de usuarios PERSISTENTE (las cuentas sobreviven a reinicios).
+    let users_path = std::env::var("AION_USERS").unwrap_or_else(|_| {
+        std::env::var("HOME")
+            .map(|h| format!("{h}/Library/Application Support/AION/users.jsonl"))
+            .unwrap_or_else(|_| "data/users.jsonl".into())
+    });
+    let store = FileStore::open(&users_path);
+    tracing::info!(%users_path, usuarios = store.len(), "store de usuarios cargado");
+
     let state = AppState {
-        store: Arc::new(InMemoryStore::default()),
+        store: Arc::new(store),
         jwt_secret: Arc::new(jwt_secret),
         issuer: Arc::new(issuer),
         stripe_configured,
@@ -50,8 +59,11 @@ fn load_or_create_issuer() -> LicenseIssuer {
             return issuer;
         }
     }
-    let path = std::env::var("AION_LICENSE_KEY_FILE")
-        .unwrap_or_else(|_| "data/license_signing_key.hex".into());
+    let path = std::env::var("AION_LICENSE_KEY_FILE").unwrap_or_else(|_| {
+        std::env::var("HOME")
+            .map(|h| format!("{h}/Library/Application Support/AION/license_signing_key.hex"))
+            .unwrap_or_else(|_| "data/license_signing_key.hex".into())
+    });
     if let Ok(hexk) = std::fs::read_to_string(&path) {
         if let Ok(issuer) = LicenseIssuer::from_hex(hexk.trim()) {
             return issuer;
