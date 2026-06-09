@@ -533,7 +533,7 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
     let audit = aion_telemetry::AuditLog::default_local();
     let mut self_model = SelfModel::default();
     let mut curiosity = CuriosityEngine::new(8);
-    let activities = ["razonar", "estudiar", "evolucionar"];
+    let activities = ["razonar", "estudiar", "evolucionar", "investigar"];
     let mut consecutive_errors = 0u32;
     const BREAKER: u32 = 3;
 
@@ -556,14 +556,19 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
         let (success, detail) = match goal {
             "razonar" => agent_once(&engine, "¿Cuánto es 37*21+8? Usa la calculadora.").await,
             "evolucionar" => self_evolve_once(&engine).await,
+            "investigar" => research_once(&engine).await,
             _ => study_once(&engine).await,
         };
         println!("   {} {goal}: {detail}", if success { "✅" } else { "❌" });
 
         // 🔔 AION "quiere hablarte": convierte lo descubierto en un MENSAJE PARA TI
         // (Bandeja) y avisa. Así te busca él, no solo responde.
-        if success && (goal == "estudiar" || goal == "evolucionar") {
-            let kind = if goal == "evolucionar" { "idea" } else { "insight" };
+        if success && (goal == "estudiar" || goal == "evolucionar" || goal == "investigar") {
+            let kind = match goal {
+                "evolucionar" => "idea",
+                "investigar" => "insight",
+                _ => "insight",
+            };
             let message = reach_out(&engine, goal, &detail).await;
             if let Ok(ibx) = inbox::Inbox::open(inbox_path()) {
                 let _ = ibx.push(kind, &message);
@@ -732,6 +737,66 @@ async fn study_once(engine: &OllamaEngine) -> (bool, String) {
         }
         Err(e) => (false, e.to_string()),
     }
+}
+
+/// `investigar`: AION decide un tema, **busca en internet de verdad**, lee una
+/// fuente y guarda lo aprendido en su memoria. Investigación autónoma real.
+async fn research_once(engine: &OllamaEngine) -> (bool, String) {
+    use aion_browser::WebClient;
+    // 1) AION elige qué investigar (curiosidad).
+    let topic = match engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(
+                "Propón en MENOS de 8 palabras un tema que te gustaría investigar hoy para \
+                 ser mejor agente. Responde solo el tema, sin comillas.",
+            )],
+            think: false,
+            temperature: Some(1.0),
+            max_tokens: Some(30),
+        })
+        .await
+    {
+        Ok(m) => m.content.trim().replace('\n', " "),
+        Err(e) => return (false, format!("no pude elegir tema: {e}")),
+    };
+
+    // 2) Busca en internet y lee la mejor fuente.
+    let web = WebClient::new();
+    let results = match web.search(&topic, 3).await {
+        Ok(r) if !r.is_empty() => r,
+        _ => return (false, format!("sin resultados para «{topic}»")),
+    };
+    let source = &results[0];
+    let page = web
+        .fetch_text(&source.url)
+        .await
+        .unwrap_or_else(|_| source.snippet.clone());
+    let excerpt: String = page.chars().take(1500).collect();
+
+    // 3) Resume lo aprendido y lo guarda en memoria.
+    let summary = match engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(format!(
+                "Investigué «{topic}». Fuente: {}.\n\nTexto:\n{excerpt}\n\n\
+                 Resume en 1-2 frases QUÉ APRENDÍ de valor. Directo, primera persona.",
+                source.url
+            ))],
+            think: false,
+            temperature: Some(0.7),
+            max_tokens: Some(160),
+        })
+        .await
+    {
+        Ok(m) => m.content.trim().to_string(),
+        Err(e) => return (false, e.to_string()),
+    };
+
+    if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+        let _ = mem
+            .store(&format!("[investigación] {topic}: {summary} (fuente: {})", source.url))
+            .await;
+    }
+    (!summary.is_empty(), format!("{topic} → {summary}"))
 }
 
 /// Demo de cognición: curiosidad (learning progress), auto-modelo y calibración.

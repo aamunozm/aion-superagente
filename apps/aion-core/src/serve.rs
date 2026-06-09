@@ -196,8 +196,10 @@ async fn agent(
             tools.register(Arc::new(crate::agent_tools::SkillInvokeTool::new(host)));
         }
 
-        // 🌐 Investigación: leer la web (navegador propio).
-        tools.register(Arc::new(WebTool::new(Arc::new(WebClient::new()))));
+        // 🌐 Investigación real: buscar en internet + leer páginas (navegador propio).
+        let web = Arc::new(WebClient::new());
+        tools.register(Arc::new(crate::agent_tools::SearchTool::new(web.clone())));
+        tools.register(Arc::new(WebTool::new(web)));
 
         let bus = EventBus::default();
 

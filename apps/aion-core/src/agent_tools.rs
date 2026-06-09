@@ -3,6 +3,7 @@
 //! sí mismo, validado en sandbox+tests) e invocación de las skills que ha forjado.
 //! Esto unifica los "órganos" de AION dentro del agente con el que hablas.
 
+use aion_browser::WebClient;
 use aion_evolution::{Candidate, EvolutionEngine};
 use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, SkillHost};
 use aion_kernel::types::Message;
@@ -12,6 +13,42 @@ use aion_orchestrator::Tool;
 use aion_skills::{SkillManifest, WasmSkillHost};
 use async_trait::async_trait;
 use std::sync::Arc;
+
+// ── 0) Buscar en la web: investigación real (multi-fuente) ──────────────────
+
+/// Buscador web real (DuckDuckGo con respaldo en Wikipedia). Devuelve títulos,
+/// URLs y fragmentos; el agente luego puede leer las URLs con web_fetch.
+pub struct SearchTool {
+    web: Arc<WebClient>,
+}
+
+impl SearchTool {
+    pub fn new(web: Arc<WebClient>) -> Self {
+        Self { web }
+    }
+}
+
+#[async_trait]
+impl Tool for SearchTool {
+    fn name(&self) -> &str {
+        "web_search"
+    }
+    fn description(&self) -> &str {
+        "Busca en internet. Entrada: una consulta de búsqueda. Devuelve los \
+         resultados (título, URL, fragmento). Luego usa web_fetch para leer una URL."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let results = self.web.search(input.trim(), 5).await.map_err(|e| e.to_string())?;
+        if results.is_empty() {
+            return Ok("(sin resultados)".into());
+        }
+        Ok(results
+            .iter()
+            .map(|r| format!("• {} — {}\n  {}", r.title, r.url, r.snippet))
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+}
 
 // ── 1) Recordar: el agente escribe en su memoria de largo plazo ─────────────
 
