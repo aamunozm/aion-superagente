@@ -42,7 +42,7 @@ const STEP_STYLE: Record<Step["kind"], { icon: React.ComponentProps<typeof Icon>
 
 export default function ChatPage() {
   const [input, setInput] = useState("");
-  const [mode, setMode] = useState<Mode>("chat");
+  const [mode, setMode] = useState<Mode>("agent");
   const [think, setThink] = useState(true);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
@@ -163,7 +163,7 @@ export default function ChatPage() {
           {busy ? "AION trabajando…" : "gemma4-reason · local"}
         </span>
         <div className="ml-auto flex gap-1 p-1 rounded-full" style={{ background: "var(--surface-2)" }}>
-          {(["chat", "agent", "crew"] as const).map((m) => (
+          {(["agent", "crew", "chat"] as const).map((m) => (
             <button
               key={m}
               onClick={() => setMode(m)}
