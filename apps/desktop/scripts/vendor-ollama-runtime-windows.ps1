@@ -47,6 +47,16 @@ if (-not (Test-Path $exe)) {
 }
 if (-not (Test-Path $exe)) { throw "No se encontró ollama.exe tras extraer." }
 
+# RECORTE de aceleradores GPU (CUDA/ROCm): pesan cientos de MB y solo sirven en PCs
+# con GPU NVIDIA/AMD. Para un instalador ligero y universal, AION corre en CPU. Si el
+# usuario tiene GPU, puede instalar Ollama aparte. (Reduce el .exe a la mitad o más.)
+Get-ChildItem -Recurse -Directory $dest |
+  Where-Object { $_.Name -match 'cuda|rocm|cu1[12]|hip' } |
+  ForEach-Object { Write-Host "  recortando GPU: $($_.FullName)"; Remove-Item -Recurse -Force $_.FullName }
+Get-ChildItem -Recurse -File $dest |
+  Where-Object { $_.Name -match 'cuda|cublas|rocm|hipblas|ggml-cuda|ggml-hip' } |
+  ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }
+
 $count = (Get-ChildItem -Recurse $dest | Measure-Object).Count
 $size = "{0:N0} MB" -f ((Get-ChildItem -Recurse $dest | Measure-Object Length -Sum).Sum / 1MB)
 Write-Host "OK -> $dest ($count archivos, $size)"
