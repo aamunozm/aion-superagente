@@ -102,15 +102,22 @@ pub fn catalog(tier: &str) -> Vec<ModelOption> {
         note: note.into(),
         recommended: t == tier,
     };
+    // Solo modelos SIN CENSURA (abliterated / uncensored), quantizados y recientes.
     vec![
-        // Bajo consumo.
-        m("llama32-1b", "Llama 3.2 1B", "llama3.2:1b", 1.3, "bajo", "Muy ligero y rápido; ideal para equipos modestos."),
-        m("gemma3-1b", "Gemma 3 1B", "gemma3:1b", 0.8, "bajo", "Minúsculo, arranca en cualquier equipo."),
-        // Medio.
-        m("gemma3-4b", "Gemma 3 4B", "gemma3:4b", 3.3, "medio", "Buen equilibrio calidad/velocidad."),
-        m("llama31-8b", "Llama 3.1 8B", "llama3.1:8b", 4.7, "medio", "Más capaz; necesita algo más de RAM."),
-        // Superior.
-        m("gemma4-reason", "Gemma 4 12B · razonamiento (AION)", "gemma4-reason", 9.8, "superior", "El modelo propio de AION: sin censura, con razonamiento. Recomendado si tu equipo lo permite."),
-        m("qwen25-14b", "Qwen 2.5 14B", "qwen2.5:14b", 9.0, "superior", "Alternativa potente de alta calidad."),
+        // ── Bajo consumo (equipos modestos / poca RAM) ──
+        m("llama32-1b-ablit", "Llama 3.2 1B · abliterated", "huihui_ai/llama3.2-abliterate:1b", 1.3, "bajo",
+          "Sin censura, ultraligero (Q4). Arranca en casi cualquier equipo."),
+        m("llama32-3b-ablit", "Llama 3.2 3B · abliterated", "huihui_ai/llama3.2-abliterate:3b", 2.0, "bajo",
+          "Sin censura (Q4), algo más capaz manteniendo bajo consumo."),
+        // ── Medio (equilibrio calidad/velocidad) ──
+        m("dolphin3-8b", "Dolphin 3 8B · uncensored", "dolphin3:8b", 4.9, "medio",
+          "Sin censura (Q4), muy buen equilibrio para uso diario."),
+        m("qwen25-7b-ablit", "Qwen 2.5 7B · abliterated", "huihui_ai/qwen2.5-abliterate:7b", 4.7, "medio",
+          "Sin censura (Q4), fuerte en razonamiento y código."),
+        // ── Superior (máxima calidad) ──
+        m("gemma4-reason", "Gemma 4 12B · razonamiento (AION)", "gemma4-reason", 9.8, "superior",
+          "El modelo propio de AION: Gemma 4 12B abliterated Q6 con razonamiento. Sin censura y de máxima calidad."),
+        m("qwen25-14b-ablit", "Qwen 2.5 14B · abliterated", "huihui_ai/qwen2.5-abliterate:14b", 9.0, "superior",
+          "Sin censura (Q4), alternativa potente de alta calidad."),
     ]
 }
