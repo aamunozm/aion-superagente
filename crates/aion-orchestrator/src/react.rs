@@ -83,7 +83,10 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
              • ARCHIVOS/CARPETAS del usuario (contar, listar, «cuántos PDF hay en el \
              escritorio»): usa SIEMPRE files_list. NUNCA uses web_search, memory_search ni \
              skills para esto.\n\
-             • web_search/web_fetch: solo para información de INTERNET, no para archivos locales.\n\
+             • RED LOCAL (cuántos equipos hay conectados, qué dispositivos, sus IPs): usa \
+             SIEMPRE net_scan. NUNCA uses web_search para esto ni inventes IPs.\n\
+             • web_search/web_fetch: solo para información de INTERNET, no para archivos \
+             locales ni para la red local.\n\
              • memory_search: SOLO para datos concretos que pudieras haber guardado; nunca para \
              saber quién eres ni para contar archivos.\n\
              • Aritmética: usa la calculadora.\n\

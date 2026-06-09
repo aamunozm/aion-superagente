@@ -99,6 +99,169 @@ impl Tool for FilesTool {
     }
 }
 
+// ── Red local: descubrir equipos conectados y sus IPs (solo lectura) ────────
+
+/// Escanea la **red local** (LAN) y devuelve los equipos conectados con su IP y
+/// MAC. Es real: hace un barrido de ping de la subred para poblar la tabla ARP y
+/// luego la lee (`arp -a`). Solo lectura, no modifica nada de la red.
+pub struct NetTool;
+
+impl NetTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for NetTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// IP IPv4 de la interfaz principal (macOS: en0/en1; Linux: vía `hostname -I`).
+async fn local_ipv4() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        for iface in ["en0", "en1", "en2"] {
+            if let Ok(out) = tokio::process::Command::new("ipconfig")
+                .args(["getifaddr", iface])
+                .output()
+                .await
+            {
+                let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !ip.is_empty() {
+                    return Some(ip);
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let out = tokio::process::Command::new("hostname")
+            .arg("-I")
+            .output()
+            .await
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .find(|s| s.contains('.'))
+            .map(|s| s.to_string())
+    }
+}
+
+#[async_trait]
+impl Tool for NetTool {
+    fn name(&self) -> &str {
+        "net_scan"
+    }
+    fn description(&self) -> &str {
+        "Escanea TU red local y devuelve los equipos conectados con su IP y MAC \
+         (cuántos hay y cuáles son). Úsala para «cuántos equipos hay en la red», \
+         «qué dispositivos están conectados», «sus IPs». No necesita entrada."
+    }
+    async fn run(&self, _input: &str) -> Result<String, String> {
+        let my_ip = local_ipv4()
+            .await
+            .ok_or_else(|| "no detecté tu IP local (¿estás conectado a una red?)".to_string())?;
+        // Prefijo /24 (los tres primeros octetos) para barrer la subred.
+        let prefix = {
+            let mut it = my_ip.rsplitn(2, '.');
+            let _last = it.next();
+            it.next().map(|p| p.to_string())
+        }
+        .ok_or_else(|| format!("IP local con formato inesperado: {my_ip}"))?;
+
+        // Barrido de ping en paralelo (.1–.254) para poblar la tabla ARP. Timeout
+        // corto por host; el conjunto termina en ~1–2 s.
+        let mut pings = Vec::new();
+        for host in 1u8..=254 {
+            let ip = format!("{prefix}.{host}");
+            pings.push(tokio::spawn(async move {
+                #[cfg(target_os = "macos")]
+                let args = ["-c", "1", "-t", "1", &ip];
+                #[cfg(not(target_os = "macos"))]
+                let args = ["-c", "1", "-W", "1", &ip];
+                let _ = tokio::process::Command::new("ping")
+                    .args(args)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .await;
+            }));
+        }
+        for p in pings {
+            let _ = p.await;
+        }
+
+        // Lee la tabla ARP poblada.
+        let out = tokio::process::Command::new("arp")
+            .arg("-a")
+            .output()
+            .await
+            .map_err(|e| format!("no pude leer la tabla ARP: {e}"))?;
+        let table = String::from_utf8_lossy(&out.stdout);
+
+        // Parse: "host (192.168.1.5) at aa:bb:.. on en0 ..." — nos quedamos con los
+        // de NUESTRA subred y descartamos entradas incompletas.
+        let mut devices: Vec<(String, String, String)> = Vec::new(); // (ip, mac, host)
+        for line in table.lines() {
+            let Some(open) = line.find('(') else { continue };
+            let Some(close) = line.find(')') else { continue };
+            let ip = line[open + 1..close].trim().to_string();
+            if !ip.starts_with(&format!("{prefix}.")) {
+                continue;
+            }
+            // Descarta red (.0), broadcast (.255) y multicast — no son equipos.
+            let last: u8 = ip.rsplit('.').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            if last == 0 || last == 255 {
+                continue;
+            }
+            let mac = line
+                .split(" at ")
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+                .unwrap_or("")
+                .to_string();
+            if mac.is_empty() || mac.contains("incomplete") {
+                continue;
+            }
+            let host = line[..open].trim().trim_end_matches('?').trim().to_string();
+            if devices.iter().any(|(i, _, _)| i == &ip) {
+                continue;
+            }
+            devices.push((ip, mac, host));
+        }
+
+        // Incluye este equipo (puede no salir en su propia tabla ARP).
+        if !devices.iter().any(|(i, _, _)| i == &my_ip) {
+            devices.push((my_ip.clone(), "—".into(), "este equipo".into()));
+        }
+        devices.sort_by(|a, b| {
+            let pa: u8 = a.0.rsplit('.').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let pb: u8 = b.0.rsplit('.').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            pa.cmp(&pb)
+        });
+
+        if devices.is_empty() {
+            return Ok("no detecté equipos activos en la red (tabla ARP vacía).".into());
+        }
+        let list = devices
+            .iter()
+            .map(|(ip, mac, host)| {
+                let tag = if ip == &my_ip { " (este equipo)" } else { "" };
+                let h = if host.is_empty() { String::new() } else { format!(" — {host}") };
+                format!("{ip} [{mac}]{h}{tag}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(format!(
+            "{} equipos conectados en la red {prefix}.0/24:\n{list}",
+            devices.len()
+        ))
+    }
+}
+
 // ── 0) Buscar en la web: investigación real (multi-fuente) ──────────────────
 
 /// Buscador web real (DuckDuckGo con respaldo en Wikipedia). Devuelve títulos,

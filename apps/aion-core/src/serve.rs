@@ -439,6 +439,7 @@ async fn agent(
         tools.register(Arc::new(WebTool::new(web)));
         // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
+        tools.register(Arc::new(crate::agent_tools::NetTool::new()));
 
         let bus = EventBus::default();
 
@@ -533,6 +534,7 @@ async fn crew(
         tools.register(Arc::new(WebTool::new(web)));
         // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
+        tools.register(Arc::new(crate::agent_tools::NetTool::new()));
 
         let bus = EventBus::default();
         // Reenvía la actividad de CADA agente con su rol (jerarquía visible).
