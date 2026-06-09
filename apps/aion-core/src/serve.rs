@@ -332,7 +332,8 @@ async fn relevant_knowledge(prompt: &str) -> String {
     let Ok(mem) = VectorMemory::persistent_local(memory_path()) else {
         return String::new();
     };
-    let hits = match mem.retrieve(prompt, 5).await {
+    // Recuperación ASOCIATIVA: relevantes + relacionados por grafo (otros chats).
+    let hits = match mem.retrieve_associative(prompt, 4, 1).await {
         Ok(h) => h,
         Err(_) => return String::new(),
     };
@@ -368,7 +369,7 @@ async fn grounding_for_agent(engine: &OllamaEngine, task: &str) -> String {
     let Ok(mem) = VectorMemory::persistent_local(memory_path()) else {
         return String::new();
     };
-    let hits = match mem.retrieve(task, 6).await {
+    let hits = match mem.retrieve_associative(task, 5, 1).await {
         Ok(h) => h.into_iter().filter(|h| h.score >= 0.25).collect::<Vec<_>>(),
         Err(_) => return String::new(),
     };

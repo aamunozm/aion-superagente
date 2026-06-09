@@ -25,6 +25,10 @@ use uuid::Uuid;
 /// Umbral de similitud para considerar que un recuerdo nuevo ACTUALIZA a otro
 /// (misma cosa, valor nuevo) → el viejo se marca obsoleto sin borrarlo.
 const SUPERSEDE_SIM: f32 = 0.88;
+/// Rango de similitud para crear una ARISTA asociativa (relacionados, no idénticos):
+/// base del grafo de memoria que conecta recuerdos entre chats distintos (GAAMA).
+const LINK_SIM_MIN: f32 = 0.62;
+const MAX_LINKS: usize = 6;
 
 fn epoch() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_default()
@@ -47,6 +51,10 @@ pub struct MemoryRecord {
     /// pero se excluye de la recuperación). Resuelve contradicción/staleness.
     #[serde(default)]
     pub superseded: bool,
+    /// ARISTAS asociativas: ids de recuerdos relacionados (grafo de memoria). Permite
+    /// recordar por asociación entre chats distintos (GAAMA).
+    #[serde(default)]
+    pub links: Vec<String>,
 }
 
 /// Memoria vectorial: embeddings + recuperación por coseno, con persistencia opcional.
@@ -199,7 +207,7 @@ impl MemoryStore for VectorMemory {
     async fn store(&self, content: &str) -> Result<String> {
         let embedding = self.embedder.embed(content).await?;
         let id = Uuid::new_v4().to_string();
-        let record = MemoryRecord {
+        let mut record = MemoryRecord {
             id: id.clone(),
             content: content.to_string(),
             embedding: embedding.clone(),
@@ -207,22 +215,42 @@ impl MemoryStore for VectorMemory {
             access_count: 0,
             created_at: Utc::now(),
             superseded: false,
+            links: Vec::new(),
         };
         let mut recs = self.records.lock().unwrap();
-        // MEMORIA TEMPORAL: si este recuerdo ACTUALIZA a otro casi idéntico (mismo
-        // hecho, valor nuevo), marca el viejo como obsoleto (lo nuevo invalida lo
-        // viejo sin borrarlo). Resuelve contradicción y staleness (Zep/Chronos).
-        let mut superseded_any = false;
-        for r in recs.iter_mut() {
-            if !r.superseded && cosine(&embedding, &r.embedding) > SUPERSEDE_SIM {
+        // MEMORIA TEMPORAL: si actualiza a otro casi idéntico, marca el viejo obsoleto.
+        // GRAFO ASOCIATIVO: si está RELACIONADO (sin ser idéntico), crea una arista
+        // bidireccional → recuerdos de chats distintos quedan conectados (GAAMA).
+        let mut dirty = false;
+        let mut sims: Vec<(usize, f32)> = Vec::new();
+        for (i, r) in recs.iter_mut().enumerate() {
+            if r.superseded {
+                continue;
+            }
+            let sim = cosine(&embedding, &r.embedding);
+            if sim > SUPERSEDE_SIM {
                 r.superseded = true;
-                superseded_any = true;
+                dirty = true;
+            } else if sim >= LINK_SIM_MIN {
+                sims.push((i, sim));
+            }
+        }
+        // Conecta con los más relacionados (top MAX_LINKS), arista bidireccional.
+        sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (i, _) in sims.into_iter().take(MAX_LINKS) {
+            let other_id = recs[i].id.clone();
+            if !recs[i].links.contains(&id) {
+                recs[i].links.push(id.clone());
+                dirty = true;
+            }
+            if !record.links.contains(&other_id) {
+                record.links.push(other_id);
             }
         }
         recs.push(record);
         if let Some(path) = &self.path {
-            if superseded_any {
-                rewrite_jsonl(path, &recs)?; // persiste los flags actualizados
+            if dirty {
+                rewrite_jsonl(path, &recs)?; // persiste flags + aristas actualizadas
             } else if let Some(last) = recs.last() {
                 append_jsonl(path, last)?;
             }
@@ -288,6 +316,66 @@ impl MemoryStore for VectorMemory {
             }
         }
         Ok(hits)
+    }
+}
+
+impl VectorMemory {
+    /// **Recuperación ASOCIATIVA** (GAAMA): recupera los más relevantes y luego
+    /// recorre el grafo de aristas `hops` saltos para traer recuerdos relacionados
+    /// — incluso de OTROS chats — que el match directo no encontraría.
+    pub async fn retrieve_associative(
+        &self,
+        query: &str,
+        k: usize,
+        hops: usize,
+    ) -> Result<Vec<MemoryHit>> {
+        let base = self.retrieve(query, k).await?;
+        let mut result = base.clone();
+        let mut seen: std::collections::HashSet<String> =
+            base.iter().map(|h| h.id.clone()).collect();
+
+        let recs = self.records.lock().unwrap();
+        let by_id: std::collections::HashMap<&str, &MemoryRecord> =
+            recs.iter().map(|r| (r.id.as_str(), r)).collect();
+
+        let mut frontier: Vec<String> = base.iter().map(|h| h.id.clone()).collect();
+        let mut decay = 0.6_f32;
+        for _ in 0..hops {
+            let mut next = Vec::new();
+            for id in &frontier {
+                // Vecinos por aristas SALIENTES y ENTRANTES (grafo no-dirigido):
+                // garantiza la asociación sin importar quién creó la arista.
+                let mut neighbors: Vec<String> = Vec::new();
+                if let Some(r) = by_id.get(id.as_str()) {
+                    neighbors.extend(r.links.iter().cloned());
+                }
+                for r in recs.iter() {
+                    if r.links.iter().any(|l| l == id) {
+                        neighbors.push(r.id.clone());
+                    }
+                }
+                for lid in neighbors {
+                    if seen.contains(&lid) {
+                        continue;
+                    }
+                    if let Some(lr) = by_id.get(lid.as_str()) {
+                        if lr.superseded {
+                            continue;
+                        }
+                        seen.insert(lid.clone());
+                        result.push(MemoryHit {
+                            id: lid.clone(),
+                            content: lr.content.clone(),
+                            score: decay,
+                        });
+                        next.push(lid);
+                    }
+                }
+            }
+            frontier = next;
+            decay *= 0.7;
+        }
+        Ok(result)
     }
 }
 
@@ -530,6 +618,7 @@ mod tests {
             access_count: access,
             created_at: epoch(),
             superseded: false,
+            links: Vec::new(),
         }
     }
 
