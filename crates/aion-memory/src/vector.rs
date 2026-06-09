@@ -152,51 +152,126 @@ impl MemoryStore for VectorMemory {
 
     async fn retrieve(&self, query: &str, k: usize) -> Result<Vec<MemoryHit>> {
         let q = self.embedder.embed(query).await?;
-        let mut scored: Vec<(f32, MemoryHit)> = {
-            let mut recs = self.records.lock().unwrap();
-            let n = recs.len().max(1) as f32;
-            let max_access = recs.iter().map(|r| r.access_count).max().unwrap_or(0) as f32;
-            let mut out = Vec::with_capacity(recs.len());
-            for (i, r) in recs.iter().enumerate() {
-                // 1) Semántica (coseno, 0..1).
+        let q_ents = entities(query);
+
+        let mut recs = self.records.lock().unwrap();
+        let n = recs.len().max(1) as f32;
+        let max_access = recs.iter().map(|r| r.access_count).max().unwrap_or(0) as f32;
+
+        // 1) Puntuación MULTI-SEÑAL por recuerdo: semántica + léxica + ENTIDADES +
+        //    recencia + importancia (estado del arte mem0 / Generative Agents).
+        let mut scored: Vec<ScoredIdx> = recs
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
                 let sem = cosine(&q, &r.embedding).clamp(0.0, 1.0);
-                // 2) Léxica (solapamiento de palabras query↔contenido).
                 let lex = lexical_overlap(query, &r.content);
-                // 3) Recencia (posición: más nuevo → más alto).
+                let ent = entity_overlap(&q_ents, &entities(&r.content));
                 let rec = if n > 1.0 { i as f32 / (n - 1.0) } else { 1.0 };
-                // 4) Importancia (fitness + uso normalizado).
                 let usage = if max_access > 0.0 {
                     r.access_count as f32 / max_access
                 } else {
                     0.0
                 };
                 let importance = (r.fitness * 0.7 + usage * 0.3).clamp(0.0, 1.0);
-                // Puntuación compuesta (estado del arte: relevancia × recencia × importancia).
                 let composite =
-                    0.55 * sem + 0.20 * lex + 0.15 * rec + 0.10 * importance;
-                out.push((
-                    composite,
-                    MemoryHit {
-                        id: r.id.clone(),
-                        content: r.content.clone(),
-                        score: composite,
-                    },
-                ));
+                    0.45 * sem + 0.18 * lex + 0.12 * ent + 0.13 * rec + 0.12 * importance;
+                ScoredIdx { idx: i, composite }
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.composite
+                .partial_cmp(&a.composite)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // 2) Selección DIVERSA (MMR): evita devolver casi-duplicados (clave en
+        //    memoria de agente, que es un flujo con redundancia — ver xMemory).
+        let pool: Vec<ScoredIdx> = scored.into_iter().take((k * 4).max(k)).collect();
+        let selected = mmr_select(&pool, &recs, k, 0.7);
+
+        // 3) Refuerzo: lo recuperado sube uso+fitness (lo útil emerge).
+        let sel_ids: Vec<String> = selected.iter().map(|s| recs[s.idx].id.clone()).collect();
+        let hits: Vec<MemoryHit> = selected
+            .iter()
+            .map(|s| MemoryHit {
+                id: recs[s.idx].id.clone(),
+                content: recs[s.idx].content.clone(),
+                score: s.composite,
+            })
+            .collect();
+        for r in recs.iter_mut() {
+            if sel_ids.contains(&r.id) {
+                r.access_count += 1;
+                r.fitness = (r.fitness + 0.05).min(1.0);
             }
-            out.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            // Refuerzo: lo recuperado sube uso+fitness (lo útil emerge).
-            let top_ids: Vec<String> = out.iter().take(k).map(|(_, h)| h.id.clone()).collect();
-            for r in recs.iter_mut() {
-                if top_ids.contains(&r.id) {
-                    r.access_count += 1;
-                    r.fitness = (r.fitness + 0.05).min(1.0);
-                }
-            }
-            out
-        };
-        scored.truncate(k);
-        Ok(scored.into_iter().map(|(_, h)| h).collect())
+        }
+        Ok(hits)
     }
+}
+
+#[derive(Clone, Copy)]
+struct ScoredIdx {
+    idx: usize,
+    composite: f32,
+}
+
+/// **MMR (Maximal Marginal Relevance)**: selecciona los más relevantes EVITANDO
+/// casi-duplicados. Cada paso elige el candidato que maximiza
+/// `λ·relevancia − (1−λ)·máxima_similitud_con_lo_ya_elegido`.
+fn mmr_select(pool: &[ScoredIdx], recs: &[MemoryRecord], k: usize, lambda: f32) -> Vec<ScoredIdx> {
+    let mut selected: Vec<ScoredIdx> = Vec::new();
+    let mut remaining: Vec<ScoredIdx> = pool.to_vec();
+    while selected.len() < k && !remaining.is_empty() {
+        let mut best_pos = 0usize;
+        let mut best_val = f32::MIN;
+        for (pos, cand) in remaining.iter().enumerate() {
+            let max_sim = selected
+                .iter()
+                .map(|s| cosine(&recs[cand.idx].embedding, &recs[s.idx].embedding))
+                .fold(0.0_f32, f32::max);
+            let mmr = lambda * cand.composite - (1.0 - lambda) * max_sim;
+            if mmr > best_val {
+                best_val = mmr;
+                best_pos = pos;
+            }
+        }
+        selected.push(remaining.remove(best_pos));
+    }
+    selected
+}
+
+/// Extrae "entidades" aproximadas: identificadores y nombres propios (tokens con
+/// dígitos, con mayúscula inicial, o con símbolos como #/-) — lo que el embedding
+/// semántico diluye pero es decisivo para acertar (mem0: entity matching).
+fn entities(s: &str) -> std::collections::HashSet<String> {
+    s.split(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | ';' | ':' | '!' | '?' | '(' | ')'))
+        .filter_map(|tok| {
+            let t = tok.trim();
+            if t.len() < 2 {
+                return None;
+            }
+            let has_digit = t.chars().any(|c| c.is_ascii_digit());
+            let has_upper = t.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+            let has_sym = t.contains('#') || t.contains('-') || t.contains('_');
+            if has_digit || has_upper || has_sym {
+                Some(t.to_lowercase())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn entity_overlap(
+    a: &std::collections::HashSet<String>,
+    b: &std::collections::HashSet<String>,
+) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let inter = a.intersection(b).count() as f32;
+    inter / (a.len() as f32).min(b.len() as f32)
 }
 
 /// Solapamiento léxico (Jaccard de palabras significativas, en minúsculas). Capta

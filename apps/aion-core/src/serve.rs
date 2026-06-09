@@ -242,7 +242,7 @@ async fn agent(
         // Aterriza al agente en lo que YA SABE: conocimiento relevante a la tarea
         // + catálogo de skills que se ha forjado. Así aplica su saber y sus
         // herramientas para hacerlo mejor (autónomo + acumulativo).
-        let mut ctx = relevant_knowledge(&body.task).await;
+        let mut ctx = grounding_for_agent(&engine, &body.task).await;
         let skills = crate::skill_store::catalog();
         if !skills.is_empty() {
             ctx.push_str("\nSkills que ya te has forjado (úsalas con skill_invoke si aplican):\n");
@@ -354,6 +354,60 @@ async fn relevant_knowledge(prompt: &str) -> String {
         let mut c = h.content.clone();
         c.truncate(220);
         s.push_str(&format!("- {c}\n"));
+    }
+    s
+}
+
+/// Aterrizaje del AGENTE con **reranker LLM** (Self-RAG): recupera (híbrido+MMR) y
+/// luego un juez decide qué recuerdos son realmente ÚTILES para la tarea antes de
+/// aplicarlos. Más precisión que el umbral solo (la latencia aquí es aceptable).
+async fn grounding_for_agent(engine: &OllamaEngine, task: &str) -> String {
+    if is_trivial_query(task) {
+        return String::new();
+    }
+    let Ok(mem) = VectorMemory::persistent_local(memory_path()) else {
+        return String::new();
+    };
+    let hits = match mem.retrieve(task, 6).await {
+        Ok(h) => h.into_iter().filter(|h| h.score >= 0.25).collect::<Vec<_>>(),
+        Err(_) => return String::new(),
+    };
+    if hits.is_empty() {
+        return String::new();
+    }
+    // Juez de relevancia: ¿cuáles sirven para ESTA tarea?
+    let listed = hits
+        .iter()
+        .enumerate()
+        .map(|(i, h)| format!("{}. {}", i + 1, h.content.chars().take(180).collect::<String>()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let judge = GenerateRequest {
+        messages: vec![Message::user(format!(
+            "Tarea: {task}\n\nRecuerdos candidatos:\n{listed}\n\n¿Cuáles son ÚTILES para \
+             resolver la tarea? Responde SOLO los números separados por coma (p. ej. 1,3), \
+             o 'ninguno'."
+        ))],
+        think: false,
+        temperature: Some(0.0),
+        max_tokens: Some(20),
+    };
+    let keep: Vec<usize> = match engine.generate(judge).await {
+        Ok(m) => m
+            .content
+            .split(|c: char| !c.is_ascii_digit())
+            .filter_map(|s| s.parse::<usize>().ok())
+            .filter(|&n| n >= 1 && n <= hits.len())
+            .map(|n| n - 1)
+            .collect(),
+        Err(_) => (0..hits.len().min(3)).collect(), // si falla el juez, usa los top
+    };
+    if keep.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("CONOCIMIENTO QUE YA TIENES, útil para esta tarea (aplícalo):\n");
+    for i in keep {
+        s.push_str(&format!("- {}\n", hits[i].content));
     }
     s
 }
