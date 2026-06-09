@@ -14,6 +14,7 @@ use crate::embedder::OllamaEmbedder;
 use aion_kernel::traits::{MemoryHit, MemoryStore};
 use aion_kernel::{AionError, Result};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
@@ -21,7 +22,15 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use uuid::Uuid;
 
-/// Un registro de memoria con metadatos para la futura evolución darwiniana.
+/// Umbral de similitud para considerar que un recuerdo nuevo ACTUALIZA a otro
+/// (misma cosa, valor nuevo) → el viejo se marca obsoleto sin borrarlo.
+const SUPERSEDE_SIM: f32 = 0.88;
+
+fn epoch() -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_default()
+}
+
+/// Un registro de memoria con metadatos (evolución darwiniana + temporalidad).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRecord {
     pub id: String,
@@ -31,6 +40,13 @@ pub struct MemoryRecord {
     pub fitness: f32,
     /// Veces que se ha recuperado este recuerdo.
     pub access_count: u32,
+    /// Cuándo se creó (memoria temporal). Por defecto epoch para registros viejos.
+    #[serde(default = "epoch")]
+    pub created_at: DateTime<Utc>,
+    /// Si un recuerdo más nuevo lo ha dejado obsoleto (se conserva como historia,
+    /// pero se excluye de la recuperación). Resuelve contradicción/staleness.
+    #[serde(default)]
+    pub superseded: bool,
 }
 
 /// Memoria vectorial: embeddings + recuperación por coseno, con persistencia opcional.
@@ -85,6 +101,7 @@ impl VectorMemory {
             .lock()
             .unwrap()
             .iter()
+            .filter(|r| !r.superseded) // solo conocimiento vigente
             .map(|r| r.content.clone())
             .collect()
     }
@@ -139,14 +156,31 @@ impl MemoryStore for VectorMemory {
         let record = MemoryRecord {
             id: id.clone(),
             content: content.to_string(),
-            embedding,
+            embedding: embedding.clone(),
             fitness: 0.5,
             access_count: 0,
+            created_at: Utc::now(),
+            superseded: false,
         };
-        if let Some(path) = &self.path {
-            append_jsonl(path, &record)?;
+        let mut recs = self.records.lock().unwrap();
+        // MEMORIA TEMPORAL: si este recuerdo ACTUALIZA a otro casi idéntico (mismo
+        // hecho, valor nuevo), marca el viejo como obsoleto (lo nuevo invalida lo
+        // viejo sin borrarlo). Resuelve contradicción y staleness (Zep/Chronos).
+        let mut superseded_any = false;
+        for r in recs.iter_mut() {
+            if !r.superseded && cosine(&embedding, &r.embedding) > SUPERSEDE_SIM {
+                r.superseded = true;
+                superseded_any = true;
+            }
         }
-        self.records.lock().unwrap().push(record);
+        recs.push(record);
+        if let Some(path) = &self.path {
+            if superseded_any {
+                rewrite_jsonl(path, &recs)?; // persiste los flags actualizados
+            } else if let Some(last) = recs.last() {
+                append_jsonl(path, last)?;
+            }
+        }
         Ok(id)
     }
 
@@ -163,6 +197,7 @@ impl MemoryStore for VectorMemory {
         let mut scored: Vec<ScoredIdx> = recs
             .iter()
             .enumerate()
+            .filter(|(_, r)| !r.superseded) // memoria temporal: ignora lo obsoleto
             .map(|(i, r)| {
                 let sem = cosine(&q, &r.embedding).clamp(0.0, 1.0);
                 let lex = lexical_overlap(query, &r.content);
@@ -447,6 +482,8 @@ mod tests {
             embedding: emb,
             fitness,
             access_count: access,
+            created_at: epoch(),
+            superseded: false,
         }
     }
 
