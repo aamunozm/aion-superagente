@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
+import Icon from "@/components/Icon";
 import {
   agentStream,
   crewStream,
@@ -14,12 +15,12 @@ import {
   type InboxMessage,
 } from "@/lib/api";
 
-const INBOX_ICON: Record<string, string> = {
-  insight: "💡",
-  idea: "✨",
-  pregunta: "❓",
-  saludo: "👋",
-  alerta: "⚠️",
+const INBOX_ICON: Record<string, React.ComponentProps<typeof Icon>["name"]> = {
+  insight: "bulb",
+  idea: "sparkle",
+  pregunta: "help",
+  saludo: "wave",
+  alerta: "warn",
 };
 
 type Step = { kind: "thought" | "action" | "observation"; text: string; agent?: string };
@@ -33,10 +34,10 @@ type Turn = {
   meta?: string;
 };
 
-const STEP_STYLE: Record<Step["kind"], { icon: string; color: string }> = {
-  thought: { icon: "🧠", color: "var(--cog-thinking, #0FB5BA)" },
-  action: { icon: "🔧", color: "#5B8FA8" },
-  observation: { icon: "👁", color: "#C49A3D" },
+const STEP_STYLE: Record<Step["kind"], { icon: React.ComponentProps<typeof Icon>["name"]; color: string }> = {
+  thought: { icon: "sparkle", color: "var(--on-lavender)" },
+  action: { icon: "code", color: "var(--on-sky)" },
+  observation: { icon: "eye", color: "var(--on-peach)" },
 };
 
 export default function ChatPage() {
@@ -109,7 +110,7 @@ export default function ChatPage() {
           thinking: "",
           steps: [],
           answer:
-            "🔄 Todavía estoy preparándome: descargando el modelo (~9 GB). Espera a la notificación «¡Listo!» y vuelve a intentarlo.",
+            "Todavía me estoy preparando: descargando el modelo (~9 GB). Espera a la notificación «¡Listo!» y vuelve a intentarlo.",
         },
       ]);
       setInput("");
@@ -184,7 +185,7 @@ export default function ChatPage() {
             className="card text-sm"
             style={{ borderColor: "var(--accent)", borderWidth: 1, color: "var(--text-2)" }}
           >
-            🔄 <strong>Preparando la IA…</strong> Estoy descargando el modelo (~9 GB). La
+<span className="inline-flex items-center gap-1.5"><Icon name="refresh" size={15} /> <strong>Preparando la IA…</strong></span> Estoy descargando el modelo (~9 GB). La
             primera vez tarda unos minutos según tu conexión. En cuanto termine podrás
             chatear (te avisaré con una notificación). Puedes dejar esta ventana abierta.
           </div>
@@ -192,7 +193,7 @@ export default function ChatPage() {
         {reachouts.length > 0 && (
           <div className="flex flex-col gap-2">
             <p className="text-xs font-medium" style={{ color: "var(--accent)" }}>
-              🌱 AION te escribió mientras no estabas
+<span className="inline-flex items-center gap-1.5"><Icon name="sparkle" size={13} /> AION te escribió mientras no estabas</span>
             </p>
             {reachouts.map((m) => (
               <div
@@ -201,7 +202,7 @@ export default function ChatPage() {
                 style={{ borderColor: "var(--accent)", borderWidth: 1 }}
               >
                 <p className="text-xs mb-1" style={{ color: "var(--accent)" }}>
-                  {INBOX_ICON[m.kind] ?? "🌱"} {m.kind} ·{" "}
+                  <span className="inline-flex items-center gap-1"><Icon name={INBOX_ICON[m.kind] ?? "sparkle"} size={12} /> {m.kind}</span> ·{" "}
                   {new Date(m.at).toLocaleString()}
                 </p>
                 <p className="whitespace-pre-wrap">{m.text}</p>
@@ -227,7 +228,7 @@ export default function ChatPage() {
             {t.mode === "chat" && t.thinking && (
               <details className="text-sm" style={{ color: "var(--text-3)" }}>
                 <summary className="cursor-pointer select-none" style={{ color: "var(--accent)" }}>
-                  🧠 razonamiento
+<span className="inline-flex items-center gap-1"><Icon name="brain" size={13} /> razonamiento</span>
                 </summary>
                 <pre className="whitespace-pre-wrap font-mono text-xs mt-2">{t.thinking}</pre>
               </details>
@@ -236,7 +237,9 @@ export default function ChatPage() {
             {(t.mode === "agent" || t.mode === "crew") &&
               t.steps.map((s, j) => (
                 <div key={j} className="flex items-start gap-2 text-sm pl-1" style={{ color: "var(--text-2)" }}>
-                  <span style={{ color: STEP_STYLE[s.kind].color }}>{STEP_STYLE[s.kind].icon}</span>
+                  <span style={{ color: STEP_STYLE[s.kind].color }} className="mt-0.5 shrink-0">
+                    <Icon name={STEP_STYLE[s.kind].icon} size={15} />
+                  </span>
                   {s.agent && (
                     <span
                       className="text-[10px] px-1.5 py-0.5 rounded-full shrink-0 font-medium"
@@ -276,7 +279,7 @@ export default function ChatPage() {
             }}
             title="Modo razonamiento"
           >
-            🧠 {think ? "on" : "off"}
+            <span className="inline-flex items-center gap-1"><Icon name="brain" size={14} /> {think ? "on" : "off"}</span>
           </button>
         )}
         <input

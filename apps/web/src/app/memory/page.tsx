@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
+import Icon from "@/components/Icon";
 import {
   memoryExport,
   memoryImport,
@@ -125,23 +126,23 @@ export default function MemoryPage() {
       </div>
 
       <div className="card mb-6">
-        <h2 className="t-section mb-1" style={{ color: "var(--text-2)" }}>
-          💾 Transferir memoria
+        <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
+          <Icon name="refresh" size={16} /> Transferir memoria
         </h2>
         <p className="text-sm mb-3" style={{ color: "var(--text-3)" }}>
           Descarga la memoria en un archivo para llevarla a otro PC/Mac, o súbela
           aquí para importarla (fusiona, sin duplicar).
         </p>
         <div className="flex gap-2">
-          <button className="btn shrink-0" disabled={busy} onClick={exportMemory}>
-            ⬇ Descargar memoria
+          <button className="btn shrink-0 inline-flex items-center gap-2" disabled={busy} onClick={exportMemory}>
+            <Icon name="download" size={16} /> Descargar memoria
           </button>
           <button
-            className="btn shrink-0"
+            className="btn shrink-0 inline-flex items-center gap-2"
             disabled={busy}
             onClick={() => fileInput.current?.click()}
           >
-            ⬆ Subir memoria
+            <Icon name="upload" size={16} /> Subir memoria
           </button>
           <input
             ref={fileInput}
@@ -163,8 +164,8 @@ export default function MemoryPage() {
       </div>
 
       <div className="card">
-        <h2 className="t-section mb-1" style={{ color: "var(--text-2)" }}>
-          🌙 Sueño — consolidación darwiniana
+        <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
+          <Icon name="moon" size={16} /> Sueño — consolidación darwiniana
         </h2>
         <p className="text-sm mb-3" style={{ color: "var(--text-3)" }}>
           Decae la aptitud, fusiona casi-duplicados y poda lo débil sin uso (con snapshot).
@@ -179,7 +180,7 @@ export default function MemoryPage() {
         </button>
         {report && (
           <div className="mt-4 text-sm font-mono" style={{ color: "var(--text-2)" }}>
-            {report.before} → {report.after} recuerdos · 🔗 {report.merged} fusionados · ✂️ {report.pruned} podados
+            {report.before} → {report.after} recuerdos · {report.merged} fusionados · {report.pruned} podados
           </div>
         )}
       </div>

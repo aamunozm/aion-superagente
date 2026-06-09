@@ -153,7 +153,7 @@ export default function OnboardingPage() {
                     <div className="flex items-center justify-between">
                       <span className="font-medium text-sm">{m.name}</span>
                       <span className="text-[11px]" style={{ color: "var(--text-3)" }}>
-                        {m.size_gb} GB {m.recommended ? "· ⭐ recomendado" : ""}
+                        {m.size_gb} GB{m.recommended ? " · recomendado" : ""}
                       </span>
                     </div>
                     <p className="text-xs mt-1" style={{ color: "var(--text-2)" }}>{m.note}</p>

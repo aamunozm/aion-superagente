@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
+import Icon from "@/components/Icon";
 
 type Project = { id: string; name: string; desc: string; created: string };
 
@@ -67,8 +68,10 @@ export default function ProjectsPage() {
         </div>
 
         {projects.length === 0 ? (
-          <div className="text-center py-16" style={{ color: "var(--text-3)" }}>
-            <div className="text-4xl mb-3">📁</div>
+          <div className="flex flex-col items-center text-center py-16" style={{ color: "var(--text-3)" }}>
+            <span className="icon-chip mb-3" style={{ width: 52, height: 52, background: "var(--pastel-gold)", color: "var(--on-gold)" }}>
+              <Icon name="folder" size={26} />
+            </span>
             <p>Aún no tienes proyectos. Crea el primero arriba.</p>
           </div>
         ) : (

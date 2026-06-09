@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Icon from "@/components/Icon";
 import { login, register, resetPassword } from "@/lib/api";
 
 type Mode = "login" | "register" | "forgot";
@@ -117,7 +118,7 @@ export default function LoginPage() {
               "Se forja sus propias herramientas y se auto-mejora",
             ].map((f) => (
               <li key={f} className="flex items-center gap-2">
-                <span style={{ color: "var(--accent)" }}>●</span> {f}
+                <span style={{ color: "var(--gold)" }} className="shrink-0"><Icon name="check" size={16} /></span> {f}
               </li>
             ))}
           </ul>

@@ -1,99 +1,164 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* ── AION Design Tokens (espejo de packages/design-system) ─────────── */
+/* ── AION · Design system 2026: claro, minimalista, dorado + pasteles ───── */
 :root {
-  --bg: #ffffff;
+  /* Fondo cálido casi-blanco para que el dorado respire */
+  --bg: #fbfaf7;
   --surface: #ffffff;
-  --surface-1: #fafafa;
-  --surface-2: #f5f5f5;
-  --border: #e8e8e8;
-  --border-2: #d8d8d8;
-  --text-1: #0a0a0a;
-  --text-2: #555555;
-  --text-3: #999999;
-  --ink: #0f172a;
-  --ink-hover: #1e293b;
-  --accent: #0fb5ba;
-  --accent-hover: #0c9499;
-  --accent-subtle: rgba(15, 181, 186, 0.1);
+  --surface-1: #f7f5f1;
+  --surface-2: #f0ede7;
+  --border: #ece8e1;
+  --border-2: #ddd8cf;
+  --text-1: #1a1815;
+  --text-2: #6b6760;
+  --text-3: #a8a39a;
+  --ink: #1c1a17;
+  --ink-hover: #2b2824;
+
+  /* Acento DORADO (toques premium) */
+  --gold: #c8a951;
+  --gold-deep: #a9882f;
+  --gold-soft: #f5edd8;
+  --accent: var(--gold);
+  --accent-hover: var(--gold-deep);
+  --accent-subtle: rgba(200, 169, 81, 0.12);
+  --accent-contrast: #2a2410;
+
+  /* Pasteles frescos (acentos por módulo) */
+  --pastel-mint: #e3f3ec;     --on-mint: #2f9c75;
+  --pastel-sky: #e6eefb;      --on-sky: #4f82c4;
+  --pastel-lavender: #efe9f8; --on-lavender: #8068b8;
+  --pastel-peach: #fbece0;    --on-peach: #d07a52;
+  --pastel-gold: #f5edd8;     --on-gold: #b08e34;
+
   --primary: var(--ink);
   --primary-contrast: #ffffff;
-  --focus-ring: rgba(15, 181, 186, 0.3);
-  --shadow-elevated: 0 4px 20px rgba(0, 0, 0, 0.06);
-  --shadow-float: 0 8px 30px rgba(0, 0, 0, 0.1);
+  --focus-ring: rgba(200, 169, 81, 0.28);
+
+  /* Sombras suaves y modernas (módulos elevados) */
+  --shadow-soft: 0 1px 2px rgba(28, 26, 23, 0.04), 0 4px 16px rgba(28, 26, 23, 0.05);
+  --shadow-elevated: 0 2px 8px rgba(28, 26, 23, 0.05), 0 12px 32px rgba(28, 26, 23, 0.08);
+  --shadow-float: 0 8px 40px rgba(28, 26, 23, 0.12);
+  --shadow-gold: 0 6px 24px rgba(200, 169, 81, 0.22);
+
   --ease-premium: cubic-bezier(0.22, 1, 0.36, 1);
-  --radius-card: 12px;
-  --radius-btn: 10px;
-}
-.dark {
-  --bg: #1a1a1a;
-  --surface: #262626;
-  --surface-1: #333333;
-  --surface-2: #3f3f3f;
-  --border: rgba(255, 255, 255, 0.1);
-  --border-2: rgba(255, 255, 255, 0.16);
-  --text-1: #ffffff;
-  --text-2: #d0d0d0;
-  --text-3: #a0a0a0;
-  --accent: #2dd4d9;
-  --accent-hover: #4de0e5;
-  --primary: #f1f5f9;
-  --primary-contrast: #0f172a;
-  --shadow-elevated: 0 4px 20px rgba(0, 0, 0, 0.25);
+  --radius-card: 16px;
+  --radius-btn: 11px;
 }
 
 @layer base {
   html {
     font-family: "Space Grotesk", system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
   body {
     background-color: var(--bg);
     color: var(--text-1);
-    transition: background-color 0.3s ease, color 0.3s ease;
+    background-image: radial-gradient(
+      1200px 600px at 80% -10%,
+      rgba(200, 169, 81, 0.06),
+      transparent 60%
+    );
+  }
+  * {
+    border-color: var(--border);
   }
 }
 
 @layer components {
+  /* Módulo: tarjeta limpia con sombra suave y elevación sutil al hover */
   .card {
     border-radius: var(--radius-card);
     border: 1px solid var(--border);
     background: var(--surface);
-    padding: 20px;
-    transition: all 200ms var(--ease-premium);
+    padding: 22px;
+    box-shadow: var(--shadow-soft);
+    transition: transform 320ms var(--ease-premium), box-shadow 320ms var(--ease-premium),
+      border-color 320ms var(--ease-premium);
   }
+  .card-hover:hover {
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-elevated);
+    border-color: var(--border-2);
+  }
+  /* Efecto especial de módulo: filo dorado sutil que aparece al pasar */
+  .module {
+    position: relative;
+    border-radius: var(--radius-card);
+    border: 1px solid var(--border);
+    background:
+      linear-gradient(var(--surface), var(--surface)) padding-box,
+      linear-gradient(135deg, rgba(200, 169, 81, 0.35), rgba(200, 169, 81, 0)) border-box;
+    border: 1px solid transparent;
+    box-shadow: var(--shadow-soft);
+    transition: transform 320ms var(--ease-premium), box-shadow 320ms var(--ease-premium);
+  }
+  .module:hover {
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-elevated);
+  }
+
   .btn {
     border-radius: var(--radius-btn);
     background: var(--primary);
     color: var(--primary-contrast);
     font-weight: 600;
-    padding: 12px 16px;
-    transition: all 200ms var(--ease-premium);
+    padding: 12px 18px;
+    transition: all 240ms var(--ease-premium);
   }
   .btn:hover {
-    box-shadow: var(--shadow-elevated);
     transform: translateY(-1px);
+    box-shadow: var(--shadow-elevated);
   }
   .btn:disabled {
-    opacity: 0.5;
+    opacity: 0.45;
     cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
   }
+  /* Botón dorado para acciones destacadas */
+  .btn-gold {
+    background: linear-gradient(135deg, var(--gold), var(--gold-deep));
+    color: var(--accent-contrast);
+    box-shadow: var(--shadow-gold);
+  }
+  .btn-gold:hover {
+    filter: brightness(1.04);
+  }
+
   .input {
     width: 100%;
     border-radius: var(--radius-btn);
     border: 1px solid var(--border-2);
-    background: var(--bg);
+    background: var(--surface);
     color: var(--text-1);
     padding: 12px 14px;
     outline: none;
-    transition: border-color 200ms var(--ease-premium);
+    transition: border-color 200ms var(--ease-premium), box-shadow 200ms var(--ease-premium);
   }
   .input:focus {
-    border-color: var(--accent);
+    border-color: var(--gold);
     box-shadow: 0 0 0 3px var(--focus-ring);
+  }
+
+  /* Chip de icono pastel (reemplaza los emojis 3D) */
+  .icon-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    border-radius: 11px;
+    flex-shrink: 0;
+  }
+  .t-section {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
   }
 }

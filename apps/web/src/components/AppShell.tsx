@@ -3,14 +3,15 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import Icon from "./Icon";
 
-type NavItem = { href: string; label: string; icon: string };
+type NavItem = { href: string; label: string; icon: "chat" | "folder" | "tools" | "memory" };
 
 const NAV: NavItem[] = [
-  { href: "/chat", label: "Chat", icon: "💬" },
-  { href: "/projects", label: "Proyectos", icon: "📁" },
-  { href: "/tools", label: "Herramientas", icon: "🧩" },
-  { href: "/memory", label: "Memoria", icon: "🧠" },
+  { href: "/chat", label: "Chat", icon: "chat" },
+  { href: "/projects", label: "Proyectos", icon: "folder" },
+  { href: "/tools", label: "Herramientas", icon: "tools" },
+  { href: "/memory", label: "Memoria", icon: "memory" },
 ];
 
 /**
@@ -93,7 +94,7 @@ export default function AppShell({
                 }}
                 title={item.label}
               >
-                <span className="text-base shrink-0">{item.icon}</span>
+                <Icon name={item.icon} size={18} className="shrink-0" />
                 {!collapsed && <span>{item.label}</span>}
               </Link>
             );
@@ -109,7 +110,7 @@ export default function AppShell({
             className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm"
             style={{ color: "var(--text-2)" }}
           >
-            <span className="text-base">⚙️</span>
+            <Icon name="settings" size={18} />
             {!collapsed && <span>Ajustes</span>}
           </Link>
           <div
