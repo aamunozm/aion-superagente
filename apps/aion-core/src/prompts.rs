@@ -49,6 +49,11 @@ pub async fn route(engine: &dyn LlmEngine, prompt: &str) -> String {
         return "analisis".into();
     }
 
+    // Atajo: frases cortas/casuales → conversación directa, sin gastar una llamada LLM.
+    if p.split_whitespace().count() < 12 {
+        return "conversacion".into();
+    }
+
     // Ambiguo → clasificador LLM minúsculo.
     let req = GenerateRequest {
         messages: vec![Message::user(format!(

@@ -304,8 +304,10 @@ async fn chat(
         let mut messages = vec![Message::system(self_ctx)];
         messages.extend(history); // hilo de conversación (resumen + turnos recientes)
         let req = GenerateRequest {
+            // Razona solo si el usuario lo pidió Y la pregunta lo amerita: lo trivial
+            // (saludo, recordar el nombre) responde al instante sin cadena de pensamiento.
             messages,
-            think: body.think,
+            think: body.think && needs_deep_thinking(&prompt),
             temperature: Some(1.0),
             max_tokens: None,
         };
@@ -764,6 +766,29 @@ fn is_trivial_query(prompt: &str) -> bool {
         return true;
     }
     p.is_empty() || p.len() < 4
+}
+
+/// ¿La pregunta MERECE razonamiento profundo? Activar el "thinking" de gemma para
+/// algo trivial (saludo, recordar el nombre) gasta cientos de tokens y ~20 s para
+/// nada. Solo razonamos en tareas que lo requieren; lo simple responde al instante.
+fn needs_deep_thinking(prompt: &str) -> bool {
+    let p = prompt.trim().to_lowercase();
+    let words = p.split_whitespace().count();
+    // Marcadores de complejidad → sí conviene pensar.
+    const HARD: [&str; 16] = [
+        "analiza", "compara", "explica por", "por qué", "por que", "razona", "demuestra",
+        "paso a paso", "código", "codigo", "programa", "calcula", "resuelve", "diseña",
+        "plan", "estrategia",
+    ];
+    if HARD.iter().any(|k| p.contains(k)) {
+        return true;
+    }
+    // Preguntas cortas / casuales → respuesta directa, sin cadena de pensamiento.
+    if is_trivial_query(prompt) || words < 12 {
+        return false;
+    }
+    // Mensajes largos o sustanciales → pensar.
+    words >= 18
 }
 
 /// Estadísticas de la memoria de largo plazo.
