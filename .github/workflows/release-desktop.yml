@@ -10,6 +10,11 @@ on:
   push:
     tags: ["v*"]
 
+# Necesario para publicar los instaladores como assets de un Release (no usa la
+# cuota de artefactos de Actions, que es limitada).
+permissions:
+  contents: write
+
 jobs:
   # ── macOS universal (Apple Silicon + Intel) ──────────────────────────────
   macos:
@@ -45,6 +50,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: ". -> target" }
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
@@ -65,7 +72,13 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build instalador NSIS
         run: cd apps/desktop && cargo tauri build --bundles nsis
-      - uses: actions/upload-artifact@v4
-        with:
-          name: AION-windows-x64
-          path: apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+      - name: Publicar .exe en Release (sin cuota de artefactos)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create windows-latest --title "AION — Windows (x64)" \
+            --notes "Instalador autocontenido de AION para Windows x64 (Ollama embebido)." \
+            || echo "release ya existe"
+          gh release upload windows-latest \
+            apps/desktop/src-tauri/target/release/bundle/nsis/*.exe --clobber
