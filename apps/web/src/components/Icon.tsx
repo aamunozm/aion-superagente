@@ -52,7 +52,7 @@ export default function Icon({
   name,
   size = 20,
   className,
-  strokeWidth = 1.7,
+  strokeWidth = 1.5,
 }: {
   name: IconName;
   size?: number;

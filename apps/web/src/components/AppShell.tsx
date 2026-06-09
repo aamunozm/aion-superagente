@@ -6,12 +6,23 @@ import { useEffect, useState } from "react";
 import Icon from "./Icon";
 
 type NavItem = { href: string; label: string; icon: "chat" | "folder" | "tools" | "memory" };
+type NavGroup = { title: string; items: NavItem[] };
 
-const NAV: NavItem[] = [
-  { href: "/chat", label: "Chat", icon: "chat" },
-  { href: "/projects", label: "Proyectos", icon: "folder" },
-  { href: "/tools", label: "Herramientas", icon: "tools" },
-  { href: "/memory", label: "Memoria", icon: "memory" },
+const GROUPS: NavGroup[] = [
+  {
+    title: "Principal",
+    items: [
+      { href: "/chat", label: "Chat", icon: "chat" },
+      { href: "/projects", label: "Proyectos", icon: "folder" },
+    ],
+  },
+  {
+    title: "Inteligencia",
+    items: [
+      { href: "/tools", label: "Herramientas", icon: "tools" },
+      { href: "/memory", label: "Memoria", icon: "memory" },
+    ],
+  },
 ];
 
 /**
@@ -78,27 +89,39 @@ export default function AppShell({
           </button>
         </div>
 
-        {/* Navegación */}
-        <nav className="flex flex-col gap-1 px-3 mt-2">
-          {NAV.map((item) => {
-            const active = pathname === item.href;
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all"
-                style={{
-                  background: active ? "var(--accent-subtle)" : "transparent",
-                  color: active ? "var(--accent)" : "var(--text-2)",
-                  fontWeight: active ? 600 : 500,
-                }}
-                title={item.label}
-              >
-                <Icon name={item.icon} size={18} className="shrink-0" />
-                {!collapsed && <span>{item.label}</span>}
-              </Link>
-            );
-          })}
+        {/* Navegación agrupada por secciones */}
+        <nav className="flex flex-col gap-4 px-3 mt-3">
+          {GROUPS.map((group) => (
+            <div key={group.title} className="flex flex-col gap-1">
+              {!collapsed && (
+                <span
+                  className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-[0.12em]"
+                  style={{ color: "var(--text-3)" }}
+                >
+                  {group.title}
+                </span>
+              )}
+              {group.items.map((item) => {
+                const active = pathname === item.href;
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all"
+                    style={{
+                      background: active ? "var(--accent-subtle)" : "transparent",
+                      color: active ? "var(--gold-deep)" : "var(--text-2)",
+                      fontWeight: active ? 600 : 500,
+                    }}
+                    title={item.label}
+                  >
+                    <Icon name={item.icon} size={18} className="shrink-0" />
+                    {!collapsed && <span>{item.label}</span>}
+                  </Link>
+                );
+              })}
+            </div>
+          ))}
         </nav>
 
         <div className="mt-auto" />
