@@ -71,8 +71,8 @@ export default function LoginPage() {
           >
             {recovery}
           </div>
-          <button className="btn w-full" onClick={() => router.push("/chat")}>
-            Lo he guardado — entrar
+          <button className="btn w-full" onClick={() => router.push("/onboarding")}>
+            Lo he guardado — configurar AION
           </button>
         </div>
       </main>

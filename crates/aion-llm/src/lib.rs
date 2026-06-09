@@ -8,5 +8,7 @@
 //! - F6: motores móviles (MLX/Candle) — pendiente.
 
 mod ollama;
+mod openai;
 
 pub use ollama::OllamaEngine;
+pub use openai::OpenAiEngine;

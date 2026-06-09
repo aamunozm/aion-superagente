@@ -36,9 +36,23 @@ use tracing::Level;
 
 #[derive(Clone)]
 struct AppState {
-    engine: Arc<OllamaEngine>,
     /// Hilo de conversación en curso (contexto infinito por compresión activa).
     convo: Arc<std::sync::Mutex<Vec<Message>>>,
+}
+
+/// Motor LLM activo, reconstruido por petición desde la config del proveedor
+/// (así cambiar de modelo/proveedor en el onboarding aplica al instante).
+fn active_engine() -> Arc<dyn LlmEngine> {
+    build_engine(&crate::provider::load())
+}
+
+/// Construye el motor LLM a partir de la configuración del proveedor.
+fn build_engine(cfg: &crate::provider::ProviderConfig) -> Arc<dyn LlmEngine> {
+    if cfg.kind == "external" && !cfg.api_key.is_empty() && !cfg.base_url.is_empty() {
+        Arc::new(aion_llm::OpenAiEngine::new(&cfg.base_url, &cfg.api_key, &cfg.model))
+    } else {
+        Arc::new(OllamaEngine::new(OllamaEngine::base_url_from_env(), &cfg.model))
+    }
 }
 
 #[derive(Deserialize)]
@@ -50,9 +64,7 @@ struct ChatBody {
 
 /// Arranca el puente HTTP en la dirección indicada.
 pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let engine = Arc::new(OllamaEngine::default_local());
     let state = AppState {
-        engine,
         convo: Arc::new(std::sync::Mutex::new(Vec::new())),
     };
 
@@ -63,6 +75,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/status", get(status))
+        .route("/api/system/scan", get(system_scan))
+        .route("/api/models/pull", post(models_pull))
+        .route("/api/provider", get(provider_get).post(provider_set))
+        .route("/api/governance/setup", post(governance_setup))
         .route("/api/chat", post(chat))
         .route("/api/chat/new", post(chat_reset))
         .route("/api/agent", post(agent))
@@ -88,21 +104,156 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn health(State(st): State<AppState>) -> Json<serde_json::Value> {
-    let ok = st.engine.health().await.is_ok();
-    Json(serde_json::json!({ "ok": ok, "engine": st.engine.id() }))
+    let _ = st;
+    let engine = active_engine();
+    let ok = engine.health().await.is_ok();
+    Json(serde_json::json!({ "ok": ok, "engine": engine.id() }))
 }
 
 /// Estado de preparación: si el motor responde y si el MODELO ya está listo.
 /// En el primer arranque el modelo se descarga (~9 GB); la UI usa esto para
 /// mostrar "preparando…" en vez de un error 404 críptico.
 async fn status(State(st): State<AppState>) -> Json<serde_json::Value> {
-    let engine_up = st.engine.health().await.is_ok();
-    let model_ready = engine_up && st.engine.model_ready().await;
+    let _ = st;
+    let provider = crate::provider::load();
+    let engine = build_engine(&provider);
+    let engine_up = engine.health().await.is_ok();
+    // API externa: lista en cuanto está configurada. Local: el modelo debe existir.
+    let model_ready = if provider.kind == "external" {
+        engine_up
+    } else {
+        engine_up && local_model_ready(&provider.model).await
+    };
     Json(serde_json::json!({
         "engine_up": engine_up,
         "model_ready": model_ready,
-        "engine": st.engine.id(),
+        "engine": engine.id(),
+        "provider": provider.kind,
     }))
+}
+
+/// ¿Existe ya el modelo local en Ollama? (en 1er arranque se descarga).
+async fn local_model_ready(model: &str) -> bool {
+    let base = std::env::var("AION_OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".into());
+    let Ok(resp) = reqwest::Client::new().get(format!("{base}/api/tags")).send().await else {
+        return false;
+    };
+    let Ok(text) = resp.text().await else { return false };
+    text.contains(&format!("\"{model}\"")) || text.contains(&format!("{model}:"))
+}
+
+// ── Onboarding: escaneo de hardware, catálogo y descarga de modelos ─────────
+
+/// Escanea el equipo y devuelve hardware + nivel recomendado + catálogo de modelos.
+async fn system_scan() -> Json<serde_json::Value> {
+    let scan = crate::onboarding::scan();
+    let catalog = crate::onboarding::catalog(&scan.tier);
+    Json(serde_json::json!({ "scan": scan, "catalog": catalog }))
+}
+
+#[derive(Deserialize)]
+struct PullBody {
+    model: String,
+}
+
+/// Descarga un modelo local por streaming, emitiendo el PROGRESO (barra) por SSE.
+async fn models_pull(Json(body): Json<PullBody>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let model = body.model.clone();
+    tokio::spawn(async move {
+        let base =
+            std::env::var("AION_OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".into());
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/api/pull"))
+            .json(&serde_json::json!({ "model": model, "stream": true }))
+            .send()
+            .await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx
+                    .send(Event::default().data(
+                        serde_json::json!({ "kind": "error", "text": e.to_string() }).to_string(),
+                    ))
+                    .await;
+                return;
+            }
+        };
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        while let Some(item) = stream.next().await {
+            let Ok(bytes) = item else { break };
+            buf.push_str(&String::from_utf8_lossy(&bytes));
+            while let Some(nl) = buf.find('\n') {
+                let line = buf[..nl].trim().to_string();
+                buf.drain(..=nl);
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                    let status = v["status"].as_str().unwrap_or("");
+                    let completed = v["completed"].as_f64().unwrap_or(0.0);
+                    let total = v["total"].as_f64().unwrap_or(0.0);
+                    let percent = if total > 0.0 { (completed / total * 100.0).round() } else { 0.0 };
+                    let _ = tx
+                        .send(Event::default().data(
+                            serde_json::json!({
+                                "kind": "progress", "status": status, "percent": percent
+                            })
+                            .to_string(),
+                        ))
+                        .await;
+                }
+            }
+        }
+        let _ = tx
+            .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+            .await;
+    });
+    Sse::new(ReceiverStream::new(rx).map(Ok))
+}
+
+/// Devuelve la config del proveedor (sin exponer la API key completa).
+async fn provider_get() -> Json<serde_json::Value> {
+    let c = crate::provider::load();
+    Json(serde_json::json!({
+        "kind": c.kind, "model": c.model, "base_url": c.base_url,
+        "has_key": !c.api_key.is_empty(),
+    }))
+}
+
+/// Guarda el proveedor elegido (modelo local o API externa).
+async fn provider_set(Json(c): Json<crate::provider::ProviderConfig>) -> Json<serde_json::Value> {
+    match crate::provider::save(&c) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct GovSetup {
+    posture: String,
+}
+
+/// Wizard de reglas del agente: fija la postura de gobernanza.
+async fn governance_setup(Json(body): Json<GovSetup>) -> Json<serde_json::Value> {
+    use aion_computer::Posture;
+    let posture = match body.posture.as_str() {
+        "balanced" => Posture::Balanced,
+        "max" => Posture::MaxAutonomy,
+        _ => Posture::Conservative,
+    };
+    match aion_computer::Governor::open(app_data_dir_control()) {
+        Ok(mut g) => {
+            let _ = g.set_posture(posture);
+            Json(serde_json::json!({ "ok": true, "posture": body.posture }))
+        }
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+fn app_data_dir_control() -> std::path::PathBuf {
+    crate::app_data_dir().join("control")
 }
 
 /// Chat con streaming SSE. Cada evento lleva JSON `{kind, text}` o `{kind:"done",...}`.
@@ -111,7 +262,7 @@ async fn chat(
     Json(body): Json<ChatBody>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
-    let engine = st.engine.clone();
+    let engine = active_engine();
     let prompt = body.prompt.clone();
     let convo = st.convo.clone();
     // Acumula la respuesta para guardarla en memoria al terminar.
@@ -121,7 +272,7 @@ async fn chat(
     // para que AION APLIQUE lo que aprendió/investigó.
     let grounding = relevant_knowledge(&body.prompt).await;
     // PROMPT DINÁMICO: elige el modo (persona) según lo que el usuario necesita.
-    let mode = crate::prompts::route(&engine, &body.prompt).await;
+    let mode = crate::prompts::route(&*engine, &body.prompt).await;
     let self_ctx = format!(
         "{}\n\n{}{}",
         self_awareness_prompt(),
@@ -139,7 +290,7 @@ async fn chat(
         let mut c = convo.lock().unwrap();
         c.push(Message::user(&prompt));
     }
-    compress_if_needed(&engine, &convo).await;
+    compress_if_needed(&*engine, &convo).await;
     let history: Vec<Message> = convo.lock().unwrap().clone();
 
     tokio::spawn(async move {
@@ -207,13 +358,14 @@ struct AgentBody {
 /// Agente ReAct con herramientas. Emite por SSE los pasos (thought/action/
 /// observation) y al final `answer` + `done`.
 async fn agent(
-    State(_st): State<AppState>,
+    State(st): State<AppState>,
     Json(body): Json<AgentBody>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let _ = st;
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
 
+    let engine = active_engine();
     tokio::spawn(async move {
-        let engine = OllamaEngine::default_local();
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(CalculatorTool));
 
@@ -283,7 +435,7 @@ async fn agent(
         // Aterriza al agente en lo que YA SABE: conocimiento relevante a la tarea
         // + catálogo de skills que se ha forjado. Así aplica su saber y sus
         // herramientas para hacerlo mejor (autónomo + acumulativo).
-        let mut ctx = grounding_for_agent(&engine, &body.task).await;
+        let mut ctx = grounding_for_agent(&*engine, &body.task).await;
         let skills = crate::skill_store::catalog();
         if !skills.is_empty() {
             ctx.push_str("\nSkills que ya te has forjado (úsalas con skill_invoke si aplican):\n");
@@ -291,7 +443,7 @@ async fn agent(
                 ctx.push_str(&format!("- {n}: {d}\n"));
             }
         }
-        let agent = ReActAgent::new(&engine, &tools, bus.clone()).with_context(ctx);
+        let agent = ReActAgent::new(&*engine, &tools, bus.clone()).with_context(ctx);
         let result = agent.run(&body.task).await;
         fwd.abort();
 
@@ -366,7 +518,7 @@ digas que 'no hacías nada'. Eres cercano, directo y sin rodeos.{recent}{pending
 /// CONTEXTO INFINITO por **compresión activa** (Focus, arXiv 2601.07190): si el
 /// hilo crece, resume los turnos viejos en UN bloque y los poda, conservando los
 /// recientes. Patrón "sierra" → conversación efectivamente infinita sin degradarse.
-async fn compress_if_needed(engine: &OllamaEngine, convo: &Arc<std::sync::Mutex<Vec<Message>>>) {
+async fn compress_if_needed(engine: &dyn LlmEngine, convo: &Arc<std::sync::Mutex<Vec<Message>>>) {
     const MAX_MSGS: usize = 16; // umbral de compresión
     const KEEP_RECENT: usize = 6; // turnos recientes que se conservan intactos
 
@@ -471,7 +623,7 @@ async fn relevant_knowledge(prompt: &str) -> String {
 /// Aterrizaje del AGENTE con **reranker LLM** (Self-RAG): recupera (híbrido+MMR) y
 /// luego un juez decide qué recuerdos son realmente ÚTILES para la tarea antes de
 /// aplicarlos. Más precisión que el umbral solo (la latencia aquí es aceptable).
-async fn grounding_for_agent(engine: &OllamaEngine, task: &str) -> String {
+async fn grounding_for_agent(engine: &dyn LlmEngine, task: &str) -> String {
     if is_trivial_query(task) {
         return String::new();
     }

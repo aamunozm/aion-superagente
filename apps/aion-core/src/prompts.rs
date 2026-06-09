@@ -5,7 +5,6 @@
 
 use aion_kernel::traits::{GenerateRequest, LlmEngine};
 use aion_kernel::types::Message;
-use aion_llm::OllamaEngine;
 
 /// Devuelve la instrucción de modo (persona): la versión OPTIMIZADA por AION si
 /// existe (auto-mejora persistida), o el valor por defecto.
@@ -33,7 +32,7 @@ pub fn persona_default(task: &str) -> &'static str {
 
 /// Clasifica la petición en una tarea para elegir el prompt. Heurística rápida
 /// primero (sin latencia); si es ambigua, un clasificador LLM minúsculo.
-pub async fn route(engine: &OllamaEngine, prompt: &str) -> String {
+pub async fn route(engine: &dyn LlmEngine, prompt: &str) -> String {
     let p = prompt.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| p.contains(w));
 

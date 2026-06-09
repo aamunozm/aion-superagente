@@ -8,7 +8,9 @@
 mod agent_tools;
 mod inbox;
 mod memory_tool;
+mod onboarding;
 mod prompt_store;
+mod provider;
 mod prompts;
 mod serve;
 mod skill_store;

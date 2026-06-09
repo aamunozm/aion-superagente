@@ -150,6 +150,63 @@ export type InboxMessage = {
   read: boolean;
 };
 
+// ── Onboarding: escaneo de hardware, modelos y proveedor ────────────────────
+
+export type SystemScan = {
+  os: string;
+  arch: string;
+  cpu_cores: number;
+  ram_gb: number;
+  disk_free_gb: number;
+  gpu: string;
+  tier: string;
+  tier_reason: string;
+};
+export type ModelOption = {
+  id: string;
+  name: string;
+  ollama_name: string;
+  size_gb: number;
+  tier: string;
+  note: string;
+  recommended: boolean;
+};
+
+export const systemScan = () =>
+  jsonCall<{ scan: SystemScan; catalog: ModelOption[] }>("/api/system/scan");
+
+export const providerSet = (cfg: {
+  kind: string;
+  model: string;
+  base_url?: string;
+  api_key?: string;
+}) =>
+  jsonCall<{ ok?: boolean; error?: string }>("/api/provider", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ base_url: "", api_key: "", ...cfg }),
+  });
+
+export const governanceSetup = (posture: string) =>
+  jsonCall<{ ok: boolean }>("/api/governance/setup", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ posture }),
+  });
+
+/// Descarga un modelo local con progreso (SSE).
+export async function modelsPull(
+  model: string,
+  onEvent: (e: { kind: string; status?: string; percent?: number; text?: string }) => void,
+): Promise<void> {
+  const res = await fetch(`${BRIDGE_URL}/api/models/pull`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  await readSse(res, onEvent);
+}
+
 /// Estado de preparación del motor/modelo (para mostrar "descargando…" en 1er arranque).
 export const status = () =>
   jsonCall<{ engine_up: boolean; model_ready: boolean; engine: string }>("/api/status");
