@@ -29,7 +29,7 @@ impl<'a> ReActAgent<'a> {
             engine,
             tools,
             bus,
-            max_steps: 6,
+            max_steps: 8,
             name: "aion".to_string(),
         }
     }
@@ -126,10 +126,33 @@ impl<'a> ReActAgent<'a> {
             ));
         }
 
-        Ok(AgentRun {
-            answer: "No pude completar la tarea en los pasos disponibles.".into(),
-            steps: self.max_steps,
-        })
+        // Síntesis final: agotó los pasos, pero puede que ya tenga la info en el
+        // scratchpad (p. ej. tras leer una página grande). En vez de rendirse,
+        // pide una respuesta final con lo recopilado.
+        let synth = GenerateRequest {
+            messages: vec![
+                Message::system(
+                    "Da la mejor respuesta final posible a la tarea usando SOLO la \
+                     información ya recopilada. Responde directo, sin pedir más acciones.",
+                ),
+                Message::user(format!(
+                    "Tarea: {task}\n\nInformación recopilada:\n{scratchpad}\n\nRespuesta final:"
+                )),
+            ],
+            think: false,
+            temperature: Some(0.4),
+            max_tokens: Some(400),
+        };
+        match self.engine.generate(synth).await {
+            Ok(m) if !m.content.trim().is_empty() => Ok(AgentRun {
+                answer: m.content.trim().to_string(),
+                steps: self.max_steps,
+            }),
+            _ => Ok(AgentRun {
+                answer: "No pude completar la tarea en los pasos disponibles.".into(),
+                steps: self.max_steps,
+            }),
+        }
     }
 }
 

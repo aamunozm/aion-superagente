@@ -1060,7 +1060,7 @@ fn build_tests() -> Vec<BenchTest> {
         "difícil",
     ));
     v.push(w(
-        "Lee https://www.gnu.org con web_fetch y resume su propósito.",
+        "Lee https://www.python.org con web_fetch y di para qué sirve Python.",
         "media",
     ));
 
