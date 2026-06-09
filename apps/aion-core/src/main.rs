@@ -541,6 +541,11 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
         };
         println!("   {} {goal}: {detail}", if success { "✅" } else { "❌" });
 
+        // 🔔 AION "quiere hablarte": notificación sonora con lo que descubrió.
+        if success && goal == "estudiar" {
+            notify_user("AION 🌱 quiere contarte algo", &detail);
+        }
+
         // 🔁 REALIMENTAR curiosidad + auto-modelo.
         curiosity.record(goal, success);
         self_model.observe(success);
@@ -843,9 +848,41 @@ fn run_history() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Directorio de datos estable de AION (~/Library/Application Support/AION),
+/// independiente del directorio de trabajo. Se crea si no existe.
+fn app_data_dir() -> std::path::PathBuf {
+    let base = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join("Library/Application Support/AION"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let _ = std::fs::create_dir_all(&base);
+    base
+}
+
 /// Ruta del archivo de memoria persistente (configurable por AION_MEMORY).
 fn memory_path() -> String {
-    std::env::var("AION_MEMORY").unwrap_or_else(|_| "data/memory.jsonl".to_string())
+    std::env::var("AION_MEMORY").unwrap_or_else(|_| {
+        app_data_dir()
+            .join("memory.jsonl")
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+/// Envía una notificación de escritorio con sonido — AION "quiere hablarte".
+/// Se desactiva con AION_NOTIFY=0.
+fn notify_user(title: &str, message: &str) {
+    if std::env::var("AION_NOTIFY").as_deref() == Ok("0") {
+        return;
+    }
+    // Escapar comillas dobles para AppleScript.
+    let msg = message.replace('"', "'");
+    let title = title.replace('"', "'");
+    let script =
+        format!("display notification \"{msg}\" with title \"{title}\" sound name \"Glass\"");
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .status();
 }
 
 /// Guarda un recuerdo en la memoria persistente (sobrevive a reinicios).

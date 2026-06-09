@@ -29,9 +29,15 @@ impl AuditLog {
         }
     }
 
-    /// Audit log por defecto (configurable con `AION_AUDIT`).
+    /// Audit log por defecto (configurable con `AION_AUDIT`). Si no se define,
+    /// usa una ruta estable en ~/Library/Application Support/AION (independiente
+    /// del directorio de trabajo, importante para el demonio en segundo plano).
     pub fn default_local() -> Self {
-        let path = std::env::var("AION_AUDIT").unwrap_or_else(|_| "data/audit.jsonl".into());
+        let path = std::env::var("AION_AUDIT").unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|h| format!("{h}/Library/Application Support/AION/audit.jsonl"))
+                .unwrap_or_else(|_| "data/audit.jsonl".into())
+        });
         Self::new(path)
     }
 

@@ -21,7 +21,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/arielmarquez/Desktop/AION.app/Contents/MacOS/aion-core</string>
+    <string>/Users/arielmarquez/Library/Application Support/AION/bin/aion-core</string>
     <string>live</string>
     <string>2</string>
   </array>
@@ -29,15 +29,17 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>AION_MEMORY</key>
-    <string>/Users/arielmarquez/Desktop/Proyecto-AI-Local/data/memory.jsonl</string>
+    <string>/Users/arielmarquez/Library/Application Support/AION/memory.jsonl</string>
     <key>AION_AUDIT</key>
-    <string>/Users/arielmarquez/Desktop/Proyecto-AI-Local/data/audit.jsonl</string>
+    <string>/Users/arielmarquez/Library/Application Support/AION/audit.jsonl</string>
     <key>AION_LOG</key>
     <string>warn</string>
+    <!-- Notificaciones sonoras cuando AION quiere hablarte. -->
+    <key>AION_NOTIFY</key>
+    <string>1</string>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
   </dict>
-
-  <key>WorkingDirectory</key>
-  <string>/Users/arielmarquez/Desktop/Proyecto-AI-Local</string>
 
   <!-- Cada 3600s (1h) despierta para un ciclo de vida breve. -->
   <key>StartInterval</key>
