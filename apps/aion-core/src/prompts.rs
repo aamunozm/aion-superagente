@@ -7,8 +7,17 @@ use aion_kernel::traits::{GenerateRequest, LlmEngine};
 use aion_kernel::types::Message;
 use aion_llm::OllamaEngine;
 
-/// Devuelve la instrucción de modo (persona) para una clave de tarea.
-pub fn persona(task: &str) -> &'static str {
+/// Devuelve la instrucción de modo (persona): la versión OPTIMIZADA por AION si
+/// existe (auto-mejora persistida), o el valor por defecto.
+pub fn persona(task: &str) -> String {
+    if let Some(opt) = crate::prompt_store::current(task) {
+        return opt;
+    }
+    persona_default(task).to_string()
+}
+
+/// Instrucción base por defecto (semilla que AION puede optimizar luego).
+pub fn persona_default(task: &str) -> &'static str {
     match task {
         "investigacion" => "MODO INVESTIGACIÓN: prioriza buscar en internet (web_search) y \
              leer fuentes (web_fetch); sé riguroso y cita de dónde sacas la información.",

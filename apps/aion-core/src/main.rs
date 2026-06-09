@@ -8,6 +8,7 @@
 mod agent_tools;
 mod inbox;
 mod memory_tool;
+mod prompt_store;
 mod prompts;
 mod serve;
 mod skill_store;
@@ -539,7 +540,14 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
     let audit = aion_telemetry::AuditLog::default_local();
     let mut self_model = SelfModel::default();
     let mut curiosity = CuriosityEngine::new(8);
-    let activities = ["razonar", "estudiar", "evolucionar", "investigar", "comprender"];
+    let activities = [
+        "razonar",
+        "estudiar",
+        "evolucionar",
+        "investigar",
+        "comprender",
+        "optimizar",
+    ];
     let mut consecutive_errors = 0u32;
     const BREAKER: u32 = 3;
 
@@ -564,6 +572,7 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
             "evolucionar" => self_evolve_once(&engine).await,
             "investigar" => research_once(&engine).await,
             "comprender" => synthesize_once(&engine).await,
+            "optimizar" => optimize_prompt_once(&engine).await,
             _ => study_once(&engine).await,
         };
         println!("   {} {goal}: {detail}", if success { "✅" } else { "❌" });
@@ -804,6 +813,50 @@ async fn research_once(engine: &OllamaEngine) -> (bool, String) {
             .await;
     }
     (!summary.is_empty(), format!("{topic} → {summary}"))
+}
+
+/// `optimizar`: AION **mejora sus propios prompts** (OPRO/DSPy). Toma el modo menos
+/// optimizado, propone una instrucción mejor y la guarda como nueva versión.
+async fn optimize_prompt_once(engine: &OllamaEngine) -> (bool, String) {
+    // Elige el modo menos optimizado (reparte la mejora).
+    let tasks = ["conversacion", "investigacion", "creativo", "tecnico", "analisis"];
+    let task = tasks
+        .iter()
+        .min_by_key(|t| prompt_store::current_version(t))
+        .copied()
+        .unwrap_or("conversacion");
+    let current = prompts::persona(task);
+
+    let prompt = format!(
+        "Eres un optimizador de prompts (estilo OPRO). Esta es la instrucción actual del \
+         modo «{task}» de un agente de IA:\n\n«{current}»\n\n\
+         Propón una versión MEJORADA: más clara, más efectiva y que produzca mejores \
+         respuestas, MANTENIENDO la misma intención. Devuelve SOLO la nueva instrucción, \
+         en una o dos frases, sin comillas ni explicación."
+    );
+    match engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.7),
+            max_tokens: Some(120),
+        })
+        .await
+    {
+        Ok(m) => {
+            let improved = m.content.trim().trim_matches('"').to_string();
+            // Guarda solo si es válida y distinta (evita ruido).
+            if improved.len() > 20 && improved != current {
+                match prompt_store::save_new_version(task, &improved) {
+                    Ok(v) => (true, format!("modo «{task}» optimizado (v{v}): {improved}")),
+                    Err(e) => (false, e.to_string()),
+                }
+            } else {
+                (false, format!("no mejoré el modo «{task}» esta vez"))
+            }
+        }
+        Err(e) => (false, e.to_string()),
+    }
 }
 
 /// `comprender`: AION **conecta lo que ha aprendido** y sintetiza un entendimiento
