@@ -813,11 +813,49 @@ async fn synthesize_once(engine: &OllamaEngine) -> (bool, String) {
         Ok(m) => m,
         Err(e) => return (false, e.to_string()),
     };
+
+    // CONSOLIDACIÓN JERÁRQUICA (xMemory): si hay un clúster de casi-duplicados,
+    // fúndelo en UN tema superior y marca los originales obsoletos (la memoria se
+    // compacta en conocimiento, no se infla con repeticiones).
+    let clusters = mem.duplicate_clusters(0.80);
+    if let Some(group) = clusters.into_iter().find(|g| g.len() >= 3) {
+        let material = group
+            .iter()
+            .map(|(_, c)| c.clone())
+            .collect::<Vec<_>>()
+            .join("\n- ");
+        let prompt = format!(
+            "Tengo varios recuerdos casi repetidos sobre lo mismo:\n- {material}\n\n\
+             Fúndelos en UN solo enunciado de conocimiento, claro y aplicable, sin perder \
+             lo esencial. Una o dos frases, en primera persona."
+        );
+        if let Ok(m) = engine
+            .generate(GenerateRequest {
+                messages: vec![Message::user(prompt)],
+                think: false,
+                temperature: Some(0.5),
+                max_tokens: Some(160),
+            })
+            .await
+        {
+            let theme = m.content.trim().to_string();
+            if !theme.is_empty() {
+                let _ = mem.store(&format!("[conocimiento] {theme}")).await;
+                let ids: Vec<String> = group.iter().map(|(id, _)| id.clone()).collect();
+                let fused = mem.supersede(&ids).unwrap_or(0);
+                return (
+                    true,
+                    format!("fundí {fused} recuerdos repetidos en un tema: {theme}"),
+                );
+            }
+        }
+    }
+
     let all = mem.contents();
     if all.len() < 3 {
         return (false, "aún no tengo suficiente material que conectar".into());
     }
-    // Toma una muestra de lo aprendido (los más recientes).
+    // Si no hay duplicados, conecta lo aprendido reciente en un entendimiento nuevo.
     let sample: Vec<String> = all.iter().rev().take(12).cloned().collect();
     let material = sample.join("\n- ");
     let prompt = format!(

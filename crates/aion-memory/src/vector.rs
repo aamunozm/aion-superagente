@@ -106,6 +106,52 @@ impl VectorMemory {
             .collect()
     }
 
+    /// Agrupa recuerdos vigentes en CLÚSTERES de casi-duplicados (cosine ≥ umbral).
+    /// Base de la consolidación jerárquica: fundir cada grupo en un "tema" superior.
+    pub fn duplicate_clusters(&self, threshold: f32) -> Vec<Vec<(String, String)>> {
+        let recs = self.records.lock().unwrap();
+        let active: Vec<&MemoryRecord> = recs.iter().filter(|r| !r.superseded).collect();
+        let mut used = vec![false; active.len()];
+        let mut clusters = Vec::new();
+        for i in 0..active.len() {
+            if used[i] {
+                continue;
+            }
+            let mut group = vec![(active[i].id.clone(), active[i].content.clone())];
+            used[i] = true;
+            for j in (i + 1)..active.len() {
+                if !used[j] && cosine(&active[i].embedding, &active[j].embedding) >= threshold {
+                    group.push((active[j].id.clone(), active[j].content.clone()));
+                    used[j] = true;
+                }
+            }
+            if group.len() >= 2 {
+                clusters.push(group);
+            }
+        }
+        clusters.sort_by_key(|g| std::cmp::Reverse(g.len()));
+        clusters
+    }
+
+    /// Marca recuerdos como obsoletos por id (al fundirlos en un tema superior).
+    pub fn supersede(&self, ids: &[String]) -> Result<usize> {
+        let set: std::collections::HashSet<&String> = ids.iter().collect();
+        let mut recs = self.records.lock().unwrap();
+        let mut n = 0;
+        for r in recs.iter_mut() {
+            if !r.superseded && set.contains(&r.id) {
+                r.superseded = true;
+                n += 1;
+            }
+        }
+        if n > 0 {
+            if let Some(path) = &self.path {
+                rewrite_jsonl(path, &recs)?;
+            }
+        }
+        Ok(n)
+    }
+
     /// **Exporta** toda la memoria como JSONL (un recuerdo por línea, con su
     /// embedding incluido). Sirve para llevar la memoria a otro PC/Mac.
     pub fn export_jsonl(&self) -> String {
