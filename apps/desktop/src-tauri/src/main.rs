@@ -48,10 +48,16 @@ fn main() {
                 .resolve(ollama_rel, tauri::path::BaseDirectory::Resource)
             {
                 Ok(ollama_bin) => {
-                    match std::process::Command::new(&ollama_bin)
-                        .arg("serve")
-                        .env("OLLAMA_HOST", OLLAMA_HOST)
-                        .spawn()
+                    let mut ollama_cmd = std::process::Command::new(&ollama_bin);
+                    ollama_cmd.arg("serve").env("OLLAMA_HOST", OLLAMA_HOST);
+                    // Unix: nuevo grupo de procesos (pgid = pid de ollama) para poder
+                    // matar a ollama Y a sus runners llama-server de una sola vez.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::CommandExt;
+                        ollama_cmd.process_group(0);
+                    }
+                    match ollama_cmd.spawn()
                     {
                         Ok(child) => {
                             *app.state::<Sidecars>().ollama.lock().unwrap() = Some(child);
@@ -115,6 +121,15 @@ fn main() {
                         let _ = child.kill();
                     }
                     if let Some(mut ollama) = state.ollama.lock().unwrap().take() {
+                        // Unix: SIGTERM a TODO el grupo (ollama + sus runners
+                        // llama-server) para un apagado limpio sin huérfanos.
+                        #[cfg(unix)]
+                        {
+                            let pid = ollama.id() as i32;
+                            unsafe {
+                                libc::kill(-pid, libc::SIGTERM);
+                            }
+                        }
                         let _ = ollama.kill();
                     }
                 }

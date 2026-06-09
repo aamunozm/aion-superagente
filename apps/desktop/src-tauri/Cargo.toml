@@ -16,6 +16,11 @@ tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Para apagar limpiamente el GRUPO de procesos del Ollama embebido (que lanza sus
+# propios runners `llama-server` como hijos) y no dejar huérfanos al cerrar.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Paquete independiente: NO forma parte del workspace Cargo raíz (evita acoplar
 # el núcleo a las dependencias nativas de Tauri). Este [workspace] vacío lo aísla.
 [workspace]
