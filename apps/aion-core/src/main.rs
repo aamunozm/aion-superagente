@@ -1230,7 +1230,7 @@ fn run_history() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Directorio de datos estable de AION (~/Library/Application Support/AION),
 /// independiente del directorio de trabajo. Se crea si no existe.
-fn app_data_dir() -> std::path::PathBuf {
+pub(crate) fn app_data_dir() -> std::path::PathBuf {
     let base = if cfg!(windows) {
         // Windows: %APPDATA%\AION
         std::env::var("APPDATA")

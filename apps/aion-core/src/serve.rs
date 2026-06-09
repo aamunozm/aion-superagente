@@ -238,7 +238,17 @@ async fn agent(
 }
 
 fn memory_path() -> String {
-    std::env::var("AION_MEMORY").unwrap_or_else(|_| "data/memory.jsonl".to_string())
+    // UNA sola memoria compartida entre la conversación y la vida autónoma (daemon
+    // `live`). Antes esto usaba una ruta relativa "data/memory.jsonl" distinta de la
+    // del daemon (~/Library/Application Support/AION/memory.jsonl), por lo que la UI
+    // mostraba 0 y el agente no recordaba lo que había estudiado/soñado mientras no
+    // estabas. Ahora ambos comparten el MISMO archivo en el directorio de datos.
+    std::env::var("AION_MEMORY").unwrap_or_else(|_| {
+        crate::app_data_dir()
+            .join("memory.jsonl")
+            .to_string_lossy()
+            .into_owned()
+    })
 }
 
 /// Estadísticas de la memoria de largo plazo.
