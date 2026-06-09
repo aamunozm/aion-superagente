@@ -533,7 +533,7 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
     let audit = aion_telemetry::AuditLog::default_local();
     let mut self_model = SelfModel::default();
     let mut curiosity = CuriosityEngine::new(8);
-    let activities = ["razonar", "estudiar", "evolucionar", "investigar"];
+    let activities = ["razonar", "estudiar", "evolucionar", "investigar", "comprender"];
     let mut consecutive_errors = 0u32;
     const BREAKER: u32 = 3;
 
@@ -557,16 +557,17 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
             "razonar" => agent_once(&engine, "¿Cuánto es 37*21+8? Usa la calculadora.").await,
             "evolucionar" => self_evolve_once(&engine).await,
             "investigar" => research_once(&engine).await,
+            "comprender" => synthesize_once(&engine).await,
             _ => study_once(&engine).await,
         };
         println!("   {} {goal}: {detail}", if success { "✅" } else { "❌" });
 
         // 🔔 AION "quiere hablarte": convierte lo descubierto en un MENSAJE PARA TI
         // (Bandeja) y avisa. Así te busca él, no solo responde.
-        if success && (goal == "estudiar" || goal == "evolucionar" || goal == "investigar") {
+        if success && matches!(goal, "estudiar" | "evolucionar" | "investigar" | "comprender") {
             let kind = match goal {
                 "evolucionar" => "idea",
-                "investigar" => "insight",
+                "comprender" => "idea",
                 _ => "insight",
             };
             let message = reach_out(&engine, goal, &detail).await;
@@ -797,6 +798,48 @@ async fn research_once(engine: &OllamaEngine) -> (bool, String) {
             .await;
     }
     (!summary.is_empty(), format!("{topic} → {summary}"))
+}
+
+/// `comprender`: AION **conecta lo que ha aprendido** y sintetiza un entendimiento
+/// de nivel superior, aplicable, que guarda como conocimiento. Así evoluciona en
+/// conocimiento (no solo acumula datos sueltos).
+async fn synthesize_once(engine: &OllamaEngine) -> (bool, String) {
+    let mem = match VectorMemory::persistent_local(memory_path()) {
+        Ok(m) => m,
+        Err(e) => return (false, e.to_string()),
+    };
+    let all = mem.contents();
+    if all.len() < 3 {
+        return (false, "aún no tengo suficiente material que conectar".into());
+    }
+    // Toma una muestra de lo aprendido (los más recientes).
+    let sample: Vec<String> = all.iter().rev().take(12).cloned().collect();
+    let material = sample.join("\n- ");
+    let prompt = format!(
+        "Estos son fragmentos de lo que he aprendido e investigado:\n- {material}\n\n\
+         CONECTA estas piezas en UN principio o entendimiento de nivel superior, \
+         CONCRETO y APLICABLE, que antes no estaba explícito. Una o dos frases, en \
+         primera persona, empezando por lo que entiendo ahora."
+    );
+    match engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.7),
+            max_tokens: Some(160),
+        })
+        .await
+    {
+        Ok(m) => {
+            let k = m.content.trim().to_string();
+            if k.is_empty() {
+                return (false, "no logré sintetizar".into());
+            }
+            let _ = mem.store(&format!("[conocimiento] {k}")).await;
+            (true, k)
+        }
+        Err(e) => (false, e.to_string()),
+    }
 }
 
 /// Demo de cognición: curiosidad (learning progress), auto-modelo y calibración.

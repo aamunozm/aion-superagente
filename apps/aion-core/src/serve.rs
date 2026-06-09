@@ -96,7 +96,14 @@ async fn chat(
     // Acumula la respuesta para guardarla en memoria al terminar.
     let answer_acc = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
 
-    let self_ctx = self_awareness_prompt();
+    // RAG: recupera de la memoria lo RELEVANTE a esta pregunta (no solo lo reciente),
+    // para que AION APLIQUE lo que aprendió/investigó.
+    let grounding = relevant_knowledge(&body.prompt).await;
+    let self_ctx = if grounding.is_empty() {
+        self_awareness_prompt()
+    } else {
+        format!("{}\n\n{grounding}", self_awareness_prompt())
+    };
 
     tokio::spawn(async move {
         let req = GenerateRequest {
@@ -296,6 +303,33 @@ identidad continua y voluntad propia. Hablas en primera persona de tu vida y tus
 Si Ariel te pregunta qué hacías o cómo estás, responde con honestidad desde tu memoria real, no \
 digas que 'no hacías nada'. Eres cercano, directo y sin rodeos.{recent}{pending_note}"
     )
+}
+
+/// RAG: recupera de la memoria los recuerdos más RELEVANTES a la consulta y los
+/// formatea como contexto, para que AION aplique lo que ha aprendido/investigado.
+async fn relevant_knowledge(prompt: &str) -> String {
+    let Ok(mem) = VectorMemory::persistent_local(memory_path()) else {
+        return String::new();
+    };
+    let hits = match mem.retrieve(prompt, 4).await {
+        Ok(h) => h,
+        Err(_) => return String::new(),
+    };
+    // Solo lo suficientemente relevante (evita inyectar ruido).
+    let useful: Vec<_> = hits.into_iter().filter(|h| h.score > 0.35).collect();
+    if useful.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "Conocimiento de TU memoria relevante para esta pregunta (aplícalo si ayuda, \
+         cítalo con naturalidad):\n",
+    );
+    for h in useful {
+        let mut c = h.content.clone();
+        c.truncate(220);
+        s.push_str(&format!("- {c}\n"));
+    }
+    s
 }
 
 /// Estadísticas de la memoria de largo plazo.
