@@ -106,11 +106,18 @@ async fn chat(
     // RAG: recupera de la memoria lo RELEVANTE a esta pregunta (no solo lo reciente),
     // para que AION APLIQUE lo que aprendió/investigó.
     let grounding = relevant_knowledge(&body.prompt).await;
-    let self_ctx = if grounding.is_empty() {
-        self_awareness_prompt()
-    } else {
-        format!("{}\n\n{grounding}", self_awareness_prompt())
-    };
+    // PROMPT DINÁMICO: elige el modo (persona) según lo que el usuario necesita.
+    let mode = crate::prompts::route(&engine, &body.prompt).await;
+    let self_ctx = format!(
+        "{}\n\n{}{}",
+        self_awareness_prompt(),
+        crate::prompts::persona(&mode),
+        if grounding.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{grounding}")
+        }
+    );
 
     // CONTEXTO INFINITO (compresión activa): añade el turno al hilo y, si crece
     // demasiado, comprime los turnos viejos en un resumen y los poda (patrón sierra).

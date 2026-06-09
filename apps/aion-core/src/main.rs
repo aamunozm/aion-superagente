@@ -8,6 +8,7 @@
 mod agent_tools;
 mod inbox;
 mod memory_tool;
+mod prompts;
 mod serve;
 mod skill_store;
 mod skill_tool;
