@@ -46,3 +46,6 @@ data/license_signing_key.hex
 
 # audit log local
 data/audit.jsonl
+
+# Runtime Ollama vendorizado (pesado, se genera con vendor-ollama-runtime.sh)
+apps/desktop/src-tauri/ollama-runtime/

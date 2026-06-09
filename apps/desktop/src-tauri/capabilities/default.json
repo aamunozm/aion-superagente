@@ -9,8 +9,7 @@
       "identifier": "shell:allow-spawn",
       "allow": [
         { "name": "binaries/aion-core", "sidecar": true, "args": true },
-        { "name": "binaries/aion-control-plane", "sidecar": true, "args": true },
-        { "name": "binaries/ollama", "sidecar": true, "args": true }
+        { "name": "binaries/aion-control-plane", "sidecar": true, "args": true }
       ]
     }
   ]
