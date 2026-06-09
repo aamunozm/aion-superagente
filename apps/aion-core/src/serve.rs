@@ -10,7 +10,6 @@
 //! comandos Tauri; el contrato (eventos) es el mismo.
 
 use crate::memory_tool::MemoryTool;
-use crate::skill_tool::SkillTool;
 use crate::web_tool::WebTool;
 use aion_browser::WebClient;
 use aion_kernel::events::{AionEvent, EventBus};
@@ -170,30 +169,34 @@ async fn agent(
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(CalculatorTool));
 
-        // Skill WASM (sandbox) como herramienta.
-        if let Ok(skill_host) = WasmSkillHost::new() {
-            if skill_host
-                .register(
-                    SkillManifest {
-                        name: "sum_to".into(),
-                        description: "suma 1..=n".into(),
-                    },
-                    SUM_TO_WAT,
-                )
-                .is_ok()
-            {
-                tools.register(Arc::new(SkillTool::new(
-                    Arc::new(skill_host),
-                    "sum_to",
-                    "Suma todos los enteros de 1 hasta n (skill WASM en sandbox). Entrada: n.",
-                )));
-            }
-        }
-        // Memoria de largo plazo como herramienta.
+        // 🧠 Memoria cognitiva: buscar Y recordar (aprende y persiste).
         if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
-            tools.register(Arc::new(MemoryTool::new(Arc::new(mem), 3)));
+            let mem = Arc::new(mem);
+            tools.register(Arc::new(MemoryTool::new(mem.clone(), 3)));
+            tools.register(Arc::new(crate::agent_tools::RememberTool::new(mem)));
         }
-        // Capacidad web (leer URLs).
+
+        // 🔧 Skills WASM (sandbox): semilla + AUTO-ESCRITURA + invocación.
+        // Un único host compartido: las skills que el agente forje quedan
+        // disponibles para invocarse en el mismo razonamiento.
+        if let Ok(host) = WasmSkillHost::new() {
+            let host = Arc::new(host);
+            let _ = host.register(
+                SkillManifest {
+                    name: "sum_to".into(),
+                    description: "suma 1..=n".into(),
+                },
+                SUM_TO_WAT,
+            );
+            // El agente se escribe skills nuevas (validadas en sandbox+tests).
+            tools.register(Arc::new(crate::agent_tools::SkillForgeTool::new(
+                Arc::new(OllamaEngine::default_local()),
+                host.clone(),
+            )));
+            tools.register(Arc::new(crate::agent_tools::SkillInvokeTool::new(host)));
+        }
+
+        // 🌐 Investigación: leer la web (navegador propio).
         tools.register(Arc::new(WebTool::new(Arc::new(WebClient::new()))));
 
         let bus = EventBus::default();

@@ -5,6 +5,7 @@
 //! - `chat <prompt...>` F1: chat real con el LLM local (streaming de razonamiento
 //!   y respuesta) usando `OllamaEngine` contra `gemma4-reason`.
 
+mod agent_tools;
 mod inbox;
 mod memory_tool;
 mod serve;
@@ -467,7 +468,7 @@ async fn run_self_evolve() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Extrae un módulo WAT `(module ...)` balanceando paréntesis.
-fn extract_wat(text: &str) -> Option<String> {
+pub(crate) fn extract_wat(text: &str) -> Option<String> {
     let start = text.find("(module")?;
     let mut depth = 0i32;
     let mut end = None;
