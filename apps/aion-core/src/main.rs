@@ -88,6 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("sync") => {
             run_sync_demo()?;
         }
+        Some("bench") => {
+            run_bench().await?;
+        }
         Some("vision") => {
             let path = args.get(1).cloned().unwrap_or_default();
             let prompt = if args.len() > 2 {
@@ -616,7 +619,9 @@ async fn agent_once(engine: &OllamaEngine, task: &str) -> (bool, String) {
     }
 }
 
-/// Un intento de auto-evolución (el LLM escribe la skill 'square', gated).
+/// Auto-evolución con reintentos (hasta 3): el LLM escribe la skill 'square' y
+/// pasa por las puertas (sandbox + tests). El LLM local no siempre genera WAT
+/// válido a la primera; reintentar sube la tasa de éxito sin relajar el gating.
 async fn self_evolve_once(engine: &OllamaEngine) -> (bool, String) {
     use aion_evolution::{Candidate, EvolutionEngine};
     use aion_skills::{SkillManifest, WasmSkillHost};
@@ -625,39 +630,49 @@ async fn self_evolve_once(engine: &OllamaEngine) -> (bool, String) {
     let prompt = "Escribe un módulo WebAssembly WAT que exporte `run` (param i64, result i64) \
         que devuelva n*n. Ejemplo válido: (module (func (export \"run\") (param $n i64) (result i64) \
         (i64.mul (local.get $n) (i64.const 2)))). Responde SOLO el módulo WAT.";
-    let msg = match engine
-        .generate(GenerateRequest {
-            messages: vec![Message::user(prompt)],
-            think: false,
-            temperature: Some(0.3),
-            max_tokens: Some(256),
-        })
-        .await
-    {
-        Ok(m) => m,
-        Err(e) => return (false, e.to_string()),
-    };
-    let Some(code) = extract_wat(&msg.content) else {
-        return (false, "el LLM no produjo WAT válido".into());
-    };
-    let Ok(live) = WasmSkillHost::new() else {
-        return (false, "no se pudo crear el host".into());
-    };
-    let mut evo = EvolutionEngine::new(Arc::new(live));
-    match evo
-        .propose(Candidate {
-            manifest: SkillManifest {
-                name: "square".into(),
-                description: "n*n".into(),
-            },
-            code,
-            tests: vec![(2, 4), (3, 9), (5, 25)],
-        })
-        .await
-    {
-        Ok(r) => (r.accepted, r.reason),
-        Err(e) => (false, e.to_string()),
+
+    let mut last = "sin intentos".to_string();
+    for _ in 0..3 {
+        let msg = match engine
+            .generate(GenerateRequest {
+                messages: vec![Message::user(prompt)],
+                think: false,
+                temperature: Some(0.3),
+                max_tokens: Some(256),
+            })
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                last = e.to_string();
+                continue;
+            }
+        };
+        let Some(code) = extract_wat(&msg.content) else {
+            last = "el LLM no produjo WAT válido".into();
+            continue;
+        };
+        let Ok(live) = WasmSkillHost::new() else {
+            return (false, "no se pudo crear el host".into());
+        };
+        let mut evo = EvolutionEngine::new(Arc::new(live));
+        match evo
+            .propose(Candidate {
+                manifest: SkillManifest {
+                    name: "square".into(),
+                    description: "n*n".into(),
+                },
+                code,
+                tests: vec![(2, 4), (3, 9), (5, 25)],
+            })
+            .await
+        {
+            Ok(r) if r.accepted => return (true, r.reason),
+            Ok(r) => last = r.reason,
+            Err(e) => last = e.to_string(),
+        }
     }
+    (false, format!("{last} (tras 3 intentos)"))
 }
 
 /// Genera un insight de auto-mejora y lo guarda en memoria; devuelve (éxito, insight).
@@ -752,6 +767,342 @@ async fn run_vision(path: &str, prompt: &str) -> Result<(), Box<dyn std::error::
     let msg = engine.generate_with_image(prompt, &b64).await?;
     println!("💬 {}", msg.content.trim());
     Ok(())
+}
+
+/// Tipo de comprobación de un test.
+enum Check {
+    /// La respuesta debe contener este texto (case-insensitive).
+    Has(&'static str),
+    /// Basta con una respuesta no vacía y sin error (razonamiento/web).
+    Ok,
+    /// Auto-evolución: la candidata debe ser aceptada por el gating.
+    Evolve,
+}
+
+struct BenchTest {
+    cat: &'static str,
+    diff: &'static str,
+    task: &'static str,
+    check: Check,
+}
+
+/// Ejecuta el agente con TODAS las herramientas (calc, sum_to WASM, memoria, web).
+async fn bench_agent(engine: &OllamaEngine, task: &str) -> String {
+    use aion_browser::WebClient;
+    use aion_orchestrator::{CalculatorTool, ReActAgent, ToolRegistry};
+    use aion_skills::{SkillManifest, WasmSkillHost, SUM_TO_WAT};
+    use memory_tool::MemoryTool;
+    use skill_tool::SkillTool;
+    use std::sync::Arc;
+    use web_tool::WebTool;
+
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(CalculatorTool));
+    if let Ok(h) = WasmSkillHost::new() {
+        if h.register(
+            SkillManifest {
+                name: "sum_to".into(),
+                description: "suma 1..=n".into(),
+            },
+            SUM_TO_WAT,
+        )
+        .is_ok()
+        {
+            tools.register(Arc::new(SkillTool::new(
+                Arc::new(h),
+                "sum_to",
+                "Suma 1..=n. Entrada: n.",
+            )));
+        }
+    }
+    if let Ok(m) = VectorMemory::persistent_local(memory_path()) {
+        tools.register(Arc::new(MemoryTool::new(Arc::new(m), 3)));
+    }
+    tools.register(Arc::new(WebTool::new(Arc::new(WebClient::new()))));
+
+    let agent = ReActAgent::new(engine, &tools, EventBus::default());
+    match agent.run(task).await {
+        Ok(r) => r.answer,
+        Err(e) => format!("⚠ {e}"),
+    }
+}
+
+fn is_fail(ans: &str) -> bool {
+    let a = ans.trim();
+    a.is_empty() || a.starts_with("No pude") || a.starts_with('⚠')
+}
+
+/// Batería de 50 tests de dificultad variada: herramientas, web, memoria,
+/// auto-evolución y creación de skills. Puntuación automática + informe.
+async fn run_bench() -> Result<(), Box<dyn std::error::Error>> {
+    // Memoria temporal aislada para el bench.
+    let tmp = std::env::temp_dir().join(format!("aion_bench_{}.jsonl", std::process::id()));
+    std::env::set_var("AION_MEMORY", &tmp);
+    let _ = std::fs::remove_file(&tmp);
+
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+
+    // Pre-popular memoria con hechos para los tests de memoria.
+    let mem = VectorMemory::persistent_local(memory_path())?;
+    for f in [
+        "La clave del wifi de la oficina es PLASMA2026.",
+        "El presupuesto del proyecto AION es 50000 euros.",
+        "El servidor de producción está en Frankfurt.",
+        "El CEO de ProntoClick es Ariel Marquez.",
+        "El lenguaje del núcleo de AION es Rust.",
+        "La versión actual de AION es 0.0.1.",
+        "El color de marca de AION es plasma teal.",
+        "La reunión semanal del equipo es los martes.",
+    ] {
+        mem.store(f).await?;
+    }
+
+    let tests: Vec<BenchTest> = build_tests();
+    let total = tests.len();
+    println!("🧪 Batería AION — {total} tests\n");
+
+    use std::collections::BTreeMap;
+    let mut by_cat: BTreeMap<&str, (u32, u32)> = BTreeMap::new();
+    let mut passed = 0u32;
+    let mut report = String::new();
+
+    for (i, t) in tests.iter().enumerate() {
+        let (ok, detail) = match &t.check {
+            Check::Evolve => {
+                let (acc, reason) = self_evolve_once(&engine).await;
+                (acc, reason)
+            }
+            chk => {
+                let ans = bench_agent(&engine, t.task).await;
+                let ok = match chk {
+                    Check::Has(s) => {
+                        !is_fail(&ans) && ans.to_lowercase().contains(&s.to_lowercase())
+                    }
+                    Check::Ok => !is_fail(&ans),
+                    Check::Evolve => unreachable!(),
+                };
+                (ok, ans.replace('\n', " ").chars().take(70).collect())
+            }
+        };
+        if ok {
+            passed += 1;
+        }
+        let e = by_cat.entry(t.cat).or_default();
+        e.1 += 1;
+        if ok {
+            e.0 += 1;
+        }
+        let mark = if ok { "✅" } else { "❌" };
+        let line = format!(
+            "{:>2}/{total} {mark} [{}/{}] {} → {}",
+            i + 1,
+            t.cat,
+            t.diff,
+            t.task.chars().take(50).collect::<String>(),
+            detail
+        );
+        println!("{line}");
+        report.push_str(&line);
+        report.push('\n');
+    }
+
+    println!("\n══════════ RESULTADOS ══════════");
+    let mut summary = format!("AION — Batería de {total} tests\n\n");
+    for (cat, (p, n)) in &by_cat {
+        let l = format!("  {cat:14} {p}/{n}");
+        println!("{l}");
+        summary.push_str(&l);
+        summary.push('\n');
+    }
+    let pct = passed as f32 / total as f32 * 100.0;
+    let scoreline = format!("\n🏆 TOTAL: {passed}/{total} ({pct:.0}%)");
+    println!("{scoreline}");
+    summary.push_str(&scoreline);
+
+    // Guardar informe.
+    let out = app_data_dir().join("bench_results.txt");
+    let _ = std::fs::write(&out, format!("{summary}\n\n{report}"));
+    println!("\n📄 informe: {}", out.display());
+    let _ = std::fs::remove_file(&tmp);
+    Ok(())
+}
+
+fn build_tests() -> Vec<BenchTest> {
+    let mut v: Vec<BenchTest> = Vec::new();
+    let a = |task, has| BenchTest {
+        cat: "aritmética",
+        diff: "fácil",
+        task,
+        check: Check::Has(has),
+    };
+    // 15 aritméticas (calculator) — respuesta exacta esperada.
+    v.push(a(
+        "Calcula 47*89-1234 con calculator. Responde solo el número.",
+        "2949",
+    ));
+    v.push(a("Calcula 128*5+17 con calculator.", "657"));
+    v.push(a("Calcula (2+3)*4 con calculator.", "20"));
+    v.push(a("Calcula 1000/8 con calculator.", "125"));
+    v.push(a("Calcula 37*21+8 con calculator.", "785"));
+    v.push(a("Calcula 144/12 con calculator.", "12"));
+    v.push(a("Calcula 2*2*2*2*2 con calculator.", "32"));
+    v.push(a("Calcula 7*7-7 con calculator.", "42"));
+    v.push(a("Calcula (100-1)*3 con calculator.", "297"));
+    v.push(a("Calcula 50*50 con calculator.", "2500"));
+    v.push(a("Calcula 12345+54321 con calculator.", "66666"));
+    v.push(a("Calcula 3*(4+5)-2 con calculator.", "25"));
+    v.push(a("Calcula 10000-1234 con calculator.", "8766"));
+    v.push(BenchTest {
+        cat: "aritmética",
+        diff: "media",
+        task: "Calcula 256*256 con calculator.",
+        check: Check::Has("65536"),
+    });
+    v.push(BenchTest {
+        cat: "aritmética",
+        diff: "media",
+        task: "Calcula 99*99 con calculator.",
+        check: Check::Has("9801"),
+    });
+
+    // 5 skill WASM sum_to.
+    let s = |task, has, diff| BenchTest {
+        cat: "skill-wasm",
+        diff,
+        task,
+        check: Check::Has(has),
+    };
+    v.push(s("Usa la herramienta sum_to con n=10.", "55", "fácil"));
+    v.push(s("Usa la herramienta sum_to con n=100.", "5050", "fácil"));
+    v.push(s("Usa la herramienta sum_to con n=7.", "28", "fácil"));
+    v.push(s("Usa la herramienta sum_to con n=50.", "1275", "media"));
+    v.push(s(
+        "Usa la herramienta sum_to con n=1000.",
+        "500500",
+        "media",
+    ));
+
+    // 8 razonamiento (heurístico: respuesta no vacía).
+    let r = |task, diff| BenchTest {
+        cat: "razonamiento",
+        diff,
+        task,
+        check: Check::Ok,
+    };
+    v.push(r("Acertijo: 3 interruptores fuera, 3 bombillas dentro, entras una vez. ¿Cómo sabes cuál es cuál?", "difícil"));
+    v.push(BenchTest {
+        cat: "razonamiento",
+        diff: "media",
+        task: "¿Qué número sigue en 2,4,8,16? Responde solo el número.",
+        check: Check::Has("32"),
+    });
+    v.push(BenchTest { cat: "razonamiento", diff: "difícil", task: "Dos trenes a 60 y 90 km/h en sentidos opuestos, separados 300 km. ¿En cuántas horas se cruzan? Usa calculator si hace falta.", check: Check::Has("2") });
+    v.push(r("Si todos los gloops son flerps y algunos flerps son zorps, ¿se sigue que algunos gloops son zorps? Sí/No y por qué.", "difícil"));
+    v.push(r("Explica en una frase por qué el cielo es azul.", "fácil"));
+    v.push(r("Ordena lógicamente estos pasos para hacer té: servir, hervir agua, poner la bolsita, esperar.", "media"));
+    v.push(r(
+        "Tengo 3 manzanas y compro el doble, luego regalo 2. ¿Cuántas tengo? Razona.",
+        "media",
+    ));
+    v.push(r(
+        "¿Es válido este argumento? 'Llueve → me mojo. No llueve. Por tanto no me mojo.' Explica.",
+        "difícil",
+    ));
+
+    // 7 web (navegador propio) — heurístico.
+    let w = |task, diff| BenchTest {
+        cat: "web",
+        diff,
+        task,
+        check: Check::Ok,
+    };
+    v.push(w(
+        "Lee https://example.com con web_fetch y resume en una frase.",
+        "fácil",
+    ));
+    v.push(w(
+        "Lee https://example.org con web_fetch y di de qué trata.",
+        "fácil",
+    ));
+    v.push(w(
+        "Lee https://www.rust-lang.org con web_fetch y di para qué sirve Rust.",
+        "media",
+    ));
+    v.push(w(
+        "Lee https://www.iana.org con web_fetch y resume.",
+        "media",
+    ));
+    v.push(w(
+        "Lee https://httpbin.org/html con web_fetch y resume el texto.",
+        "media",
+    ));
+    v.push(w(
+        "Lee https://en.wikipedia.org/wiki/Rome con web_fetch y dime de qué país es capital.",
+        "difícil",
+    ));
+    v.push(w(
+        "Lee https://www.gnu.org con web_fetch y resume su propósito.",
+        "media",
+    ));
+
+    // 8 memoria (memory_search sobre hechos pre-cargados).
+    let m = |task, has, diff| BenchTest {
+        cat: "memoria",
+        diff,
+        task,
+        check: Check::Has(has),
+    };
+    v.push(m(
+        "Usa memory_search: ¿cuál es la clave del wifi de la oficina?",
+        "PLASMA2026",
+        "media",
+    ));
+    v.push(m(
+        "Usa memory_search: ¿cuál es el presupuesto del proyecto?",
+        "50000",
+        "media",
+    ));
+    v.push(m(
+        "Usa memory_search: ¿dónde está el servidor de producción?",
+        "Frankfurt",
+        "media",
+    ));
+    v.push(m("Usa memory_search: ¿quién es el CEO?", "Ariel", "media"));
+    v.push(m(
+        "Usa memory_search: ¿en qué lenguaje está el núcleo?",
+        "Rust",
+        "media",
+    ));
+    v.push(m(
+        "Usa memory_search: ¿cuál es la versión actual?",
+        "0.0.1",
+        "media",
+    ));
+    v.push(m(
+        "Usa memory_search: ¿cuál es el color de marca?",
+        "teal",
+        "media",
+    ));
+    v.push(m(
+        "Usa memory_search: ¿qué día es la reunión semanal?",
+        "martes",
+        "media",
+    ));
+
+    // 7 auto-evolución / creación de skills.
+    for _ in 0..7 {
+        v.push(BenchTest {
+            cat: "auto-evolución",
+            diff: "difícil",
+            task: "Escribe y valida la skill 'square' (n*n).",
+            check: Check::Evolve,
+        });
+    }
+    v
 }
 
 /// Demo de sincronización local-first cifrada E2E entre dos dispositivos.
