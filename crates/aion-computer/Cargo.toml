@@ -1,0 +1,20 @@
+[package]
+name = "aion-computer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "AION computer control: catálogo de acciones + motor de políticas determinista (HITL), papelera reversible y audit log. La seguridad vive aquí, NO en el modelo."
+
+[dependencies]
+aion-kernel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

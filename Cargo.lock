@@ -68,6 +68,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aion-computer"
+version = "0.0.1"
+dependencies = [
+ "aion-kernel",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "aion-control-client"
 version = "0.0.1"
 dependencies = [
