@@ -42,6 +42,13 @@ impl<'a> ReActAgent<'a> {
         self
     }
 
+    /// Nombre del agente (rol) — aparece en los eventos del bus. Lo usan los
+    /// especialistas del equipo multiagente para publicar bajo su rol.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
     /// Aterriza al agente en su conocimiento acumulado (memoria/skills) para que
     /// lo aplique a la tarea — así es mejor con el tiempo, no parte de cero.
     pub fn with_context(mut self, context: impl Into<String>) -> Self {

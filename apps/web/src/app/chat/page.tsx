@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import {
   agentStream,
+  crewStream,
   chatStream,
   inboxList,
   inboxRead,
@@ -21,10 +22,11 @@ const INBOX_ICON: Record<string, string> = {
   alerta: "⚠️",
 };
 
-type Step = { kind: "thought" | "action" | "observation"; text: string };
+type Step = { kind: "thought" | "action" | "observation"; text: string; agent?: string };
+type Mode = "chat" | "agent" | "crew";
 type Turn = {
   prompt: string;
-  mode: "chat" | "agent";
+  mode: Mode;
   thinking: string;
   steps: Step[];
   answer: string;
@@ -39,7 +41,7 @@ const STEP_STYLE: Record<Step["kind"], { icon: string; color: string }> = {
 
 export default function ChatPage() {
   const [input, setInput] = useState("");
-  const [mode, setMode] = useState<"chat" | "agent">("chat");
+  const [mode, setMode] = useState<Mode>("chat");
   const [think, setThink] = useState(true);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
@@ -132,11 +134,15 @@ export default function ChatPage() {
           scroll();
         });
       } else {
-        await agentStream(prompt, (ev: AgentEvent) => {
+        const stream = mode === "crew" ? crewStream : agentStream;
+        await stream(prompt, (ev: AgentEvent) => {
           if (ev.kind === "thought" || ev.kind === "action" || ev.kind === "observation")
-            update((t) => ({ ...t, steps: [...t.steps, { kind: ev.kind, text: ev.text }] }));
+            update((t) => ({
+              ...t,
+              steps: [...t.steps, { kind: ev.kind, text: ev.text, agent: ev.agent }],
+            }));
           else if (ev.kind === "answer")
-            update((t) => ({ ...t, answer: ev.text, meta: `${ev.steps} pasos` }));
+            update((t) => ({ ...t, answer: ev.text, meta: ev.steps ? `${ev.steps} pasos` : undefined }));
           else if (ev.kind === "error") update((t) => ({ ...t, answer: `⚠️ ${ev.text}` }));
           scroll();
         });
@@ -156,7 +162,7 @@ export default function ChatPage() {
           {busy ? "AION trabajando…" : "gemma4-reason · local"}
         </span>
         <div className="ml-auto flex gap-1 p-1 rounded-full" style={{ background: "var(--surface-2)" }}>
-          {(["chat", "agent"] as const).map((m) => (
+          {(["chat", "agent", "crew"] as const).map((m) => (
             <button
               key={m}
               onClick={() => setMode(m)}
@@ -166,7 +172,7 @@ export default function ChatPage() {
                 color: mode === m ? "var(--primary-contrast)" : "var(--text-2)",
               }}
             >
-              {m === "chat" ? "Chat" : "Agente"}
+              {m === "chat" ? "Chat" : m === "agent" ? "Agente" : "Equipo"}
             </button>
           ))}
         </div>
@@ -207,7 +213,9 @@ export default function ChatPage() {
           <p className="text-center text-sm mt-20" style={{ color: "var(--text-3)" }}>
             {mode === "chat"
               ? "Chat: AION razona localmente, sin enviar tus datos a nadie."
-              : "Agente: AION usa herramientas (p. ej. calculadora) para resolver tareas."}
+              : mode === "crew"
+                ? "Equipo: un orquestador descompone la tarea y delega en especialistas (investigador, programador, analista, redactor) que colaboran."
+                : "Agente: AION usa herramientas (p. ej. calculadora) para resolver tareas."}
           </p>
         )}
         {turns.map((t, i) => (
@@ -225,10 +233,18 @@ export default function ChatPage() {
               </details>
             )}
 
-            {t.mode === "agent" &&
+            {(t.mode === "agent" || t.mode === "crew") &&
               t.steps.map((s, j) => (
                 <div key={j} className="flex items-start gap-2 text-sm pl-1" style={{ color: "var(--text-2)" }}>
                   <span style={{ color: STEP_STYLE[s.kind].color }}>{STEP_STYLE[s.kind].icon}</span>
+                  {s.agent && (
+                    <span
+                      className="text-[10px] px-1.5 py-0.5 rounded-full shrink-0 font-medium"
+                      style={{ background: "var(--accent-subtle)", color: "var(--accent)" }}
+                    >
+                      {s.agent}
+                    </span>
+                  )}
                   <span className={s.kind === "action" ? "font-mono text-xs" : ""}>{s.text}</span>
                 </div>
               ))}
@@ -265,7 +281,7 @@ export default function ChatPage() {
         )}
         <input
           className="input"
-          placeholder={mode === "chat" ? "Pregunta a AION…" : "Tarea para el agente…"}
+          placeholder={mode === "chat" ? "Pregunta a AION…" : mode === "crew" ? "Tarea para el equipo…" : "Tarea para el agente…"}
           value={input}
           onChange={(e) => setInput(e.target.value)}
         />

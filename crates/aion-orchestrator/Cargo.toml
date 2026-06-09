@@ -10,6 +10,7 @@ description = "AION agent orchestrator: ReAct loop + pub/sub bus + planner + arb
 [dependencies]
 aion-kernel.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true

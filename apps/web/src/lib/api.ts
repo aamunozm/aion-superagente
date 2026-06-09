@@ -47,10 +47,10 @@ export type ChatEvent =
   | { kind: "error"; text: string };
 
 export type AgentEvent =
-  | { kind: "thought"; text: string }
-  | { kind: "action"; text: string }
-  | { kind: "observation"; text: string }
-  | { kind: "answer"; text: string; steps: number }
+  | { kind: "thought"; text: string; agent?: string }
+  | { kind: "action"; text: string; agent?: string }
+  | { kind: "observation"; text: string; agent?: string }
+  | { kind: "answer"; text: string; steps?: number; agent?: string }
   | { kind: "done" }
   | { kind: "error"; text: string };
 
@@ -98,6 +98,19 @@ export async function agentStream(
   onEvent: (e: AgentEvent) => void,
 ): Promise<void> {
   const res = await fetch(`${BRIDGE_URL}/api/agent`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ task }),
+  });
+  await readSse(res, onEvent);
+}
+
+/** Equipo multiagente: orquestador + especialistas. Emite la actividad por rol. */
+export async function crewStream(
+  task: string,
+  onEvent: (e: AgentEvent) => void,
+): Promise<void> {
+  const res = await fetch(`${BRIDGE_URL}/api/crew`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ task }),

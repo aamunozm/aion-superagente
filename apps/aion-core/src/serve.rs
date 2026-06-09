@@ -82,6 +82,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/chat", post(chat))
         .route("/api/chat/new", post(chat_reset))
         .route("/api/agent", post(agent))
+        .route("/api/crew", post(crew))
         .route("/api/memory", get(memory_stats))
         .route("/api/memory/remember", post(memory_remember))
         .route("/api/memory/sleep", post(memory_sleep))
@@ -463,6 +464,77 @@ async fn agent(
 
     let stream = ReceiverStream::new(rx).map(Ok);
     Sse::new(stream)
+}
+
+/// **Equipo multiagente**: orquestador + especialistas (jerarquía + colaboración).
+/// Emite por SSE la actividad de cada agente (con su ROL) y la respuesta final.
+async fn crew(
+    State(st): State<AppState>,
+    Json(body): Json<AgentBody>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let _ = st;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let engine = active_engine();
+    tokio::spawn(async move {
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(CalculatorTool));
+        if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+            let mem = Arc::new(mem);
+            tools.register(Arc::new(MemoryTool::new(mem.clone(), 3)));
+            tools.register(Arc::new(crate::agent_tools::RememberTool::new(mem)));
+        }
+        if let Ok(host) = WasmSkillHost::new() {
+            let host = Arc::new(host);
+            let _ = host.register(
+                SkillManifest { name: "sum_to".into(), description: "suma 1..=n".into() },
+                SUM_TO_WAT,
+            );
+            crate::skill_store::load_all(&host);
+            tools.register(Arc::new(crate::agent_tools::SkillForgeTool::new(
+                Arc::new(OllamaEngine::default_local()),
+                host.clone(),
+            )));
+            tools.register(Arc::new(crate::agent_tools::SkillInvokeTool::new(host)));
+        }
+        let web = Arc::new(WebClient::new());
+        tools.register(Arc::new(crate::agent_tools::SearchTool::new(web.clone())));
+        tools.register(Arc::new(WebTool::new(web)));
+
+        let bus = EventBus::default();
+        // Reenvía la actividad de CADA agente con su rol (jerarquía visible).
+        let tx_fwd = tx.clone();
+        let mut rx_bus = bus.subscribe();
+        let fwd = tokio::spawn(async move {
+            while let Ok(ev) = rx_bus.recv().await {
+                let payload = match ev {
+                    AionEvent::ThoughtEmitted { agent, text } => {
+                        serde_json::json!({ "kind": "thought", "agent": agent, "text": text })
+                    }
+                    AionEvent::ActionRequested { agent, action } => {
+                        serde_json::json!({ "kind": "action", "agent": agent, "text": action })
+                    }
+                    AionEvent::ObservationReceived { agent, summary } => {
+                        serde_json::json!({ "kind": "observation", "agent": agent, "text": summary })
+                    }
+                    _ => continue,
+                };
+                let _ = tx_fwd.send(Event::default().data(payload.to_string())).await;
+            }
+        });
+
+        let orchestrator = aion_orchestrator::Orchestrator::new(&*engine, &tools, bus.clone());
+        let result = orchestrator.run(&body.task).await;
+        fwd.abort();
+
+        let final_event = match result {
+            Ok(run) => serde_json::json!({ "kind": "answer", "agent": "orquestador", "text": run.answer, "steps": run.steps }),
+            Err(e) => serde_json::json!({ "kind": "error", "text": e.to_string() }),
+        };
+        let _ = tx.send(Event::default().data(final_event.to_string())).await;
+        let _ = tx.send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string())).await;
+    });
+
+    Sse::new(ReceiverStream::new(rx).map(Ok))
 }
 
 fn memory_path() -> String {

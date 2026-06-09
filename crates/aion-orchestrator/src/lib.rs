@@ -9,8 +9,10 @@
 //! - F4: integración con curiosidad (MAGELLAN) y memoria darwiniana.
 
 mod calc;
+mod crew;
 mod react;
 mod tool;
 
+pub use crew::{CrewRun, Orchestrator, Role, Step, ROLES};
 pub use react::{AgentRun, ReActAgent};
 pub use tool::{CalculatorTool, Tool, ToolRegistry};
