@@ -40,7 +40,7 @@ cargo tauri build --target "$UNI" --bundles app
 # llavero: así el hash de firma no cambia entre builds y macOS CONSERVA los
 # permisos (Grabación de pantalla / Accesibilidad) tras cada actualización.
 # Si no existe (CI u otra máquina), cae a ad-hoc — sigue funcionando.
-APP="target/$UNI/release/bundle/macos/AION.app"
+APP="src-tauri/target/$UNI/release/bundle/macos/AION.app"
 if security find-identity -p codesigning 2>/dev/null | grep -q "AION Local Signing"; then
   echo "==> firmando con identidad estable 'AION Local Signing' (permisos persistentes)"
   codesign --force --deep --sign "AION Local Signing" "$APP"
