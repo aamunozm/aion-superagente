@@ -6,6 +6,7 @@
 //!   y respuesta) usando `OllamaEngine` contra `gemma4-reason`.
 
 mod agent_tools;
+mod credentials;
 mod empathy;
 mod evals;
 mod inbox;

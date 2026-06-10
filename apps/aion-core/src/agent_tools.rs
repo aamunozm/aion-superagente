@@ -604,6 +604,51 @@ impl Tool for BrowserSeeTool {
     }
 }
 
+/// Inicia sesión en la página abierta usando las credenciales GUARDADAS del usuario
+/// (bóveda en el Llavero). El agente NUNCA ve la contraseña: esta herramienta solo
+/// rellena el formulario y confirma; los valores van directos al navegador.
+pub struct CredentialLoginTool {
+    driver: Arc<dyn BrowserDriver>,
+}
+impl CredentialLoginTool {
+    pub fn new(driver: Arc<dyn BrowserDriver>) -> Self {
+        Self { driver }
+    }
+}
+#[async_trait]
+impl Tool for CredentialLoginTool {
+    fn name(&self) -> &str {
+        "credential_login"
+    }
+    fn description(&self) -> &str {
+        "Inicia sesión en la página ABIERTA con las credenciales GUARDADAS del usuario \
+         para ese sitio. Entrada: el sitio/host (p. ej. \"amazon.it\"). Rellena usuario y \
+         contraseña en el formulario; luego usa browser_click para enviar. NUNCA verás la \
+         contraseña: solo se rellena. Si no hay credenciales guardadas, pídele al usuario \
+         que las añada en Ajustes → Credenciales (NUNCA pidas la contraseña por el chat)."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let host = crate::credentials::normalize_host(input);
+        // get() solo lo llama el backend; el valor jamás se devuelve al agente.
+        let Some((user, pass)) = crate::credentials::get(&host) else {
+            return Ok(format!(
+                "no hay credenciales guardadas para «{host}». Pídele al usuario que las añada \
+                 en Ajustes → Credenciales (no las pidas por el chat)."
+            ));
+        };
+        let filled = self
+            .driver
+            .fill_login(&user, &pass)
+            .await
+            .map_err(|e| e.to_string())?;
+        // Solo informamos de los campos rellenados, nunca de los valores.
+        Ok(format!(
+            "credenciales de «{host}» introducidas en el formulario (campos: {filled}). \
+             Ahora pulsa el botón de iniciar sesión con browser_click."
+        ))
+    }
+}
+
 // ── Lugares/negocios por dirección: OpenStreetMap (Nominatim) ───────────────
 
 /// Encuentra QUÉ negocio/lugar hay en una dirección (o busca lugares por nombre),

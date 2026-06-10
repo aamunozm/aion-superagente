@@ -181,6 +181,11 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/library/remove", post(library_remove))
         .route("/api/library/ask", post(library_ask))
         .route("/api/vision", post(vision))
+        .route(
+            "/api/credentials",
+            get(credentials_list).post(credentials_set),
+        )
+        .route("/api/credentials/remove", post(credentials_remove))
         .layer(cors)
         .layer(
             TraceLayer::new_for_http()
@@ -569,7 +574,12 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::BrowserTypeTool::new(
             browser.clone(),
         )));
-        tools.register(Arc::new(crate::agent_tools::BrowserSeeTool::new(browser)));
+        tools.register(Arc::new(crate::agent_tools::BrowserSeeTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::CredentialLoginTool::new(
+            browser,
+        )));
 
         let bus = EventBus::default();
 
@@ -690,7 +700,12 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::BrowserTypeTool::new(
             browser.clone(),
         )));
-        tools.register(Arc::new(crate::agent_tools::BrowserSeeTool::new(browser)));
+        tools.register(Arc::new(crate::agent_tools::BrowserSeeTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::CredentialLoginTool::new(
+            browser,
+        )));
 
         let bus = EventBus::default();
         // Reenvía la actividad de CADA agente con su rol (jerarquía visible).
@@ -1245,6 +1260,45 @@ async fn library_remove(Json(body): Json<RemoveBody>) -> Json<serde_json::Value>
         Ok(n) => Json(
             serde_json::json!({ "ok": true, "removed": n, "total_chunks": lib.total_chunks() }),
         ),
+        Err(e) => Json(serde_json::json!({ "error": e })),
+    }
+}
+
+// ── Bóveda de credenciales (Llavero) ────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CredSetBody {
+    host: String,
+    user: String,
+    pass: String,
+}
+
+/// Guarda credenciales en la bóveda (Llavero). La contraseña ENTRA pero nunca se
+/// devuelve por ningún endpoint ni al LLM.
+async fn credentials_set(Json(b): Json<CredSetBody>) -> Json<serde_json::Value> {
+    match crate::credentials::set(&b.host, &b.user, &b.pass) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// Lista los sitios guardados (host + usuario). NUNCA incluye contraseñas.
+async fn credentials_list() -> Json<serde_json::Value> {
+    let items: Vec<serde_json::Value> = crate::credentials::list()
+        .into_iter()
+        .map(|c| serde_json::json!({ "host": c.host, "user": c.user }))
+        .collect();
+    Json(serde_json::json!({ "credentials": items }))
+}
+
+#[derive(Deserialize)]
+struct CredRemoveBody {
+    host: String,
+}
+
+async fn credentials_remove(Json(b): Json<CredRemoveBody>) -> Json<serde_json::Value> {
+    match crate::credentials::remove(&b.host) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
         Err(e) => Json(serde_json::json!({ "error": e })),
     }
 }

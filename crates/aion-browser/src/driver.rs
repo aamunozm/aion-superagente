@@ -26,6 +26,10 @@ pub trait BrowserDriver: Send + Sync {
     async fn snapshot(&self) -> Result<Snapshot>;
     async fn click(&self, selector: &str) -> Result<()>;
     async fn type_text(&self, selector: &str, text: &str) -> Result<()>;
+    /// Rellena el formulario de login de la página actual con usuario+contraseña.
+    /// Los valores se inyectan en la PÁGINA (vía CDP) y NUNCA se devuelven: la función
+    /// solo informa de qué campos rellenó. Base de la bóveda de credenciales.
+    async fn fill_login(&self, username: &str, password: &str) -> Result<String>;
     async fn screenshot_b64(&self) -> Result<String>;
     async fn close(&self) -> Result<()>;
 }
@@ -261,6 +265,26 @@ impl BrowserDriver for ChromiumoxideDriver {
         Ok(())
     }
 
+    async fn fill_login(&self, username: &str, password: &str) -> Result<String> {
+        let guard = cell().lock().await;
+        let sess = guard.as_ref().ok_or_else(no_page)?;
+        let page = sess.page.as_ref().ok_or_else(no_page)?;
+        // Valores embebidos de forma segura (JSON escapa comillas). Se quedan en la
+        // página; esta función solo devuelve los nombres de los campos rellenados.
+        let js = format!(
+            "({FILL_LOGIN_FN})({}, {})",
+            serde_json::to_string(username).unwrap_or_else(|_| "\"\"".into()),
+            serde_json::to_string(password).unwrap_or_else(|_| "\"\"".into()),
+        );
+        let filled = page
+            .evaluate(js)
+            .await
+            .ok()
+            .and_then(|r| r.into_value::<String>().ok())
+            .unwrap_or_else(|| "[]".into());
+        Ok(filled)
+    }
+
     async fn screenshot_b64(&self) -> Result<String> {
         use base64::Engine;
         let guard = cell().lock().await;
@@ -289,6 +313,31 @@ impl BrowserDriver for ChromiumoxideDriver {
 fn no_page() -> AionError {
     AionError::Internal("no hay ninguna página abierta; usa browser_open primero".into())
 }
+
+/// Función JS que localiza los campos de usuario y contraseña del login y los rellena,
+/// disparando los eventos input/change (para que el sitio detecte el valor). Devuelve
+/// SOLO los nombres de los campos rellenados (nunca los valores).
+const FILL_LOGIN_FN: &str = r#"(u, p) => {
+  const set = (el, val) => {
+    el.focus();
+    const proto = Object.getPrototypeOf(el);
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value') &&
+      Object.getOwnPropertyDescriptor(proto, 'value').set;
+    if (setter) setter.call(el, val); else el.value = val;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const vis = (el) => el && el.getBoundingClientRect().width > 0;
+  const done = [];
+  const pass = [...document.querySelectorAll('input[type=password]')].find(vis);
+  let user = [...document.querySelectorAll(
+    'input[autocomplete=username], input[type=email], input[name*=user i], input[name*=email i], input[id*=user i], input[id*=email i]'
+  )].find(vis);
+  if (!user) user = [...document.querySelectorAll('input[type=text], input:not([type])')].find(vis);
+  if (user && u) { set(user, u); done.push('usuario'); }
+  if (pass && p) { set(pass, p); done.push('contraseña'); }
+  return JSON.stringify(done);
+}"#;
 
 /// JS de **stealth** inyectado en cada documento nuevo: oculta las señales típicas de
 /// automatización (las mismas que parchea puppeteer-stealth). Hace que el navegador del

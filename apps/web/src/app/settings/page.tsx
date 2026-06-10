@@ -2,8 +2,18 @@
 
 import { useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
+import Icon from "@/components/Icon";
 import { LANGS, useT } from "@/lib/i18n";
-import { systemScan, status, type ModelOption, type SystemScan } from "@/lib/api";
+import {
+  credentialsList,
+  credentialRemove,
+  credentialSet,
+  systemScan,
+  status,
+  type CredMeta,
+  type ModelOption,
+  type SystemScan,
+} from "@/lib/api";
 
 export default function SettingsPage() {
   const { t, lang, setLang } = useT();
@@ -12,6 +22,30 @@ export default function SettingsPage() {
   const [scan, setScan] = useState<SystemScan | null>(null);
   const [catalog, setCatalog] = useState<ModelOption[]>([]);
   const [current, setCurrent] = useState<string>("");
+  const [creds, setCreds] = useState<CredMeta[]>([]);
+  const [cHost, setCHost] = useState("");
+  const [cUser, setCUser] = useState("");
+  const [cPass, setCPass] = useState("");
+  const [cBusy, setCBusy] = useState(false);
+
+  async function refreshCreds() {
+    try {
+      setCreds(await credentialsList());
+    } catch {
+      /* vacío */
+    }
+  }
+  async function addCred() {
+    if (!cHost.trim() || !cUser.trim() || !cPass || cBusy) return;
+    setCBusy(true);
+    try {
+      await credentialSet(cHost.trim(), cUser.trim(), cPass);
+      setCHost(""); setCUser(""); setCPass("");
+      await refreshCreds();
+    } finally {
+      setCBusy(false);
+    }
+  }
 
   useEffect(() => {
     setEmail(localStorage.getItem("aion_email"));
@@ -24,6 +58,7 @@ export default function SettingsPage() {
     status()
       .then((s) => setCurrent((s.engine || "").replace(/^ollama:/, "")))
       .catch(() => {});
+    refreshCreds();
   }, []);
 
   function toggleTheme() {
@@ -160,6 +195,38 @@ export default function SettingsPage() {
           </p>
           <p className="text-xs mt-2" style={{ color: "var(--text-3)" }}>
             <code>~/Library/Application Support/AION/policy.json</code>
+          </p>
+        </div>
+
+        {/* ── Credenciales (bóveda en el Llavero) ── */}
+        <div className="card">
+          <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
+            <Icon name="lock" size={16} /> {t("settings.credentials")}
+          </h2>
+          <p className="text-sm mb-3" style={{ color: "var(--text-3)" }}>
+            {t("settings.credentialsNote")}
+          </p>
+          <div className="flex flex-col gap-2 mb-3">
+            <input className="input" placeholder={t("settings.credHost")} value={cHost} onChange={(e) => setCHost(e.target.value)} />
+            <div className="flex gap-2">
+              <input className="input" placeholder={t("settings.credUser")} value={cUser} onChange={(e) => setCUser(e.target.value)} autoComplete="off" />
+              <input className="input" type="password" placeholder={t("settings.credPass")} value={cPass} onChange={(e) => setCPass(e.target.value)} autoComplete="new-password" />
+              <button className="btn shrink-0" disabled={cBusy} onClick={addCred}>{t("settings.credAdd")}</button>
+            </div>
+          </div>
+          {creds.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              {creds.map((c) => (
+                <div key={c.host} className="flex items-center gap-2 px-3 py-2 rounded-lg" style={{ background: "var(--surface-1)" }}>
+                  <Icon name="lock" size={14} />
+                  <span className="text-sm flex-1 truncate">{c.host} <span style={{ color: "var(--text-3)" }}>· {c.user}</span> <span style={{ color: "var(--text-3)" }}>· ••••••</span></span>
+                  <button onClick={() => credentialRemove(c.host).then(refreshCreds)} className="text-xs opacity-60 hover:opacity-100" style={{ color: "#ef4444" }} title="Eliminar">✕</button>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="text-xs mt-3" style={{ color: "var(--text-3)" }}>
+            🔒 {t("settings.credSecurity")}
           </p>
         </div>
       </div>

@@ -223,6 +223,31 @@ export async function visionAsk(prompt: string, imageB64: string): Promise<strin
   return data.answer as string;
 }
 
+// ── Bóveda de credenciales (Llavero; la contraseña nunca se devuelve) ────
+
+export type CredMeta = { host: string; user: string };
+
+export async function credentialsList(): Promise<CredMeta[]> {
+  const r = await jsonCall<{ credentials: CredMeta[] }>(`/api/credentials`);
+  return r.credentials;
+}
+
+export async function credentialSet(host: string, user: string, pass: string): Promise<void> {
+  await jsonCall(`/api/credentials`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ host, user, pass }),
+  });
+}
+
+export async function credentialRemove(host: string): Promise<void> {
+  await jsonCall(`/api/credentials/remove`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ host }),
+  });
+}
+
 // ── Memoria de largo plazo ──────────────────────────────────────────────
 
 export type MemoryStats = { count: number; path: string };
