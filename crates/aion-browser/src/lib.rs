@@ -46,24 +46,108 @@ impl WebClient {
     /// **Búsqueda web real** (DuckDuckGo HTML, sin API key). Devuelve resultados
     /// con título, URL y fragmento, para que el agente investigue en varias fuentes.
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        // 1) DuckDuckGo HTML (POST) — mejor cobertura general cuando no bloquea.
-        if let Ok(resp) = self
+        // MULTI-FUENTE: consulta varios motores EN PARALELO y FUSIONA (dedup por host),
+        // en vez de "uno u otro". Así nunca depende de una sola fuente y diversifica.
+        let q = query.trim();
+        let (ddg, ia, wiki) = tokio::join!(
+            self.search_ddg(q, limit),
+            self.search_ddg_instant(q, limit),
+            self.search_wikipedia(q, limit),
+        );
+
+        let mut out: Vec<SearchResult> = Vec::new();
+        let mut seen_host: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_url: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Intercala varias fuentes; Wikipedia rellena al final.
+        for r in ddg
+            .unwrap_or_default()
+            .into_iter()
+            .chain(ia.unwrap_or_default())
+            .chain(wiki.unwrap_or_default())
+        {
+            if !seen_url.insert(r.url.clone()) {
+                continue; // misma URL exacta ya incluida
+            }
+            let host = host_of(&r.url);
+            // Permite varias entradas pero limita duplicados del MISMO host (diversidad).
+            let dup = seen_host.contains(&host) && host != "es.wikipedia.org";
+            if dup {
+                continue;
+            }
+            seen_host.insert(host);
+            out.push(r);
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// DuckDuckGo HTML (POST). Devuelve vacío si bloquea (anomaly/captcha).
+    async fn search_ddg(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let resp = self
             .http
             .post("https://html.duckduckgo.com/html/")
             .header("Accept-Language", "es-ES,es;q=0.9,en;q=0.8")
-            .form(&[("q", query.trim()), ("kl", "wt-wt")])
+            .form(&[("q", query), ("kl", "wt-wt")])
             .send()
             .await
-        {
-            if let Ok(body) = resp.text().await {
-                let results = parse_ddg_results(&body, limit);
-                if !results.is_empty() {
-                    return Ok(results);
+            .map_err(|e| AionError::Internal(format!("ddg falló: {e}")))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| AionError::Internal(format!("ddg cuerpo inválido: {e}")))?;
+        Ok(parse_ddg_results(&body, limit))
+    }
+
+    /// DuckDuckGo Instant Answer (API JSON). Endpoint distinto, menos propenso a
+    /// bloqueo; da un resumen + temas relacionados que ENLAZAN a sitios reales
+    /// (no solo Wikipedia). Diversifica las fuentes.
+    async fn search_ddg_instant(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let url = format!(
+            "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
+            urlencode(query)
+        );
+        let json: serde_json::Value = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| AionError::Internal(format!("ddg-ia falló: {e}")))?
+            .json()
+            .await
+            .map_err(|e| AionError::Internal(format!("ddg-ia json inválido: {e}")))?;
+        let mut out = Vec::new();
+        // Respuesta directa (Abstract) si la hay.
+        let abstract_text = json["AbstractText"].as_str().unwrap_or("");
+        let abstract_url = json["AbstractURL"].as_str().unwrap_or("");
+        if !abstract_text.is_empty() && !abstract_url.is_empty() {
+            out.push(SearchResult {
+                title: json["Heading"].as_str().unwrap_or("Resumen").to_string(),
+                url: abstract_url.to_string(),
+                snippet: abstract_text.to_string(),
+            });
+        }
+        // Temas relacionados (enlazan a sitios reales).
+        if let Some(arr) = json["RelatedTopics"].as_array() {
+            for it in arr.iter() {
+                if out.len() >= limit {
+                    break;
                 }
+                let (Some(text), Some(u)) = (it["Text"].as_str(), it["FirstURL"].as_str()) else {
+                    continue;
+                };
+                if text.is_empty() || u.is_empty() {
+                    continue;
+                }
+                out.push(SearchResult {
+                    title: text.chars().take(80).collect(),
+                    url: u.to_string(),
+                    snippet: text.to_string(),
+                });
             }
         }
-        // 2) Fallback FIABLE (sin rate-limit ni captcha): API de Wikipedia.
-        self.search_wikipedia(query, limit).await
+        Ok(out)
     }
 
     /// Búsqueda vía API de Wikipedia (es). Fuente fiable de respaldo: devuelve
@@ -293,6 +377,16 @@ fn strip_html_tags(s: &str) -> String {
 }
 
 /// Codifica una cadena para usarla en una query string (percent-encoding).
+/// Extrae el host de una URL (para deduplicar por dominio). Best-effort, sin deps.
+fn host_of(url: &str) -> String {
+    let after = url.split("://").nth(1).unwrap_or(url);
+    after
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_lowercase()
+}
+
 fn urlencode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
