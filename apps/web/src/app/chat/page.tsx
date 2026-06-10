@@ -9,6 +9,8 @@ import {
   chatStream,
   inboxList,
   inboxRead,
+  libraryUpload,
+  visionAsk,
   status,
   type AgentEvent,
   type ChatEvent,
@@ -48,6 +50,9 @@ export default function ChatPage() {
   const [busy, setBusy] = useState(false);
   const [reachouts, setReachouts] = useState<InboxMessage[]>([]);
   const [modelReady, setModelReady] = useState(true);
+  // Adjunto de imagen pendiente (se envía con el siguiente mensaje, vía visión).
+  const [pendingImage, setPendingImage] = useState<{ name: string; b64: string } | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   // Estado del modelo: en el 1er arranque se descarga (~9 GB). Mostramos un aviso
@@ -97,10 +102,67 @@ export default function ChatPage() {
     };
   }, []);
 
+  // Lee un archivo como base64 (sin el prefijo data:).
+  function readAsBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
+      r.onerror = () => reject(new Error("no pude leer el archivo"));
+      r.readAsDataURL(file);
+    });
+  }
+
+  // Maneja un archivo elegido: imagen → visión; documento → biblioteca.
+  async function onPickFile(file: File) {
+    const b64 = await readAsBase64(file).catch(() => "");
+    if (!b64) return;
+    if (file.type.startsWith("image/")) {
+      // Queda pendiente; se analiza al pulsar Enviar (con tu pregunta opcional).
+      setPendingImage({ name: file.name, b64 });
+      return;
+    }
+    // Documento → ingestar en la biblioteca (dominio elegido o "documentos").
+    const domain = (window.prompt("¿En qué dominio guardo este documento?", "documentos") || "documentos").trim();
+    const turnIdx = turns.length;
+    setTurns((t) => [...t, { prompt: `📎 ${file.name}`, mode, thinking: "", steps: [], answer: "📚 Indexando en la biblioteca…" }]);
+    try {
+      const r = await libraryUpload(domain, file.name, b64);
+      setTurns((prev) => prev.map((t, i) => (i === turnIdx
+        ? { ...t, answer: `✅ «${r.source}» indexado en «${domain}»: ${r.passages} pasajes. Ya puedo responder sobre su contenido.` }
+        : t)));
+    } catch (err) {
+      setTurns((prev) => prev.map((t, i) => (i === turnIdx
+        ? { ...t, answer: `⚠️ ${err instanceof Error ? err.message : "no pude ingerir el documento"}` }
+        : t)));
+    }
+  }
+
   async function send(e: React.FormEvent) {
     e.preventDefault();
     const prompt = input.trim();
-    if (!prompt || busy) return;
+    if (busy) return;
+
+    // Si hay una imagen adjunta, se analiza con visión (la pregunta es opcional).
+    if (pendingImage) {
+      const img = pendingImage;
+      setPendingImage(null);
+      setInput("");
+      setBusy(true);
+      const idx = turns.length;
+      setTurns((t) => [...t, { prompt: prompt || `🖼️ ${img.name}`, mode, thinking: "", steps: [], answer: "" }]);
+      try {
+        const answer = await visionAsk(prompt, img.b64);
+        setTurns((prev) => prev.map((t, i) => (i === idx ? { ...t, answer } : t)));
+      } catch (err) {
+        setTurns((prev) => prev.map((t, i) => (i === idx ? { ...t, answer: `⚠️ ${err instanceof Error ? err.message : "error de visión"}` } : t)));
+      } finally {
+        setBusy(false);
+        endRef.current?.scrollIntoView({ behavior: "smooth" });
+      }
+      return;
+    }
+
+    if (!prompt) return;
     if (!modelReady) {
       setTurns((t) => [
         ...t,
@@ -267,7 +329,38 @@ export default function ChatPage() {
         <div ref={endRef} />
       </div>
 
+      {pendingImage && (
+        <div className="flex items-center gap-2 -mb-1">
+          <span className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full"
+            style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}>
+            <Icon name="image" size={14} /> {pendingImage.name}
+            <button type="button" onClick={() => setPendingImage(null)} className="ml-1 opacity-70 hover:opacity-100">✕</button>
+          </span>
+          <span className="text-xs" style={{ color: "var(--text-3)" }}>se analizará al enviar (pregunta opcional)</span>
+        </div>
+      )}
       <form onSubmit={send} className="py-4 flex gap-2 items-center border-t" style={{ borderColor: "var(--border)" }}>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".pdf,.txt,.md,.markdown,image/*"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) onPickFile(f);
+            e.target.value = "";
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => fileRef.current?.click()}
+          className="shrink-0 rounded-full p-2 transition-colors"
+          style={{ color: "var(--text-3)", background: "var(--surface-2)" }}
+          title="Adjuntar documento o foto"
+          aria-label="Adjuntar documento o foto"
+        >
+          <Icon name="paperclip" size={18} />
+        </button>
         {mode === "chat" && (
           <button
             type="button"

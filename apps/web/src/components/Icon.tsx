@@ -6,7 +6,8 @@ type IconName =
   | "mic" | "clock" | "plus" | "user" | "logout" | "sparkle" | "globe" | "code"
   | "calculator" | "eye" | "hand" | "mail" | "calendar" | "leaf" | "bulb"
   | "help" | "warn" | "moon" | "refresh" | "target" | "bot" | "check" | "lock"
-  | "download" | "upload" | "brain" | "wave" | "graph" | "cpu" | "shield";
+  | "download" | "upload" | "brain" | "wave" | "graph" | "cpu" | "shield"
+  | "paperclip" | "image" | "file";
 
 const PATHS: Record<IconName, React.ReactNode> = {
   chat: <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />,
@@ -46,6 +47,9 @@ const PATHS: Record<IconName, React.ReactNode> = {
   wave: <path d="M2 12h3l2-6 4 14 3-9 2 4h6" />,
   cpu: <><rect x="6" y="6" width="12" height="12" rx="2" /><rect x="9.5" y="9.5" width="5" height="5" rx="1" /><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3" /></>,
   shield: <path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6Z" />,
+  paperclip: <path d="M21 9.5 12.5 18a4.5 4.5 0 0 1-6.4-6.4l8-8a3 3 0 0 1 4.3 4.3l-8 8a1.5 1.5 0 0 1-2.2-2.1l7.3-7.3" />,
+  image: <><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="8.5" cy="9" r="1.5" /><path d="m5 18 5-5 4 4 2-2 3 3" /></>,
+  file: <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5" />,
 };
 
 export default function Icon({

@@ -115,7 +115,9 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/inbox/read", post(inbox_read))
         .route("/api/library", get(library_list))
         .route("/api/library/ingest", post(library_ingest))
+        .route("/api/library/upload", post(library_upload))
         .route("/api/library/ask", post(library_ask))
+        .route("/api/vision", post(vision))
         .layer(cors)
         .layer(
             TraceLayer::new_for_http()
@@ -928,6 +930,71 @@ async fn library_ingest(Json(body): Json<IngestBody>) -> Json<serde_json::Value>
     match lib.ingest_file(&body.domain, &p).await {
         Ok(n) => Json(serde_json::json!({ "ok": true, "passages": n, "total_chunks": lib.total_chunks() })),
         Err(e) => Json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct UploadBody {
+    domain: String,
+    filename: String,
+    /// Contenido del archivo en base64 (lo manda la UI tras leerlo con FileReader).
+    content_b64: String,
+}
+
+/// Sube un documento desde la UI (sin necesidad de ruta): decodifica, lo guarda en
+/// un temporal con su nombre (para conservar la extensión) y lo ingiere.
+async fn library_upload(Json(body): Json<UploadBody>) -> Json<serde_json::Value> {
+    use base64::Engine;
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(body.content_b64.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => return Json(serde_json::json!({ "error": format!("base64 inválido: {e}") })),
+    };
+    // Nombre seguro (sin separadores de ruta) en el directorio temporal.
+    let safe = body.filename.replace(['/', '\\'], "_");
+    let tmp = std::env::temp_dir().join(format!("aion_upload_{safe}"));
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        return Json(serde_json::json!({ "error": format!("no pude guardar el archivo: {e}") }));
+    }
+    let mut lib = crate::library::Library::open(crate::knowledge_path());
+    let result = lib.ingest_file(&body.domain, &tmp).await;
+    let _ = std::fs::remove_file(&tmp);
+    match result {
+        Ok(n) => Json(serde_json::json!({
+            "ok": true, "passages": n, "source": safe, "total_chunks": lib.total_chunks()
+        })),
+        Err(e) => Json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct VisionBody {
+    #[serde(default)]
+    prompt: String,
+    /// Imagen en base64 (sin el prefijo data:).
+    image_b64: String,
+}
+
+/// Visión: describe/analiza una imagen adjunta. Usa el modelo BASE con proyector de
+/// visión (`huihui_ai/gemma-4-abliterated:12b`), no `gemma4-reason` (que no tiene
+/// visión). Configurable con AION_VISION_MODEL. Solo local.
+async fn vision(Json(body): Json<VisionBody>) -> Json<serde_json::Value> {
+    let provider = crate::provider::load();
+    if provider.kind == "external" {
+        return Json(serde_json::json!({
+            "error": "la visión de imágenes requiere el modelo local (gemma)"
+        }));
+    }
+    let prompt = if body.prompt.trim().is_empty() {
+        "Describe con detalle lo que ves en esta imagen."
+    } else {
+        body.prompt.trim()
+    };
+    let vision_model = std::env::var("AION_VISION_MODEL")
+        .unwrap_or_else(|_| "huihui_ai/gemma-4-abliterated:12b".into());
+    let engine = OllamaEngine::new(OllamaEngine::base_url_from_env(), &vision_model);
+    match engine.generate_with_image(prompt, &body.image_b64).await {
+        Ok(m) => Json(serde_json::json!({ "answer": m.content })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
 }
 

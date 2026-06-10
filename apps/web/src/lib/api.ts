@@ -118,6 +118,36 @@ export async function crewStream(
   await readSse(res, onEvent);
 }
 
+// ── Adjuntos: documentos (biblioteca) y fotos (visión) ──────────────────
+
+/** Sube un documento (.pdf/.txt/.md) a la biblioteca, bajo un dominio. */
+export async function libraryUpload(
+  domain: string,
+  filename: string,
+  contentB64: string,
+): Promise<{ ok: boolean; passages: number; source: string; total_chunks: number }> {
+  const res = await fetch(`${BRIDGE_URL}/api/library/upload`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ domain, filename, content_b64: contentB64 }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data;
+}
+
+/** Analiza una imagen adjunta con visión (gemma multimodal, local). */
+export async function visionAsk(prompt: string, imageB64: string): Promise<string> {
+  const res = await fetch(`${BRIDGE_URL}/api/vision`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt, image_b64: imageB64 }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data.answer as string;
+}
+
 // ── Memoria de largo plazo ──────────────────────────────────────────────
 
 export type MemoryStats = { count: number; path: string };
