@@ -89,13 +89,23 @@ export async function chatStream(
   prompt: string,
   think: boolean,
   onEvent: (e: ChatEvent) => void,
+  convoId?: string,
 ): Promise<void> {
   const res = await fetch(`${BRIDGE_URL}/api/chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt, think, lang: lang() }),
+    body: JSON.stringify({ prompt, think, lang: lang(), convo_id: convoId ?? "default" }),
   });
   await readSse(res, onEvent);
+}
+
+/** Reinicia el hilo de una conversación en el backend (nuevo chat). */
+export async function chatReset(convoId: string): Promise<void> {
+  await fetch(`${BRIDGE_URL}/api/chat/new`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ convo_id: convoId }),
+  }).catch(() => {});
 }
 
 /** Agente ReAct con herramientas: emite pasos (thought/action/observation) + answer. */

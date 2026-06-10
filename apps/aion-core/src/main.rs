@@ -616,7 +616,11 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
             if let Ok(ibx) = inbox::Inbox::open(inbox_path()) {
                 let _ = ibx.push(kind, &message);
             }
-            notify_user("AION 🌱 quiere contarte algo", &message);
+            // El popup de escritorio tiene COOLDOWN (por defecto 6 h): la Bandeja
+            // sigue acumulando todo, pero no te bombardea con notificaciones.
+            if notify_cooldown_elapsed() {
+                notify_user("AION 🌱 quiere contarte algo", &message);
+            }
         }
 
         // 🔁 REALIMENTAR curiosidad + auto-modelo.
@@ -1697,6 +1701,31 @@ No uses saludos genéricos ni preámbulos. Solo el mensaje."
 
 /// Envía una notificación de escritorio con sonido — AION "quiere hablarte".
 /// Se desactiva con AION_NOTIFY=0.
+/// ¿Ha pasado el cooldown para mostrar OTRA notificación proactiva de la Bandeja?
+/// Evita el bombardeo (una por ciclo). Guarda la marca de tiempo en app_data.
+/// Configurable con AION_NOTIFY_COOLDOWN_SECS (por defecto 21600 = 6 h).
+fn notify_cooldown_elapsed() -> bool {
+    let cooldown: u64 = std::env::var("AION_NOTIFY_COOLDOWN_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(21_600);
+    let path = app_data_dir().join("last_notify");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last: u64 = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    if now.saturating_sub(last) >= cooldown {
+        let _ = std::fs::write(&path, now.to_string());
+        true
+    } else {
+        false
+    }
+}
+
 fn notify_user(title: &str, message: &str) {
     if std::env::var("AION_NOTIFY").as_deref() == Ok("0") {
         return;

@@ -8,6 +8,7 @@ import {
   agentStream,
   crewStream,
   chatStream,
+  chatReset,
   inboxList,
   inboxRead,
   libraryUpload,
@@ -36,6 +37,31 @@ type Turn = {
   answer: string;
   meta?: string;
 };
+type ConvoMeta = { id: string; title: string; updatedAt: number };
+
+// ── Persistencia de conversaciones (cliente) ──
+const LS_LIST = "aion_convos";
+const turnsKey = (id: string) => `aion_convo_${id}`;
+function loadList(): ConvoMeta[] {
+  try {
+    return JSON.parse(localStorage.getItem(LS_LIST) ?? "[]");
+  } catch {
+    return [];
+  }
+}
+function saveList(list: ConvoMeta[]) {
+  localStorage.setItem(LS_LIST, JSON.stringify(list));
+}
+function loadTurns(id: string): Turn[] {
+  try {
+    return JSON.parse(localStorage.getItem(turnsKey(id)) ?? "[]");
+  } catch {
+    return [];
+  }
+}
+function newId(): string {
+  return `c_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
 
 const STEP_STYLE: Record<Step["kind"], { icon: React.ComponentProps<typeof Icon>["name"]; color: string }> = {
   thought: { icon: "sparkle", color: "var(--on-lavender)" },
@@ -52,10 +78,55 @@ export default function ChatPage() {
   const [busy, setBusy] = useState(false);
   const [reachouts, setReachouts] = useState<InboxMessage[]>([]);
   const [modelReady, setModelReady] = useState(true);
+  // Conversaciones persistentes: id actual + lista + dropdown de historial.
+  const [convoId, setConvoId] = useState<string>("");
+  const [convos, setConvos] = useState<ConvoMeta[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
   // Adjunto de imagen pendiente (se envía con el siguiente mensaje, vía visión).
   const [pendingImage, setPendingImage] = useState<{ name: string; b64: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+
+  // Al montar: restaura la última conversación (o crea una). Arregla la pérdida del
+  // chat al navegar entre menús.
+  useEffect(() => {
+    const list = loadList();
+    setConvos(list);
+    if (list.length > 0) {
+      setConvoId(list[0].id);
+      setTurns(loadTurns(list[0].id));
+    } else {
+      setConvoId(newId());
+    }
+  }, []);
+
+  // Persiste los turnos de la conversación actual + actualiza su título en la lista.
+  useEffect(() => {
+    if (!convoId) return;
+    localStorage.setItem(turnsKey(convoId), JSON.stringify(turns));
+    if (turns.length === 0) return;
+    setConvos((prev) => {
+      const title = turns[0].prompt.slice(0, 40) || "Nueva conversación";
+      const others = prev.filter((c) => c.id !== convoId);
+      const next = [{ id: convoId, title, updatedAt: Date.now() }, ...others];
+      saveList(next);
+      return next;
+    });
+  }, [turns, convoId]);
+
+  function newChat() {
+    const id = newId();
+    setConvoId(id);
+    setTurns([]);
+    setShowHistory(false);
+    chatReset(id);
+  }
+
+  function openConvo(id: string) {
+    setConvoId(id);
+    setTurns(loadTurns(id));
+    setShowHistory(false);
+  }
 
   // Estado del modelo: en el 1er arranque se descarga (~9 GB). Mostramos un aviso
   // claro en vez de un error 404. Sondea hasta que esté listo.
@@ -191,13 +262,14 @@ export default function ChatPage() {
     try {
       if (mode === "chat") {
         await chatStream(prompt, think, (ev: ChatEvent) => {
+          /* eventos abajo */
           if (ev.kind === "thinking") update((t) => ({ ...t, thinking: t.thinking + ev.text }));
           else if (ev.kind === "answer") update((t) => ({ ...t, answer: t.answer + ev.text }));
           else if (ev.kind === "done")
             update((t) => ({ ...t, meta: `${ev.tokens} tokens · ${ev.tps.toFixed(1)} tok/s` }));
           else if (ev.kind === "error") update((t) => ({ ...t, answer: `⚠️ ${ev.text}` }));
           scroll();
-        });
+        }, convoId);
       } else {
         const stream = mode === "crew" ? crewStream : agentStream;
         await stream(prompt, (ev: AgentEvent) => {
@@ -223,6 +295,54 @@ export default function ChatPage() {
     <AppShell title={t("nav.chat")}>
       <div className="flex flex-col h-full max-w-4xl mx-auto w-full px-6">
       <div className="flex items-center gap-2 py-3 shrink-0">
+        {/* Nuevo chat */}
+        <button
+          onClick={newChat}
+          className="icon-chip"
+          style={{ background: "var(--surface-2)", color: "var(--text-2)" }}
+          title={t("chat.newChat")}
+          aria-label={t("chat.newChat")}
+        >
+          <Icon name="plus" size={16} />
+        </button>
+        {/* Historial de conversaciones */}
+        <div className="relative">
+          <button
+            onClick={() => { setConvos(loadList()); setShowHistory((s) => !s); }}
+            className="icon-chip"
+            style={{ background: "var(--surface-2)", color: "var(--text-2)" }}
+            title={t("chat.history")}
+            aria-label={t("chat.history")}
+          >
+            <Icon name="clock" size={16} />
+          </button>
+          {showHistory && (
+            <div
+              className="absolute left-0 mt-2 z-20 rounded-xl overflow-hidden"
+              style={{ width: 280, background: "var(--surface)", border: "1px solid var(--border)", boxShadow: "var(--shadow-elevated)" }}
+            >
+              <p className="px-3 py-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: "var(--text-3)" }}>
+                {t("chat.history")}
+              </p>
+              <div className="max-h-72 overflow-y-auto">
+                {convos.length === 0 && (
+                  <p className="px-3 py-3 text-sm" style={{ color: "var(--text-3)" }}>{t("chat.noHistory")}</p>
+                )}
+                {convos.map((c) => (
+                  <button
+                    key={c.id}
+                    onClick={() => openConvo(c.id)}
+                    className="w-full text-left px-3 py-2 flex items-center gap-2 text-sm hover:opacity-80"
+                    style={{ background: c.id === convoId ? "var(--accent-subtle)" : "transparent", color: "var(--text-2)" }}
+                  >
+                    <Icon name="clock" size={13} className="shrink-0" />
+                    <span className="truncate flex-1">{c.title || t("chat.untitled")}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
         <span className="text-xs" style={{ color: "var(--text-3)" }}>
           {busy ? "AION trabajando…" : "gemma4-reason · local"}
         </span>

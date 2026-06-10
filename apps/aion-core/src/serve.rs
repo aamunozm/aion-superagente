@@ -34,10 +34,23 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
+type Thread = Arc<std::sync::Mutex<Vec<Message>>>;
+
 #[derive(Clone)]
 struct AppState {
-    /// Hilo de conversación en curso (contexto infinito por compresión activa).
-    convo: Arc<std::sync::Mutex<Vec<Message>>>,
+    /// Hilos de conversación POR id (cada chat de la UI mantiene su propio contexto,
+    /// así puedes alternar entre conversaciones y continuarlas sin perder el contexto).
+    convos: Arc<std::sync::Mutex<std::collections::HashMap<String, Thread>>>,
+}
+
+impl AppState {
+    /// Devuelve (creando si hace falta) el hilo de una conversación por id.
+    fn thread(&self, id: &str) -> Thread {
+        let mut map = self.convos.lock().unwrap();
+        map.entry(id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(Vec::new())))
+            .clone()
+    }
 }
 
 /// Motor LLM activo, reconstruido por petición desde la config del proveedor
@@ -69,6 +82,9 @@ struct ChatBody {
     think: bool,
     #[serde(default)]
     lang: Option<String>,
+    /// Id de la conversación (cada chat de la UI tiene el suyo). Por defecto "default".
+    #[serde(default)]
+    convo_id: Option<String>,
 }
 
 /// Directiva de idioma de RESPUESTA según el ajuste del usuario (es/it/en).
@@ -83,7 +99,7 @@ fn lang_directive(lang: &Option<String>) -> String {
 /// Arranca el puente HTTP en la dirección indicada.
 pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
-        convo: Arc::new(std::sync::Mutex::new(Vec::new())),
+        convos: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // PRECARGA: deja el modelo local caliente en memoria para que el PRIMER mensaje
@@ -354,7 +370,7 @@ async fn chat(
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
     let engine = active_engine();
     let prompt = body.prompt.clone();
-    let convo = st.convo.clone();
+    let convo = st.thread(body.convo_id.as_deref().unwrap_or("default"));
     // Acumula la respuesta para guardarla en memoria al terminar.
     let answer_acc = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
 
@@ -842,9 +858,23 @@ async fn compress_if_needed(engine: &dyn LlmEngine, convo: &Arc<std::sync::Mutex
     }
 }
 
-/// Resetea el hilo de conversación (nuevo chat).
-async fn chat_reset(State(st): State<AppState>) -> Json<serde_json::Value> {
-    st.convo.lock().unwrap().clear();
+#[derive(Deserialize, Default)]
+struct ResetBody {
+    #[serde(default)]
+    convo_id: Option<String>,
+}
+
+/// Resetea el hilo de una conversación (nuevo chat). Si no se indica id, "default".
+async fn chat_reset(
+    State(st): State<AppState>,
+    body: Option<Json<ResetBody>>,
+) -> Json<serde_json::Value> {
+    let id = body
+        .and_then(|b| b.0.convo_id)
+        .unwrap_or_else(|| "default".into());
+    if let Some(t) = st.convos.lock().unwrap().get(&id) {
+        t.lock().unwrap().clear();
+    }
     Json(serde_json::json!({ "ok": true }))
 }
 

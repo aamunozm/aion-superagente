@@ -4,7 +4,7 @@ on:
   schedule:
     - cron: "0 6 * * 1"   # lunes 06:00 UTC
   push:
-    paths: ["Cargo.toml", "**/Cargo.toml"]
+    paths: ["Cargo.toml", "**/Cargo.toml", "Cargo.lock", "deny.toml", ".github/workflows/security-audit.yml"]
   workflow_dispatch:
 
 jobs:

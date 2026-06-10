@@ -3,17 +3,27 @@
 import { useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
 import { LANGS, useT } from "@/lib/i18n";
+import { systemScan, status, type ModelOption, type SystemScan } from "@/lib/api";
 
 export default function SettingsPage() {
   const { t, lang, setLang } = useT();
   const [email, setEmail] = useState<string | null>(null);
   const [dark, setDark] = useState(false);
+  const [scan, setScan] = useState<SystemScan | null>(null);
+  const [catalog, setCatalog] = useState<ModelOption[]>([]);
+  const [current, setCurrent] = useState<string>("");
 
   useEffect(() => {
     setEmail(localStorage.getItem("aion_email"));
     const d = localStorage.getItem("aion_theme") === "dark";
     setDark(d);
     document.documentElement.classList.toggle("dark", d);
+    systemScan()
+      .then((r) => { setScan(r.scan); setCatalog(r.catalog); })
+      .catch(() => {});
+    status()
+      .then((s) => setCurrent((s.engine || "").replace(/^ollama:/, "")))
+      .catch(() => {});
   }, []);
 
   function toggleTheme() {
@@ -72,6 +82,59 @@ export default function SettingsPage() {
               );
             })}
           </div>
+        </div>
+
+        {/* ── Modelos LLM locales ── */}
+        <div className="card">
+          <h2 className="t-section mb-1" style={{ color: "var(--text-2)" }}>
+            {t("settings.models")}
+          </h2>
+          {scan && (
+            <p className="text-xs mb-3" style={{ color: "var(--text-3)" }}>
+              {scan.cpu_cores} CPU · {scan.ram_gb} GB RAM · {scan.gpu} · {t("settings.tier")}:{" "}
+              <strong style={{ color: "var(--accent)" }}>{scan.tier}</strong>
+            </p>
+          )}
+          {current && (
+            <p className="text-sm mb-3" style={{ color: "var(--text-2)" }}>
+              {t("settings.current")}: <strong>{current}</strong>
+            </p>
+          )}
+          <div className="flex flex-col gap-2">
+            {catalog.map((m) => {
+              const fits = scan ? m.tier === scan.tier || m.size_gb <= scan.ram_gb * 0.6 : true;
+              const isCurrent = current.includes(m.ollama_name?.split(":")[0] ?? m.id);
+              return (
+                <div
+                  key={m.id}
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg"
+                  style={{ background: "var(--surface-1)", opacity: fits ? 1 : 0.55 }}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium truncate">
+                      {m.name}{" "}
+                      <span className="text-xs font-normal" style={{ color: "var(--text-3)" }}>
+                        · {m.size_gb} GB
+                      </span>
+                    </div>
+                    <div className="text-xs truncate" style={{ color: "var(--text-3)" }}>{m.note}</div>
+                  </div>
+                  {isCurrent ? (
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}>
+                      {t("settings.inUse")}
+                    </span>
+                  ) : (
+                    <span className="text-[10px] px-2 py-0.5 rounded-full" style={{ color: fits ? "var(--accent)" : "var(--text-3)", background: "var(--surface-2)" }}>
+                      {fits ? t("settings.fits") : t("settings.heavy")}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-xs mt-3" style={{ color: "var(--text-3)" }}>
+            {t("settings.modelsNote")}
+          </p>
         </div>
 
         <div className="card flex items-center justify-between">
