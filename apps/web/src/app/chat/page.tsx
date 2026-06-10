@@ -205,7 +205,7 @@ export default function ChatPage() {
               steps: [...t.steps, { kind: ev.kind, text: ev.text, agent: ev.agent }],
             }));
           else if (ev.kind === "answer")
-            update((t) => ({ ...t, answer: ev.text, meta: ev.steps ? `${ev.steps} pasos` : undefined }));
+            update((t) => ({ ...t, answer: ev.text, meta: ev.steps ? `${ev.steps} ${ev.steps === 1 ? "paso" : "pasos"}` : undefined }));
           else if (ev.kind === "error") update((t) => ({ ...t, answer: `⚠️ ${ev.text}` }));
           scroll();
         });
@@ -241,7 +241,7 @@ export default function ChatPage() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto py-6 flex flex-col gap-6">
+      <div className="flex-1 overflow-y-auto py-5 flex flex-col gap-5">
         {!modelReady && (
           <div
             className="card text-sm"
@@ -260,8 +260,8 @@ export default function ChatPage() {
             {reachouts.map((m) => (
               <div
                 key={m.id}
-                className="card max-w-[90%] self-start"
-                style={{ borderColor: "var(--accent)", borderWidth: 1 }}
+                className="msg max-w-[85%] self-start"
+                style={{ borderColor: "var(--accent)" }}
               >
                 <p className="text-xs mb-1" style={{ color: "var(--accent)" }}>
                   <span className="inline-flex items-center gap-1"><Icon name={INBOX_ICON[m.kind] ?? "sparkle"} size={12} /> {m.kind}</span> ·{" "}
@@ -283,9 +283,7 @@ export default function ChatPage() {
         )}
         {turns.map((t, i) => (
           <div key={i} className="flex flex-col gap-2">
-            <div className="self-end card max-w-[80%]" style={{ background: "var(--surface-2)" }}>
-              {t.prompt}
-            </div>
+            <div className="self-end msg-user max-w-[75%]">{t.prompt}</div>
 
             {t.mode === "chat" && t.thinking && (
               <details className="text-sm" style={{ color: "var(--text-3)" }}>
@@ -315,10 +313,10 @@ export default function ChatPage() {
               ))}
 
             {t.answer && (
-              <div className="card max-w-[90%]">
+              <div className="msg max-w-[85%] self-start">
                 <p className="whitespace-pre-wrap">{t.answer}</p>
                 {t.meta && (
-                  <p className="text-xs mt-2" style={{ color: "var(--text-3)" }}>
+                  <p className="text-[11px] mt-1.5" style={{ color: "var(--text-3)" }}>
                     {t.meta}
                   </p>
                 )}
