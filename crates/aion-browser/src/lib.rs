@@ -99,6 +99,57 @@ impl WebClient {
         Ok(out)
     }
 
+    /// **Búsqueda de LUGARES/NEGOCIOS por dirección** vía OpenStreetMap (Nominatim,
+    /// sin API key). Ideal para "¿qué negocio hay en tal dirección?", coordenadas,
+    /// tipo de local (restaurante, tienda…). Más fiable que la búsqueda web general
+    /// para direcciones. Devuelve nombre, categoría y dirección completa.
+    pub async fn search_place(&self, query: &str, limit: usize) -> Result<Vec<PlaceResult>> {
+        let q = urlencode(query.trim());
+        let url = format!(
+            "https://nominatim.openstreetmap.org/search?q={q}&format=jsonv2\
+             &addressdetails=1&extratags=1&namedetails=1&limit={limit}"
+        );
+        let json: serde_json::Value = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| AionError::Internal(format!("búsqueda de lugar falló: {e}")))?
+            .json()
+            .await
+            .map_err(|e| AionError::Internal(format!("json de lugar inválido: {e}")))?;
+        let mut out = Vec::new();
+        if let Some(arr) = json.as_array() {
+            for it in arr.iter().take(limit) {
+                let name = it["name"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| it["namedetails"]["name"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                // Categoría legible: tipo concreto (restaurant, supermarket…) +
+                // clase (amenity/shop/office) o las extratags relevantes.
+                let et = &it["extratags"];
+                let kind = it["type"]
+                    .as_str()
+                    .filter(|s| !s.is_empty() && *s != "yes")
+                    .or_else(|| et["shop"].as_str())
+                    .or_else(|| et["amenity"].as_str())
+                    .or_else(|| et["office"].as_str())
+                    .or_else(|| it["category"].as_str())
+                    .unwrap_or("lugar")
+                    .to_string();
+                let address = it["display_name"].as_str().unwrap_or("").to_string();
+                out.push(PlaceResult {
+                    name,
+                    kind,
+                    address,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// Descarga una URL y devuelve su texto legible (HTML→texto), truncado.
     pub async fn fetch_text(&self, url: &str) -> Result<String> {
         let url = url.trim();
@@ -172,6 +223,14 @@ pub struct SearchResult {
     pub title: String,
     pub url: String,
     pub snippet: String,
+}
+
+/// Un lugar/negocio encontrado por dirección (OpenStreetMap).
+#[derive(Debug, Clone)]
+pub struct PlaceResult {
+    pub name: String,
+    pub kind: String,
+    pub address: String,
 }
 
 /// Parsea los resultados del HTML de DuckDuckGo (clases result__a / result__snippet).

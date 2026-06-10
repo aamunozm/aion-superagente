@@ -516,6 +516,9 @@ async fn agent(
         // 🌐 Investigación real: buscar en internet + leer páginas (navegador propio).
         let web = Arc::new(WebClient::new());
         tools.register(Arc::new(crate::agent_tools::SearchTool::new(web.clone())));
+        tools.register(Arc::new(crate::agent_tools::PlaceLookupTool::new(
+            web.clone(),
+        )));
         tools.register(Arc::new(WebTool::new(web)));
         // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
@@ -618,6 +621,9 @@ async fn crew(
         }
         let web = Arc::new(WebClient::new());
         tools.register(Arc::new(crate::agent_tools::SearchTool::new(web.clone())));
+        tools.register(Arc::new(crate::agent_tools::PlaceLookupTool::new(
+            web.clone(),
+        )));
         tools.register(Arc::new(WebTool::new(web)));
         // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));

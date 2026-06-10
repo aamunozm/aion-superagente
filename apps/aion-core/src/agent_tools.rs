@@ -411,6 +411,56 @@ impl Tool for LibrarySearchTool {
     }
 }
 
+// ── Lugares/negocios por dirección: OpenStreetMap (Nominatim) ───────────────
+
+/// Encuentra QUÉ negocio/lugar hay en una dirección (o busca lugares por nombre),
+/// vía OpenStreetMap. Fiable para direcciones, a diferencia de la búsqueda web
+/// general. Devuelve nombre, categoría (restaurante, tienda…) y dirección completa.
+pub struct PlaceLookupTool {
+    web: Arc<WebClient>,
+}
+
+impl PlaceLookupTool {
+    pub fn new(web: Arc<WebClient>) -> Self {
+        Self { web }
+    }
+}
+
+#[async_trait]
+impl Tool for PlaceLookupTool {
+    fn name(&self) -> &str {
+        "place_lookup"
+    }
+    fn description(&self) -> &str {
+        "Averigua qué negocio/lugar hay en una DIRECCIÓN (o busca lugares por nombre) \
+         usando mapas (OpenStreetMap). Úsala para «qué negocio está en tal calle», \
+         «dónde queda X», tipo de local. Entrada: la dirección o el lugar. Más fiable \
+         que web_search para direcciones."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let places = self
+            .web
+            .search_place(input.trim(), 5)
+            .await
+            .map_err(|e| e.to_string())?;
+        if places.is_empty() {
+            return Ok("(no encontré ningún lugar/negocio en esa dirección en el mapa)".into());
+        }
+        Ok(places
+            .iter()
+            .map(|p| {
+                let name = if p.name.is_empty() {
+                    "(sin nombre registrado)"
+                } else {
+                    &p.name
+                };
+                format!("• {name} — {} · {}", p.kind, p.address)
+            })
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+}
+
 // ── 0) Buscar en la web: investigación real (multi-fuente) ──────────────────
 
 /// Buscador web real (DuckDuckGo con respaldo en Wikipedia). Devuelve títulos,

@@ -99,8 +99,11 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
              skills para esto.\n\
              • RED LOCAL (cuántos equipos hay conectados, qué dispositivos, sus IPs): usa \
              SIEMPRE net_scan. NUNCA uses web_search para esto ni inventes IPs.\n\
+             • DIRECCIONES/NEGOCIOS/LUGARES (qué negocio hay en una calle, dónde queda \
+             algo, tipo de local): usa SIEMPRE place_lookup (mapas), NUNCA web_search \
+             para direcciones.\n\
              • web_search/web_fetch: solo para información de INTERNET, no para archivos \
-             locales ni para la red local.\n\
+             locales, ni la red local, ni direcciones (para eso, place_lookup).\n\
              • memory_search: SOLO para datos concretos que pudieras haber guardado; nunca para \
              saber quién eres ni para contar archivos.\n\
              • Aritmética: usa la calculadora.\n\
