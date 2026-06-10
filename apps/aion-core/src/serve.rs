@@ -159,6 +159,8 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/status", get(status))
         .route("/api/system/scan", get(system_scan))
         .route("/api/models/pull", post(models_pull))
+        .route("/api/models/installed", get(models_installed))
+        .route("/api/models/remove", post(models_remove))
         .route("/api/provider", get(provider_get).post(provider_set))
         .route("/api/governance/setup", post(governance_setup))
         .route("/api/chat", post(chat))
@@ -261,6 +263,56 @@ struct PullBody {
 }
 
 /// Descarga un modelo local por streaming, emitiendo el PROGRESO (barra) por SSE.
+/// Lista los modelos LOCALES ya instalados en Ollama (nombre + tamaño GB).
+async fn models_installed() -> Json<serde_json::Value> {
+    let base = std::env::var("AION_OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".into());
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    if let Ok(resp) = reqwest::Client::new()
+        .get(format!("{base}/api/tags"))
+        .send()
+        .await
+    {
+        if let Ok(v) = resp.json::<serde_json::Value>().await {
+            if let Some(arr) = v["models"].as_array() {
+                for m in arr {
+                    let name = m["name"].as_str().unwrap_or("").to_string();
+                    let gb = m["size"].as_f64().unwrap_or(0.0) / 1e9;
+                    out.push(
+                        serde_json::json!({ "name": name, "size_gb": (gb * 10.0).round() / 10.0 }),
+                    );
+                }
+            }
+        }
+    }
+    Json(serde_json::json!({ "installed": out }))
+}
+
+#[derive(Deserialize)]
+struct ModelRemoveBody {
+    model: String,
+}
+
+/// Elimina un modelo local de Ollama (libera disco). No permite borrar el modelo en uso.
+async fn models_remove(Json(b): Json<ModelRemoveBody>) -> Json<serde_json::Value> {
+    let current = crate::provider::load().model;
+    if b.model == current || b.model.starts_with(&format!("{current}:")) {
+        return Json(
+            serde_json::json!({ "error": "no puedes eliminar el modelo en uso; cambia a otro primero" }),
+        );
+    }
+    let base = std::env::var("AION_OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".into());
+    let resp = reqwest::Client::new()
+        .delete(format!("{base}/api/delete"))
+        .json(&serde_json::json!({ "model": b.model }))
+        .send()
+        .await;
+    match resp {
+        Ok(r) if r.status().is_success() => Json(serde_json::json!({ "ok": true })),
+        Ok(r) => Json(serde_json::json!({ "error": format!("Ollama devolvió {}", r.status()) })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
 async fn models_pull(
     Json(body): Json<PullBody>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {

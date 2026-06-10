@@ -348,6 +348,23 @@ export const governanceSetup = (posture: string) =>
   });
 
 /// Descarga un modelo local con progreso (SSE).
+export type InstalledModel = { name: string; size_gb: number };
+
+/** Modelos locales ya instalados en Ollama. */
+export async function modelsInstalled(): Promise<InstalledModel[]> {
+  const r = await jsonCall<{ installed: InstalledModel[] }>(`/api/models/installed`);
+  return r.installed;
+}
+
+/** Elimina un modelo local (no permite borrar el que está en uso). */
+export async function modelsRemove(model: string): Promise<void> {
+  await jsonCall(`/api/models/remove`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+}
+
 export async function modelsPull(
   model: string,
   onEvent: (e: { kind: string; status?: string; percent?: number; text?: string }) => void,
