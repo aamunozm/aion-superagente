@@ -9,6 +9,7 @@ mod agent_tools;
 mod empathy;
 mod evals;
 mod inbox;
+mod library;
 mod memory_tool;
 mod onboarding;
 mod prompt_store;
@@ -103,6 +104,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("eval") => {
             let k: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5);
             evals::run(k).await?;
+        }
+        Some("ingest") => {
+            // aion-core ingest <dominio> <ruta-archivo>
+            let domain = args.get(1).cloned().unwrap_or_else(|| "general".into());
+            let file = args.get(2).cloned().unwrap_or_default();
+            run_ingest(&domain, &file).await?;
+        }
+        Some("ask") => {
+            // aion-core ask <consulta...>   (busca en TODA la biblioteca)
+            let query = args[1..].join(" ");
+            run_ask(&query).await?;
         }
         Some("models-ensure") => {
             run_models_ensure();
@@ -1498,6 +1510,76 @@ fn run_history() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Directorio de datos estable de AION (~/Library/Application Support/AION),
 /// independiente del directorio de trabajo. Se crea si no existe.
+/// Ingesta un documento en la biblioteca de conocimiento (Academias).
+async fn run_ingest(domain: &str, file: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if file.is_empty() {
+        return Err("uso: aion-core ingest <dominio> <ruta-archivo>".into());
+    }
+    let path = std::path::PathBuf::from(shellexpand_home(file));
+    let mut lib = library::Library::open(knowledge_path());
+    println!("📚 Ingiriendo «{}» en el dominio «{domain}»…", path.display());
+    let n = lib.ingest_file(domain, &path).await.map_err(|e| e.to_string())?;
+    println!("✅ Indexados {n} pasajes (BGE-M3, multilingüe).");
+    println!("\nBiblioteca actual:");
+    for (d, s, c) in lib.documents() {
+        println!("  · [{d}] {s} — {c} pasajes");
+    }
+    Ok(())
+}
+
+/// Pregunta a la biblioteca: recupera pasajes relevantes (multilingüe) y responde
+/// FUNDAMENTANDO en ellos, con citas a la fuente.
+async fn run_ask(query: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if query.trim().is_empty() {
+        return Err("uso: aion-core ask <consulta>".into());
+    }
+    let lib = library::Library::open(knowledge_path());
+    if lib.total_chunks() == 0 {
+        return Err("la biblioteca está vacía: usa `aion-core ingest <dominio> <archivo>` primero".into());
+    }
+    let hits = lib.search(query, 5, None).await.map_err(|e| e.to_string())?;
+    println!("\n🔎 Pasajes recuperados:");
+    let mut grounding = String::new();
+    for (i, p) in hits.iter().enumerate() {
+        println!("  [{}] {} (frag. {}) · score {:.2}", i + 1, p.source, p.idx, p.score);
+        grounding.push_str(&format!(
+            "[{}] (fuente: {}, fragmento {})\n{}\n\n",
+            i + 1,
+            p.source,
+            p.idx,
+            p.content
+        ));
+    }
+
+    let engine = OllamaEngine::default_local();
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(
+                "Responde la pregunta del usuario USANDO SOLO los pasajes proporcionados. \
+                 Cita la fuente entre corchetes [n] donde uses cada dato. Si los pasajes no \
+                 contienen la respuesta, dilo con franqueza; no inventes. Responde en español.",
+            ),
+            Message::user(format!("Pasajes:\n{grounding}\nPregunta: {query}\n\nRespuesta:")),
+        ],
+        think: false,
+        temperature: Some(0.3),
+        max_tokens: Some(600),
+    };
+    println!("\n💬 Respuesta fundamentada:\n");
+    stream_to_stdout(&engine, req).await?;
+    Ok(())
+}
+
+/// Expande `~/` al HOME del usuario.
+fn shellexpand_home(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
+    }
+    p.to_string()
+}
+
 pub(crate) fn app_data_dir() -> std::path::PathBuf {
     let base = if cfg!(windows) {
         // Windows: %APPDATA%\AION
@@ -1527,6 +1609,13 @@ fn memory_path() -> String {
             .to_string_lossy()
             .into_owned()
     })
+}
+
+/// Ruta de la biblioteca de conocimiento (Academias). Separada de la memoria personal.
+pub(crate) fn knowledge_path() -> std::path::PathBuf {
+    std::env::var("AION_KNOWLEDGE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| app_data_dir().join("knowledge.jsonl"))
 }
 
 /// Ruta de la Bandeja de AION (mensajes proactivos para el usuario).

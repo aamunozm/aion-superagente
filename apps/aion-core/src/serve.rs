@@ -113,6 +113,9 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/memory/import", post(memory_import))
         .route("/api/inbox", get(inbox_list))
         .route("/api/inbox/read", post(inbox_read))
+        .route("/api/library", get(library_list))
+        .route("/api/library/ingest", post(library_ingest))
+        .route("/api/library/ask", post(library_ask))
         .layer(cors)
         .layer(
             TraceLayer::new_for_http()
@@ -456,6 +459,7 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
+        tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
 
         let bus = EventBus::default();
 
@@ -554,6 +558,7 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
+        tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
 
         let bus = EventBus::default();
         // Reenvía la actividad de CADA agente con su rol (jerarquía visible).
@@ -894,6 +899,82 @@ async fn memory_remember(Json(body): Json<RememberBody>) -> Json<serde_json::Val
         Ok(id) => Json(serde_json::json!({ "ok": true, "id": id, "count": mem.len() })),
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
+}
+
+// ── Biblioteca (Academias): ingesta y consulta de documentos ────────────────
+
+/// Lista los documentos ingeridos: dominio · fuente · nº de pasajes.
+async fn library_list() -> Json<serde_json::Value> {
+    let lib = crate::library::Library::open(crate::knowledge_path());
+    let docs: Vec<serde_json::Value> = lib
+        .documents()
+        .into_iter()
+        .map(|(domain, source, chunks)| serde_json::json!({ "domain": domain, "source": source, "chunks": chunks }))
+        .collect();
+    Json(serde_json::json!({ "total_chunks": lib.total_chunks(), "documents": docs }))
+}
+
+#[derive(Deserialize)]
+struct IngestBody {
+    domain: String,
+    /// Ruta de archivo (.txt/.md/.pdf) en el equipo del usuario.
+    path: String,
+}
+
+/// Ingesta un archivo del equipo en la biblioteca, bajo un dominio.
+async fn library_ingest(Json(body): Json<IngestBody>) -> Json<serde_json::Value> {
+    let mut lib = crate::library::Library::open(crate::knowledge_path());
+    let p = std::path::PathBuf::from(&body.path);
+    match lib.ingest_file(&body.domain, &p).await {
+        Ok(n) => Json(serde_json::json!({ "ok": true, "passages": n, "total_chunks": lib.total_chunks() })),
+        Err(e) => Json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct AskBody {
+    query: String,
+    #[serde(default)]
+    domain: Option<String>,
+}
+
+/// Consulta la biblioteca: recupera pasajes (multilingüe) y responde citando fuentes.
+async fn library_ask(Json(body): Json<AskBody>) -> Json<serde_json::Value> {
+    let lib = crate::library::Library::open(crate::knowledge_path());
+    if lib.total_chunks() == 0 {
+        return Json(serde_json::json!({ "error": "la biblioteca está vacía" }));
+    }
+    let hits = match lib.search(&body.query, 5, body.domain.as_deref()).await {
+        Ok(h) => h,
+        Err(e) => return Json(serde_json::json!({ "error": e })),
+    };
+    let mut grounding = String::new();
+    let sources: Vec<serde_json::Value> = hits
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            grounding.push_str(&format!("[{}] (fuente: {}, frag {}) {}\n\n", i + 1, p.source, p.idx, p.content));
+            serde_json::json!({ "n": i + 1, "domain": p.domain, "source": p.source, "idx": p.idx, "score": p.score })
+        })
+        .collect();
+    let engine = active_engine();
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(
+                "Responde USANDO SOLO los pasajes. Cita la fuente con [n] donde uses cada \
+                 dato. Si no contienen la respuesta, dilo con franqueza; no inventes. Español.",
+            ),
+            Message::user(format!("Pasajes:\n{grounding}\nPregunta: {}\n\nRespuesta:", body.query)),
+        ],
+        think: false,
+        temperature: Some(0.3),
+        max_tokens: Some(600),
+    };
+    let answer = match engine.generate(req).await {
+        Ok(m) => m.content,
+        Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+    };
+    Json(serde_json::json!({ "answer": answer, "sources": sources }))
 }
 
 /// Ejecuta el ciclo de consolidación darwiniana ("sueño").

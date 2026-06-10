@@ -322,6 +322,61 @@ impl Tool for FileReadTool {
     }
 }
 
+// ── Biblioteca (Academias): consultar documentos/libros ingeridos ──────────
+
+/// Permite al agente CONSULTAR la biblioteca de conocimiento (libros, PDFs, notas
+/// ingeridas). Multilingüe: recupera pasajes relevantes aunque estén en otro idioma,
+/// con cita (dominio · fuente · fragmento). Así el agente fundamenta en TUS documentos.
+pub struct LibrarySearchTool;
+
+impl LibrarySearchTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for LibrarySearchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for LibrarySearchTool {
+    fn name(&self) -> &str {
+        "library_search"
+    }
+    fn description(&self) -> &str {
+        "Busca en TU biblioteca de documentos/libros ingeridos (Academias) y devuelve \
+         pasajes relevantes con su fuente, para fundamentar la respuesta. Entrada: la \
+         consulta (en cualquier idioma). Úsala cuando la pregunta sea sobre el contenido \
+         de libros, PDFs o notas que el usuario ha cargado."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let lib = crate::library::Library::open(crate::knowledge_path());
+        if lib.total_chunks() == 0 {
+            return Ok("la biblioteca está vacía (aún no se han ingerido documentos)".into());
+        }
+        let hits = lib.search(input.trim(), 5, None).await?;
+        if hits.is_empty() {
+            return Ok("(sin pasajes relevantes en la biblioteca)".into());
+        }
+        Ok(hits
+            .iter()
+            .map(|p| {
+                format!(
+                    "• [{} · {} · frag.{}] {}",
+                    p.domain,
+                    p.source,
+                    p.idx,
+                    p.content.chars().take(400).collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+}
+
 // ── 0) Buscar en la web: investigación real (multi-fuente) ──────────────────
 
 /// Buscador web real (DuckDuckGo con respaldo en Wikipedia). Devuelve títulos,
