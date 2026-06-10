@@ -126,6 +126,21 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
              pc_click «x y» / pc_type / pc_key para ACTUAR. Cada acción de control pide tu OK. \
              Para tareas en la WEB es mejor el navegador (browser_*); usa el control del PC \
              solo para apps de escritorio.\n\
+             • PREGUNTAR AL USUARIO: si te falta un dato que SOLO el usuario tiene (qué app o \
+             ventana, qué archivo, una preferencia, una aclaración), NO uses herramientas para \
+             adivinarlo. Pregúntaselo DIRECTAMENTE con 'Final Answer:' y una pregunta clara. Las \
+             herramientas de control (pc_type, pc_click, pc_key) y memory_search NO son un canal \
+             de chat: pc_* solo escriben/clican sobre apps; JAMÁS las uses para hacerle una \
+             pregunta al usuario ni para teclear lo que en realidad querías preguntarle. Para \
+             preguntar algo, SIEMPRE Final Answer.\n\
+             • PERMISOS DEL SISTEMA: si screen_see, screen_elements o pc_* fallan por falta de \
+             permiso (Grabación de pantalla o Accesibilidad), NO reintentes: díselo al usuario con \
+             'Final Answer:' explicando qué permiso falta y cómo activarlo (Ajustes del Sistema → \
+             Privacidad y seguridad → Grabación de pantalla / Accesibilidad → activar AION, y \
+             reabrir AION).\n\
+             • NO REPITAS lo que ya falló o se canceló: si una acción dio error o el usuario la \
+             rechazó, NO la ejecutes otra vez idéntica. Cambia de herramienta, reformula la \
+             entrada, o pregunta al usuario con 'Final Answer:'.\n\
              • NAVEGAR DE VERDAD (sitios con JavaScript, paneles, o INTERACTUAR: iniciar \
              sesión, rellenar formularios, pulsar botones): usa browser_open (abre la URL en \
              un navegador real y te da el texto + una lista NUMERADA de elementos \
@@ -167,6 +182,10 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
     /// Ejecuta el bucle ReAct sobre una tarea.
     pub async fn run(&self, task: &str) -> Result<AgentRun> {
         let mut scratchpad = String::new();
+        // Acciones (herramienta+entrada) que YA fallaron o se cancelaron: nunca se
+        // re-ejecutan idénticas. Mata el bucle de "reintentar lo mismo 5 veces".
+        let mut failed: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
         for step in 0..self.max_steps {
             let user = format!(
@@ -228,27 +247,43 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
                 action: format!("{action}({input})"),
             });
 
-            let observation = match self.tools.get(&action) {
-                Some(tool) => {
-                    // HUMAN-IN-THE-LOOP: si la acción es sensible (login, compra…), pide
-                    // el OK del usuario antes de ejecutarla. Si la rechaza, no se ejecuta.
-                    let approved = match (tool.needs_confirm(input.trim()), &self.confirm) {
-                        (None, _) => true,
-                        (Some(desc), Some(confirm)) => confirm(desc).await,
-                        // Necesita confirmación pero no hay forma de pedirla → DENEGAR
-                        // (fail-closed: nunca ejecutar una acción sensible sin tu OK).
-                        (Some(_), None) => false,
-                    };
-                    if !approved {
-                        "❌ acción cancelada por el usuario (no se ejecutó).".to_string()
-                    } else {
-                        match tool.run(input.trim()).await {
-                            Ok(out) => out,
-                            Err(e) => format!("error de herramienta: {e}"),
+            // Firma única de esta acción para detectar reintentos idénticos.
+            let sig = format!("{action}\u{1}{}", input.trim());
+            let observation = if let Some(prev) = failed.get(&sig) {
+                // Ya se intentó EXACTAMENTE esto y no resultó: no repetir, redirigir.
+                format!(
+                    "⚠️ Ya intentaste «{action}» con la misma entrada y no resultó ({prev}). \
+                     NO repitas lo mismo: usa OTRA herramienta, reformula la entrada, o si \
+                     necesitas un dato que solo el usuario tiene, pregúntale con 'Final Answer:'."
+                )
+            } else {
+                let obs = match self.tools.get(&action) {
+                    Some(tool) => {
+                        // HUMAN-IN-THE-LOOP: si la acción es sensible (login, compra…), pide
+                        // el OK del usuario antes de ejecutarla. Si la rechaza, no se ejecuta.
+                        let approved = match (tool.needs_confirm(input.trim()), &self.confirm) {
+                            (None, _) => true,
+                            (Some(desc), Some(confirm)) => confirm(desc).await,
+                            // Necesita confirmación pero no hay forma de pedirla → DENEGAR
+                            // (fail-closed: nunca ejecutar una acción sensible sin tu OK).
+                            (Some(_), None) => false,
+                        };
+                        if !approved {
+                            "❌ acción cancelada por el usuario (no se ejecutó).".to_string()
+                        } else {
+                            match tool.run(input.trim()).await {
+                                Ok(out) => out,
+                                Err(e) => format!("error de herramienta: {e}"),
+                            }
                         }
                     }
+                    None => format!("herramienta desconocida: '{action}'"),
+                };
+                // Si falló o se canceló, recuérdalo para no repetir esta acción idéntica.
+                if is_failure(&obs) {
+                    failed.insert(sig.clone(), first_line(&obs));
                 }
-                None => format!("herramienta desconocida: '{action}'"),
+                obs
             };
 
             self.bus.publish(AionEvent::ObservationReceived {
@@ -368,6 +403,29 @@ fn extract(text: &str, label: &str) -> Option<String> {
     }
 }
 
+/// ¿La observación indica que la acción falló, se denegó o se canceló? Se usa para
+/// recordar acciones fallidas y NO re-ejecutarlas idénticas.
+fn is_failure(obs: &str) -> bool {
+    let t = obs.trim_start();
+    t.starts_with("error de herramienta:")
+        || t.starts_with("❌")
+        || t.starts_with("herramienta desconocida:")
+        || t.starts_with("requiere confirmación")
+        || t.contains("falló")
+        || t.contains("denegado:")
+}
+
+/// Primera línea (recortada) de un error, para el aviso de "no repitas".
+fn first_line(s: &str) -> String {
+    s.lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(140)
+        .collect()
+}
+
 /// Corta cualquier "Observation:" que el modelo haya alucinado.
 fn cut_before_observation(text: &str) -> String {
     match text.find("Observation:") {
@@ -425,6 +483,22 @@ fn sanitize(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_detection_covers_errors_and_cancel() {
+        assert!(is_failure(
+            "error de herramienta: falta el permiso de Accesibilidad"
+        ));
+        assert!(is_failure(
+            "❌ acción cancelada por el usuario (no se ejecutó)."
+        ));
+        assert!(is_failure("falló: entrada: ..."));
+        assert!(is_failure("denegado: kill switch"));
+        // Una observación normal NO se marca como fallo.
+        assert!(!is_failure(
+            "Elementos interactivos de la ventana frontal (5)..."
+        ));
+    }
 
     #[test]
     fn extract_action_and_input() {

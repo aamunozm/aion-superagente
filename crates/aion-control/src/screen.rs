@@ -18,7 +18,9 @@ pub fn capture_png() -> Result<Vec<u8>, ControlError> {
             .map_err(|e| ControlError::Screen(format!("no se pudo ejecutar screencapture: {e}")))?;
         if !status.success() {
             return Err(ControlError::Screen(
-                "screencapture falló (¿falta permiso de Grabación de pantalla?)".into(),
+                "falta el permiso de Grabación de pantalla. Actívalo en Ajustes del Sistema → \
+                 Privacidad y seguridad → Grabación de pantalla → activar AION, y reabre AION."
+                    .into(),
             ));
         }
     }

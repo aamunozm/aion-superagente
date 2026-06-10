@@ -39,7 +39,8 @@ impl ControlIntent {
 pub(crate) fn execute(intent: &ControlIntent) -> Result<(), ControlError> {
     let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
         ControlError::Input(format!(
-            "no se pudo iniciar el control de entrada (¿falta permiso de Accesibilidad?): {e}"
+            "falta el permiso de Accesibilidad. Actívalo en Ajustes del Sistema → Privacidad y \
+             seguridad → Accesibilidad → activar AION, y reabre AION. ({e})"
         ))
     })?;
 
