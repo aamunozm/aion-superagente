@@ -51,11 +51,25 @@ pub fn scan() -> SystemScan {
         "GPU no detectada (se asume CPU)".to_string()
     };
 
-    // Nivel por RAM (lo que más limita un LLM local).
+    // Aceleración real: Apple Silicon usa Metal (rápido). El resto, salvo GPU dedicada
+    // que aquí no detectamos, corre en CPU → un modelo grande (12B) es MUY lento por
+    // mucha RAM que haya (en CPU ~5 tok/s = respuestas de minutos). Por eso el tier no
+    // depende solo de la RAM: sin aceleración se limita a un modelo intermedio.
+    let accelerated = os == "macos" && arch == "aarch64";
+
     let (tier, tier_reason) = if ram_gb < 8.5 {
         (
             "bajo",
             format!("{ram_gb:.0} GB de RAM: conviene un modelo ligero para que vaya fluido."),
+        )
+    } else if !accelerated {
+        // CPU sin GPU: aunque sobre RAM, evitamos el 12B (lento). Modelo intermedio.
+        (
+            "medio",
+            format!(
+                "{ram_gb:.0} GB de RAM pero sin GPU: en CPU un modelo grande va muy lento; \
+                 un modelo intermedio (7-8B) es lo más fluido."
+            ),
         )
     } else if ram_gb < 24.0 {
         (
@@ -65,7 +79,7 @@ pub fn scan() -> SystemScan {
     } else {
         (
             "superior",
-            format!("{ram_gb:.0} GB de RAM: puedes con un modelo grande de máxima calidad."),
+            format!("{ram_gb:.0} GB de RAM + GPU: puedes con un modelo grande de máxima calidad."),
         )
     };
 
