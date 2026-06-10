@@ -132,7 +132,8 @@ impl Policy {
                 .any(|a| action.verb.contains(a) || action.target.contains(a))
         {
             return Decision::Deny {
-                reason: "Acceso a datos sensibles no autorizado (llavero/banca/credenciales)".into(),
+                reason: "Acceso a datos sensibles no autorizado (llavero/banca/credenciales)"
+                    .into(),
             };
         }
 
@@ -230,7 +231,11 @@ mod tests {
 
     #[test]
     fn purchase_always_confirms_never_auto() {
-        for posture in [Posture::Conservative, Posture::Balanced, Posture::MaxAutonomy] {
+        for posture in [
+            Posture::Conservative,
+            Posture::Balanced,
+            Posture::MaxAutonomy,
+        ] {
             let p = Policy {
                 posture,
                 ..Policy::default()

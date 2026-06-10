@@ -265,7 +265,11 @@ impl ReActAgent<'_> {
                     answer.to_string()
                 } else if let Some(rest) = t.strip_prefix("CORREGIR:") {
                     let fixed = rest.trim();
-                    if fixed.is_empty() { answer.to_string() } else { fixed.to_string() }
+                    if fixed.is_empty() {
+                        answer.to_string()
+                    } else {
+                        fixed.to_string()
+                    }
                 } else {
                     // El juez devolvió texto sin el prefijo: úsalo solo si parece corrección.
                     answer.to_string()

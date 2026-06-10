@@ -29,8 +29,7 @@ async fn main() {
     tracing::info!(public_key = %issuer.public_key_hex(), "clave pública de licencias (embeber en el cliente)");
 
     // Almacén de usuarios PERSISTENTE (las cuentas sobreviven a reinicios).
-    let users_path =
-        std::env::var("AION_USERS").unwrap_or_else(|_| app_data_file("users.jsonl"));
+    let users_path = std::env::var("AION_USERS").unwrap_or_else(|_| app_data_file("users.jsonl"));
     let store = FileStore::open(&users_path);
     tracing::info!(%users_path, usuarios = store.len(), "store de usuarios cargado");
 

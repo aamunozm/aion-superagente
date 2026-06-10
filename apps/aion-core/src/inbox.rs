@@ -100,8 +100,12 @@ mod tests {
     fn push_unread_and_mark_read() {
         let path = std::env::temp_dir().join(format!("aion-inbox-{}.jsonl", uuid::Uuid::new_v4()));
         let inbox = Inbox::open(&path).unwrap();
-        inbox.push("insight", "Aprendí algo sobre tu agenda").unwrap();
-        inbox.push("pregunta", "¿Quieres que organice tus documentos?").unwrap();
+        inbox
+            .push("insight", "Aprendí algo sobre tu agenda")
+            .unwrap();
+        inbox
+            .push("pregunta", "¿Quieres que organice tus documentos?")
+            .unwrap();
         assert_eq!(inbox.unread_count(), 2);
         inbox.mark_read(None).unwrap();
         assert_eq!(inbox.unread_count(), 0);

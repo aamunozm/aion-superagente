@@ -166,7 +166,11 @@ impl Library {
                 content: c.content.clone(),
             })
             .collect();
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         scored.truncate(k.max(1));
         Ok(scored)
     }
@@ -242,7 +246,10 @@ mod tests {
 
     #[test]
     fn chunks_overlap_and_cover() {
-        let text = (0..500).map(|i| i.to_string()).collect::<Vec<_>>().join(" ");
+        let text = (0..500)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
         let chunks = chunk_text(&text);
         assert!(chunks.len() >= 2);
         // El primer pasaje empieza por "0" y cubre CHUNK_WORDS palabras.

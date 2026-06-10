@@ -37,10 +37,18 @@ impl ControlIntent {
 /// Ejecuta una intención de control sobre el SO. Solo lo invoca `Computer` tras
 /// autorización del Governor.
 pub(crate) fn execute(intent: &ControlIntent) -> Result<(), ControlError> {
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| ControlError::Input(format!("no se pudo iniciar el control de entrada (¿falta permiso de Accesibilidad?): {e}")))?;
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
+        ControlError::Input(format!(
+            "no se pudo iniciar el control de entrada (¿falta permiso de Accesibilidad?): {e}"
+        ))
+    })?;
 
-    let click_at = |enigo: &mut Enigo, x: i32, y: i32, button: Button, times: u32| -> Result<(), ControlError> {
+    let click_at = |enigo: &mut Enigo,
+                    x: i32,
+                    y: i32,
+                    button: Button,
+                    times: u32|
+     -> Result<(), ControlError> {
         enigo
             .move_mouse(x, y, Coordinate::Abs)
             .map_err(|e| ControlError::Input(format!("mover ratón: {e}")))?;

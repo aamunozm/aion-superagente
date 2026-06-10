@@ -14,8 +14,8 @@ mod library;
 mod memory_tool;
 mod onboarding;
 mod prompt_store;
-mod provider;
 mod prompts;
+mod provider;
 mod serve;
 mod skill_store;
 mod skill_tool;
@@ -602,7 +602,12 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
 
         // 🔔 AION "quiere hablarte": convierte lo descubierto en un MENSAJE PARA TI
         // (Bandeja) y avisa. Así te busca él, no solo responde.
-        if success && matches!(goal, "estudiar" | "evolucionar" | "investigar" | "comprender" | "proponer") {
+        if success
+            && matches!(
+                goal,
+                "estudiar" | "evolucionar" | "investigar" | "comprender" | "proponer"
+            )
+        {
             let kind = match goal {
                 "evolucionar" | "comprender" | "proponer" => "idea",
                 _ => "insight",
@@ -831,7 +836,10 @@ async fn research_once(engine: &OllamaEngine) -> (bool, String) {
 
     if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
         let _ = mem
-            .store(&format!("[investigación] {topic}: {summary} (fuente: {})", source.url))
+            .store(&format!(
+                "[investigación] {topic}: {summary} (fuente: {})",
+                source.url
+            ))
             .await;
     }
     (!summary.is_empty(), format!("{topic} → {summary}"))
@@ -847,7 +855,13 @@ con recuperación híbrida+grafo+temporal, orchestrator con ReAct y equipo multi
 skills WASM en sandbox, evolution gated con ratchet, cognition, browser, computer con \
 gobernanza). Te auto-extiendes con skills y prompts, no reescribes tu kernel.";
     let learnings = match VectorMemory::persistent_local(memory_path()) {
-        Ok(m) => m.contents().into_iter().rev().take(8).collect::<Vec<_>>().join("\n- "),
+        Ok(m) => m
+            .contents()
+            .into_iter()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join("\n- "),
         Err(_) => String::new(),
     };
     let prompt = format!(
@@ -872,9 +886,14 @@ gobernanza). Te auto-extiendes con skills y prompts, no reescribes tu kernel.";
             }
             // Guarda la propuesta (para revisión humana) — no se aplica sola.
             let path = app_data_dir().join("proposals.jsonl");
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 use std::io::Write as _;
-                let rec = serde_json::json!({ "at": Utc::now().to_rfc3339(), "proposal": proposal });
+                let rec =
+                    serde_json::json!({ "at": Utc::now().to_rfc3339(), "proposal": proposal });
                 let _ = writeln!(f, "{rec}");
             }
             (true, proposal)
@@ -887,7 +906,13 @@ gobernanza). Te auto-extiendes con skills y prompts, no reescribes tu kernel.";
 /// optimizado, propone una instrucción mejor y la guarda como nueva versión.
 async fn optimize_prompt_once(engine: &OllamaEngine) -> (bool, String) {
     // Elige el modo menos optimizado (reparte la mejora).
-    let tasks = ["conversacion", "investigacion", "creativo", "tecnico", "analisis"];
+    let tasks = [
+        "conversacion",
+        "investigacion",
+        "creativo",
+        "tecnico",
+        "analisis",
+    ];
     let task = tasks
         .iter()
         .min_by_key(|t| prompt_store::current_version(t))
@@ -975,7 +1000,10 @@ async fn synthesize_once(engine: &OllamaEngine) -> (bool, String) {
 
     let all = mem.contents();
     if all.len() < 3 {
-        return (false, "aún no tengo suficiente material que conectar".into());
+        return (
+            false,
+            "aún no tengo suficiente material que conectar".into(),
+        );
     }
     // Si no hay duplicados, conecta lo aprendido reciente en un entendimiento nuevo.
     let sample: Vec<String> = all.iter().rev().take(12).cloned().collect();
@@ -1518,8 +1546,14 @@ async fn run_ingest(domain: &str, file: &str) -> Result<(), Box<dyn std::error::
     }
     let path = std::path::PathBuf::from(shellexpand_home(file));
     let mut lib = library::Library::open(knowledge_path());
-    println!("📚 Ingiriendo «{}» en el dominio «{domain}»…", path.display());
-    let n = lib.ingest_file(domain, &path).await.map_err(|e| e.to_string())?;
+    println!(
+        "📚 Ingiriendo «{}» en el dominio «{domain}»…",
+        path.display()
+    );
+    let n = lib
+        .ingest_file(domain, &path)
+        .await
+        .map_err(|e| e.to_string())?;
     println!("✅ Indexados {n} pasajes (BGE-M3, multilingüe).");
     println!("\nBiblioteca actual:");
     for (d, s, c) in lib.documents() {
@@ -1536,13 +1570,24 @@ async fn run_ask(query: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
     let lib = library::Library::open(knowledge_path());
     if lib.total_chunks() == 0 {
-        return Err("la biblioteca está vacía: usa `aion-core ingest <dominio> <archivo>` primero".into());
+        return Err(
+            "la biblioteca está vacía: usa `aion-core ingest <dominio> <archivo>` primero".into(),
+        );
     }
-    let hits = lib.search(query, 5, None).await.map_err(|e| e.to_string())?;
+    let hits = lib
+        .search(query, 5, None)
+        .await
+        .map_err(|e| e.to_string())?;
     println!("\n🔎 Pasajes recuperados:");
     let mut grounding = String::new();
     for (i, p) in hits.iter().enumerate() {
-        println!("  [{}] {} (frag. {}) · score {:.2}", i + 1, p.source, p.idx, p.score);
+        println!(
+            "  [{}] {} (frag. {}) · score {:.2}",
+            i + 1,
+            p.source,
+            p.idx,
+            p.score
+        );
         grounding.push_str(&format!(
             "[{}] (fuente: {}, fragmento {})\n{}\n\n",
             i + 1,
@@ -1560,7 +1605,9 @@ async fn run_ask(query: &str) -> Result<(), Box<dyn std::error::Error>> {
                  Cita la fuente entre corchetes [n] donde uses cada dato. Si los pasajes no \
                  contienen la respuesta, dilo con franqueza; no inventes. Responde en español.",
             ),
-            Message::user(format!("Pasajes:\n{grounding}\nPregunta: {query}\n\nRespuesta:")),
+            Message::user(format!(
+                "Pasajes:\n{grounding}\nPregunta: {query}\n\nRespuesta:"
+            )),
         ],
         think: false,
         temperature: Some(0.3),
@@ -1714,7 +1761,11 @@ fn run_models_ensure() {
         "AION",
         "Preparando la IA por primera vez (descarga ~9 GB). Te avisaré al terminar.",
     );
-    tracing::info!(need_chat, need_embed, "descargando modelos (primer arranque)");
+    tracing::info!(
+        need_chat,
+        need_embed,
+        "descargando modelos (primer arranque)"
+    );
 
     if need_embed {
         let ok = Command::new(&bin)
@@ -1750,9 +1801,9 @@ fn run_models_ensure() {
 async fn run_see(prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
     let computer = aion_control::Computer::open(app_data_dir().join("control"))?;
     println!("👁  AION captura la pantalla…");
-    let b64 = computer
-        .look()
-        .map_err(|e| format!("no pude ver la pantalla ({e}). En macOS, concede 'Grabación de pantalla' a AION."))?;
+    let b64 = computer.look().map_err(|e| {
+        format!("no pude ver la pantalla ({e}). En macOS, concede 'Grabación de pantalla' a AION.")
+    })?;
 
     let model = std::env::var("AION_VISION_MODEL")
         .unwrap_or_else(|_| "huihui_ai/gemma-4-abliterated:12b".into());
@@ -1820,16 +1871,27 @@ fn run_governance(args: &[String]) {
         }
         Some("trash") => {
             let entries = gov.trash().entries().unwrap_or_default();
-            println!("🗑  papelera AION: {} elementos (recuperables 30 días)", entries.len());
+            println!(
+                "🗑  papelera AION: {} elementos (recuperables 30 días)",
+                entries.len()
+            );
             for e in &entries {
-                println!("  [{}] {} · borrado {}", &e.id[..8], e.original_path, e.deleted_at.format("%Y-%m-%d"));
+                println!(
+                    "  [{}] {} · borrado {}",
+                    &e.id[..8],
+                    e.original_path,
+                    e.deleted_at.format("%Y-%m-%d")
+                );
             }
         }
         _ => {
             let p = &gov.policy;
             println!("⚖️  Gobernanza de AION");
             println!("  Postura : {:?}", p.posture);
-            println!("  Pausa   : {}", if p.paused { "SÍ (kill switch)" } else { "no" });
+            println!(
+                "  Pausa   : {}",
+                if p.paused { "SÍ (kill switch)" } else { "no" }
+            );
             println!("  Rutas protegidas : {}", p.protected_paths.len());
             println!("  Líneas rojas     : {}", p.hard_deny.len());
             println!("\nComandos: governance [pause|resume|posture <p>|audit|trash]");

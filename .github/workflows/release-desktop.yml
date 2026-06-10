@@ -16,33 +16,12 @@ permissions:
   contents: write
 
 jobs:
-  # ── macOS universal (Apple Silicon + Intel) ──────────────────────────────
-  macos:
-    runs-on: macos-14   # Apple Silicon; produce binario universal
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: pnpm }
-      - name: Instalar Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
-      - name: Instalar Ollama (fuente del runtime a vendorizar)
-        run: brew install --cask ollama-app
-      - name: Vendorizar runtime Ollama (universal arm64+x86_64)
-        run: bash apps/desktop/scripts/vendor-ollama-runtime.sh
-      - name: Dependencias web
-        run: pnpm install --frozen-lockfile
-      - name: Build .app UNIVERSAL + DMG
-        run: bash apps/desktop/build-universal.sh && cd apps/desktop && cargo tauri build --target universal-apple-darwin --bundles dmg
-      - uses: actions/upload-artifact@v4
-        with:
-          name: AION-macos-universal
-          path: |
-            apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
-            apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+  # ── macOS: NO se construye en la nube ────────────────────────────────────
+  # El DMG universal de macOS se genera y FIRMA (ad-hoc) en local con
+  # `apps/desktop/build-universal.sh` + codesign + `gh release upload macos-latest`.
+  # Razón: (1) la nube no puede firmar con tu identidad y un .app sin firma se
+  # bloquea en otros Apple Silicon; (2) vendorizar el runtime de Ollama depende de
+  # Ollama instalado localmente. Por eso este workflow solo construye Windows.
 
   # ── Windows x64 (instalador NSIS) ────────────────────────────────────────
   windows:

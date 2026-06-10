@@ -7,10 +7,10 @@
 
 use crate::{memory_path, memory_tool::MemoryTool};
 use aion_browser::WebClient;
-use aion_llm::OllamaEngine;
-use aion_memory::VectorMemory;
 use aion_kernel::traits::LlmEngine;
 use aion_kernel::EventBus;
+use aion_llm::OllamaEngine;
+use aion_memory::VectorMemory;
 use aion_orchestrator::{CalculatorTool, ReActAgent, ToolRegistry};
 use std::sync::Arc;
 
@@ -31,7 +31,10 @@ fn real_desktop_pdf_count() -> usize {
             rd.flatten()
                 .filter(|e| {
                     e.path().is_file()
-                        && e.file_name().to_string_lossy().to_lowercase().ends_with(".pdf")
+                        && e.file_name()
+                            .to_string_lossy()
+                            .to_lowercase()
+                            .ends_with(".pdf")
                 })
                 .count()
         })
@@ -84,15 +87,18 @@ fn cases() -> Vec<Case> {
 
 /// Construye un agente con las herramientas reales y verificación activada.
 async fn build_tools() -> Arc<ToolRegistry> {
-    let memory = Arc::new(VectorMemory::persistent_local(memory_path()).unwrap_or_else(|_| {
-        VectorMemory::default_local()
-    }));
+    let memory = Arc::new(
+        VectorMemory::persistent_local(memory_path())
+            .unwrap_or_else(|_| VectorMemory::default_local()),
+    );
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(CalculatorTool));
     tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
     tools.register(Arc::new(crate::agent_tools::NetTool::new()));
     tools.register(Arc::new(MemoryTool::new(memory, 3)));
-    tools.register(Arc::new(crate::agent_tools::SearchTool::new(Arc::new(WebClient::new()))));
+    tools.register(Arc::new(crate::agent_tools::SearchTool::new(Arc::new(
+        WebClient::new(),
+    ))));
     Arc::new(tools)
 }
 
@@ -126,7 +132,13 @@ pub async fn run(k: usize) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let rate = ok as f32 / k as f32;
-        let mark = if ok == k { "✅" } else if ok == 0 { "❌" } else { "⚠️ " };
+        let mark = if ok == k {
+            "✅"
+        } else if ok == 0 {
+            "❌"
+        } else {
+            "⚠️ "
+        };
         println!("{mark} {:28} {ok}/{k}  ({:.0}%)", c.name, rate * 100.0);
         total_pass += ok;
         total_runs += k;

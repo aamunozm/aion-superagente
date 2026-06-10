@@ -28,13 +28,47 @@ pub fn read_state(message: &str) -> UserState {
 
     UserState {
         frustrated: has(&[
-            "no funciona", "no sirve", "otra vez", "sigue fallando", "harto", "frustr",
-            "no me deja", "error de nuevo", "qué pasa", "por qué no", "mal hecho",
+            "no funciona",
+            "no sirve",
+            "otra vez",
+            "sigue fallando",
+            "harto",
+            "frustr",
+            "no me deja",
+            "error de nuevo",
+            "qué pasa",
+            "por qué no",
+            "mal hecho",
         ]) || exclam >= 3
             || caps_ratio > 0.6,
-        urgent: has(&["urgente", "rápido", "ya", "ahora mismo", "deprisa", "para hoy", "cuanto antes"]),
-        confused: has(&["no entiendo", "no sé", "confund", "cómo funciona", "qué significa", "estoy perdido", "no comprendo"]),
-        positive: has(&["gracias", "genial", "perfecto", "excelente", "buenísimo", "me encanta", "increíble", "bien hecho"]),
+        urgent: has(&[
+            "urgente",
+            "rápido",
+            "ya",
+            "ahora mismo",
+            "deprisa",
+            "para hoy",
+            "cuanto antes",
+        ]),
+        confused: has(&[
+            "no entiendo",
+            "no sé",
+            "confund",
+            "cómo funciona",
+            "qué significa",
+            "estoy perdido",
+            "no comprendo",
+        ]),
+        positive: has(&[
+            "gracias",
+            "genial",
+            "perfecto",
+            "excelente",
+            "buenísimo",
+            "me encanta",
+            "increíble",
+            "bien hecho",
+        ]),
     }
 }
 
@@ -54,7 +88,9 @@ pub fn directive(state: &UserState) -> Option<String> {
         );
     }
     if state.urgent {
-        parts.push("El usuario tiene prisa: da primero la respuesta accionable, los detalles después.");
+        parts.push(
+            "El usuario tiene prisa: da primero la respuesta accionable, los detalles después.",
+        );
     }
     if state.positive {
         parts.push("El usuario está contento: mantén un tono cálido y cercano.");

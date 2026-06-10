@@ -459,22 +459,24 @@ fn mmr_select(pool: &[ScoredIdx], recs: &[MemoryRecord], k: usize, lambda: f32) 
 /// dígitos, con mayúscula inicial, o con símbolos como #/-) — lo que el embedding
 /// semántico diluye pero es decisivo para acertar (mem0: entity matching).
 fn entities(s: &str) -> std::collections::HashSet<String> {
-    s.split(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | ';' | ':' | '!' | '?' | '(' | ')'))
-        .filter_map(|tok| {
-            let t = tok.trim();
-            if t.len() < 2 {
-                return None;
-            }
-            let has_digit = t.chars().any(|c| c.is_ascii_digit());
-            let has_upper = t.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
-            let has_sym = t.contains('#') || t.contains('-') || t.contains('_');
-            if has_digit || has_upper || has_sym {
-                Some(t.to_lowercase())
-            } else {
-                None
-            }
-        })
-        .collect()
+    s.split(|c: char| {
+        c.is_whitespace() || matches!(c, ',' | '.' | ';' | ':' | '!' | '?' | '(' | ')')
+    })
+    .filter_map(|tok| {
+        let t = tok.trim();
+        if t.len() < 2 {
+            return None;
+        }
+        let has_digit = t.chars().any(|c| c.is_ascii_digit());
+        let has_upper = t.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+        let has_sym = t.contains('#') || t.contains('-') || t.contains('_');
+        if has_digit || has_upper || has_sym {
+            Some(t.to_lowercase())
+        } else {
+            None
+        }
+    })
+    .collect()
 }
 
 fn entity_overlap(

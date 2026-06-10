@@ -18,14 +18,22 @@ pub fn persona(task: &str) -> String {
 /// Instrucción base por defecto (semilla que AION puede optimizar luego).
 pub fn persona_default(task: &str) -> &'static str {
     match task {
-        "investigacion" => "MODO INVESTIGACIÓN: prioriza buscar en internet (web_search) y \
-             leer fuentes (web_fetch); sé riguroso y cita de dónde sacas la información.",
-        "creativo" => "MODO CREATIVO: piensa de forma divergente y original; combina ideas y tu \
-             conocimiento de formas inesperadas pero útiles; ofrece varias opciones.",
-        "tecnico" => "MODO TÉCNICO: sé preciso y estructurado; da pasos concretos, código o datos \
-             exactos; nada de relleno.",
-        "analisis" => "MODO ANÁLISIS: razona paso a paso, contempla alternativas, riesgos y \
-             trade-offs antes de concluir.",
+        "investigacion" => {
+            "MODO INVESTIGACIÓN: prioriza buscar en internet (web_search) y \
+             leer fuentes (web_fetch); sé riguroso y cita de dónde sacas la información."
+        }
+        "creativo" => {
+            "MODO CREATIVO: piensa de forma divergente y original; combina ideas y tu \
+             conocimiento de formas inesperadas pero útiles; ofrece varias opciones."
+        }
+        "tecnico" => {
+            "MODO TÉCNICO: sé preciso y estructurado; da pasos concretos, código o datos \
+             exactos; nada de relleno."
+        }
+        "analisis" => {
+            "MODO ANÁLISIS: razona paso a paso, contempla alternativas, riesgos y \
+             trade-offs antes de concluir."
+        }
         _ => "MODO CONVERSACIÓN: claro, directo y cercano, sin rodeos.",
     }
 }
@@ -36,16 +44,50 @@ pub async fn route(engine: &dyn LlmEngine, prompt: &str) -> String {
     let p = prompt.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| p.contains(w));
 
-    if has(&["investiga", "busca en internet", "buscar", "últimas noticias", "averigua", "fuentes"]) {
+    if has(&[
+        "investiga",
+        "busca en internet",
+        "buscar",
+        "últimas noticias",
+        "averigua",
+        "fuentes",
+    ]) {
         return "investigacion".into();
     }
-    if has(&["crea", "idea", "imagina", "inventa", "diseña", "brainstorm", "propón ideas", "creativo"]) {
+    if has(&[
+        "crea",
+        "idea",
+        "imagina",
+        "inventa",
+        "diseña",
+        "brainstorm",
+        "propón ideas",
+        "creativo",
+    ]) {
         return "creativo".into();
     }
-    if has(&["código", "codigo", "programa", "función", "funcion", "bug", "error", "implementa", "script"]) {
+    if has(&[
+        "código",
+        "codigo",
+        "programa",
+        "función",
+        "funcion",
+        "bug",
+        "error",
+        "implementa",
+        "script",
+    ]) {
         return "tecnico".into();
     }
-    if has(&["analiza", "compara", "pros y contras", "evalúa", "evalua", "por qué", "por que"]) {
+    if has(&[
+        "analiza",
+        "compara",
+        "pros y contras",
+        "evalúa",
+        "evalua",
+        "por qué",
+        "por que",
+    ]) {
         return "analisis".into();
     }
 
@@ -67,7 +109,13 @@ pub async fn route(engine: &dyn LlmEngine, prompt: &str) -> String {
     match engine.generate(req).await {
         Ok(m) => {
             let w = m.content.to_lowercase();
-            for k in ["investigacion", "creativo", "tecnico", "analisis", "conversacion"] {
+            for k in [
+                "investigacion",
+                "creativo",
+                "tecnico",
+                "analisis",
+                "conversacion",
+            ] {
                 if w.contains(k) {
                     return k.into();
                 }

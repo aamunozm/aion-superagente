@@ -111,13 +111,19 @@ async fn reset(State(st): State<AppState>, Json(body): Json<ResetReq>) -> impl I
     let user = match st.store.find_by_email(&body.email) {
         Some(u) => u,
         None => {
-            return (StatusCode::UNAUTHORIZED, Json(json!({"error": "email o código inválido"})))
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "email o código inválido"})),
+            )
                 .into_response()
         }
     };
     let code = body.recovery_code.trim().to_uppercase();
     if user.recovery_hash.is_empty() || !auth::verify_password(&code, &user.recovery_hash) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "email o código inválido"})))
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "email o código inválido"})),
+        )
             .into_response();
     }
     let new_hash = match auth::hash_password(&body.new_password) {

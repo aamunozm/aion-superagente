@@ -26,7 +26,9 @@ pub fn scan() -> SystemScan {
 
     let ram_gb = sys.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0;
     sys.refresh_cpu_all();
-    let cpu_cores = sys.physical_core_count().unwrap_or_else(|| sys.cpus().len());
+    let cpu_cores = sys
+        .physical_core_count()
+        .unwrap_or_else(|| sys.cpus().len());
 
     let disk_free_gb = Disks::new_with_refreshed_list()
         .list()

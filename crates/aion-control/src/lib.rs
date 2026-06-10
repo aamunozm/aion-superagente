@@ -80,9 +80,9 @@ impl Computer {
                 );
                 Ok(b64)
             }
-            Decision::Confirm { reason, .. } | Decision::Deny { reason } => {
-                Err(ControlError::Screen(format!("captura no permitida: {reason}")))
-            }
+            Decision::Confirm { reason, .. } | Decision::Deny { reason } => Err(
+                ControlError::Screen(format!("captura no permitida: {reason}")),
+            ),
         }
     }
 

@@ -57,7 +57,9 @@ impl Governor {
         let pending = matches!(decision, Decision::Confirm { .. });
         let outcome = match &decision {
             Decision::Allow { .. } => Some("autorizada".into()),
-            Decision::Confirm { reason, .. } => Some(format!("a la espera de confirmación: {reason}")),
+            Decision::Confirm { reason, .. } => {
+                Some(format!("a la espera de confirmación: {reason}"))
+            }
             Decision::Deny { reason } => Some(format!("denegada: {reason}")),
         };
         let _ = self.audit.record(action, &decision, false, outcome);
@@ -66,7 +68,12 @@ impl Governor {
     }
 
     /// Registra que una acción confirmada/permitida se ejecutó y su resultado.
-    pub fn record_execution(&self, action: &Action, decision: &Decision, outcome: impl Into<String>) {
+    pub fn record_execution(
+        &self,
+        action: &Action,
+        decision: &Decision,
+        outcome: impl Into<String>,
+    ) {
         let _ = self
             .audit
             .record(action, decision, true, Some(outcome.into()));

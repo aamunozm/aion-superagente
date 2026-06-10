@@ -49,9 +49,16 @@ fn active_engine() -> Arc<dyn LlmEngine> {
 /// Construye el motor LLM a partir de la configuración del proveedor.
 fn build_engine(cfg: &crate::provider::ProviderConfig) -> Arc<dyn LlmEngine> {
     if cfg.kind == "external" && !cfg.api_key.is_empty() && !cfg.base_url.is_empty() {
-        Arc::new(aion_llm::OpenAiEngine::new(&cfg.base_url, &cfg.api_key, &cfg.model))
+        Arc::new(aion_llm::OpenAiEngine::new(
+            &cfg.base_url,
+            &cfg.api_key,
+            &cfg.model,
+        ))
     } else {
-        Arc::new(OllamaEngine::new(OllamaEngine::base_url_from_env(), &cfg.model))
+        Arc::new(OllamaEngine::new(
+            OllamaEngine::base_url_from_env(),
+            &cfg.model,
+        ))
     }
 }
 
@@ -193,10 +200,16 @@ async fn status(State(st): State<AppState>) -> Json<serde_json::Value> {
 /// ¿Existe ya el modelo local en Ollama? (en 1er arranque se descarga).
 async fn local_model_ready(model: &str) -> bool {
     let base = std::env::var("AION_OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".into());
-    let Ok(resp) = reqwest::Client::new().get(format!("{base}/api/tags")).send().await else {
+    let Ok(resp) = reqwest::Client::new()
+        .get(format!("{base}/api/tags"))
+        .send()
+        .await
+    else {
         return false;
     };
-    let Ok(text) = resp.text().await else { return false };
+    let Ok(text) = resp.text().await else {
+        return false;
+    };
     text.contains(&format!("\"{model}\"")) || text.contains(&format!("{model}:"))
 }
 
@@ -215,7 +228,9 @@ struct PullBody {
 }
 
 /// Descarga un modelo local por streaming, emitiendo el PROGRESO (barra) por SSE.
-async fn models_pull(Json(body): Json<PullBody>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+async fn models_pull(
+    Json(body): Json<PullBody>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
     let model = body.model.clone();
     tokio::spawn(async move {
@@ -252,14 +267,20 @@ async fn models_pull(Json(body): Json<PullBody>) -> Sse<impl Stream<Item = Resul
                     let status = v["status"].as_str().unwrap_or("");
                     let completed = v["completed"].as_f64().unwrap_or(0.0);
                     let total = v["total"].as_f64().unwrap_or(0.0);
-                    let percent = if total > 0.0 { (completed / total * 100.0).round() } else { 0.0 };
+                    let percent = if total > 0.0 {
+                        (completed / total * 100.0).round()
+                    } else {
+                        0.0
+                    };
                     let _ = tx
-                        .send(Event::default().data(
-                            serde_json::json!({
-                                "kind": "progress", "status": status, "percent": percent
-                            })
-                            .to_string(),
-                        ))
+                        .send(
+                            Event::default().data(
+                                serde_json::json!({
+                                    "kind": "progress", "status": status, "percent": percent
+                                })
+                                .to_string(),
+                            ),
+                        )
                         .await;
                 }
             }
@@ -345,8 +366,16 @@ async fn chat(
     } else {
         ""
     };
-    let mem_block = if grounding.is_empty() { String::new() } else { format!("\n\n{grounding}") };
-    let lib_block = if lib_grounding.is_empty() { String::new() } else { format!("\n\n{lib_grounding}") };
+    let mem_block = if grounding.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{grounding}")
+    };
+    let lib_block = if lib_grounding.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{lib_grounding}")
+    };
     let empathy_block = match &empathy {
         Some(d) => format!("\n\n{d}"),
         None => String::new(),
@@ -574,7 +603,10 @@ async fn crew(
         if let Ok(host) = WasmSkillHost::new() {
             let host = Arc::new(host);
             let _ = host.register(
-                SkillManifest { name: "sum_to".into(), description: "suma 1..=n".into() },
+                SkillManifest {
+                    name: "sum_to".into(),
+                    description: "suma 1..=n".into(),
+                },
                 SUM_TO_WAT,
             );
             crate::skill_store::load_all(&host);
@@ -611,7 +643,9 @@ async fn crew(
                     }
                     _ => continue,
                 };
-                let _ = tx_fwd.send(Event::default().data(payload.to_string())).await;
+                let _ = tx_fwd
+                    .send(Event::default().data(payload.to_string()))
+                    .await;
             }
         });
 
@@ -620,11 +654,17 @@ async fn crew(
         fwd.abort();
 
         let final_event = match result {
-            Ok(run) => serde_json::json!({ "kind": "answer", "agent": "orquestador", "text": run.answer, "steps": run.steps }),
+            Ok(run) => {
+                serde_json::json!({ "kind": "answer", "agent": "orquestador", "text": run.answer, "steps": run.steps })
+            }
             Err(e) => serde_json::json!({ "kind": "error", "text": e.to_string() }),
         };
-        let _ = tx.send(Event::default().data(final_event.to_string())).await;
-        let _ = tx.send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string())).await;
+        let _ = tx
+            .send(Event::default().data(final_event.to_string()))
+            .await;
+        let _ = tx
+            .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+            .await;
     });
 
     Sse::new(ReceiverStream::new(rx).map(Ok))
@@ -653,7 +693,9 @@ fn self_awareness_prompt() -> String {
         let all = mem.contents();
         let last: Vec<String> = all.iter().rev().take(5).cloned().collect();
         if !last.is_empty() {
-            recent.push_str("\n\nLo que has estado haciendo por tu cuenta últimamente (tu memoria):\n");
+            recent.push_str(
+                "\n\nLo que has estado haciendo por tu cuenta últimamente (tu memoria):\n",
+            );
             for r in last.iter().rev() {
                 let mut line = r.clone();
                 line.truncate(160);
@@ -742,7 +784,9 @@ async fn compress_if_needed(engine: &dyn LlmEngine, convo: &Arc<std::sync::Mutex
         *c = newc;
     }
     if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
-        let _ = mem.store(&format!("[conversación-resumen] {summary}")).await;
+        let _ = mem
+            .store(&format!("[conversación-resumen] {summary}"))
+            .await;
     }
 }
 
@@ -774,7 +818,11 @@ async fn relevant_knowledge(prompt: &str) -> String {
         return String::new();
     }
     let cutoff = (best * 0.75).max(0.28);
-    let useful: Vec<_> = hits.into_iter().filter(|h| h.score >= cutoff).take(4).collect();
+    let useful: Vec<_> = hits
+        .into_iter()
+        .filter(|h| h.score >= cutoff)
+        .take(4)
+        .collect();
     if useful.is_empty() {
         return String::new();
     }
@@ -831,7 +879,10 @@ async fn grounding_for_agent(engine: &dyn LlmEngine, task: &str) -> String {
         return String::new();
     };
     let hits = match mem.retrieve_associative(task, 5, 1).await {
-        Ok(h) => h.into_iter().filter(|h| h.score >= 0.25).collect::<Vec<_>>(),
+        Ok(h) => h
+            .into_iter()
+            .filter(|h| h.score >= 0.25)
+            .collect::<Vec<_>>(),
         Err(_) => return String::new(),
     };
     if hits.is_empty() {
@@ -841,7 +892,13 @@ async fn grounding_for_agent(engine: &dyn LlmEngine, task: &str) -> String {
     let listed = hits
         .iter()
         .enumerate()
-        .map(|(i, h)| format!("{}. {}", i + 1, h.content.chars().take(180).collect::<String>()))
+        .map(|(i, h)| {
+            format!(
+                "{}. {}",
+                i + 1,
+                h.content.chars().take(180).collect::<String>()
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let judge = GenerateRequest {
@@ -901,10 +958,28 @@ fn worth_long_term(prompt: &str, answer: &str) -> bool {
     }
     // Estado efímero: conteos y consultas de "ahora mismo" que caducan.
     const EPHEMERAL: [&str; 22] = [
-        "cuántos", "cuantos", "cuántas", "cuantas", "archivos", "documentos", "pdf",
-        "carpeta", "escritorio", "descargas", "equipos", "dispositivos", "conectados",
-        "red local", "ip", "qué hora", "que hora", "fecha de hoy", "clima", "tiempo hace",
-        "batería", "bateria",
+        "cuántos",
+        "cuantos",
+        "cuántas",
+        "cuantas",
+        "archivos",
+        "documentos",
+        "pdf",
+        "carpeta",
+        "escritorio",
+        "descargas",
+        "equipos",
+        "dispositivos",
+        "conectados",
+        "red local",
+        "ip",
+        "qué hora",
+        "que hora",
+        "fecha de hoy",
+        "clima",
+        "tiempo hace",
+        "batería",
+        "bateria",
     ];
     if EPHEMERAL.iter().any(|k| p.contains(k)) {
         return false;
@@ -925,9 +1000,22 @@ fn needs_deep_thinking(prompt: &str) -> bool {
     let words = p.split_whitespace().count();
     // Marcadores de complejidad → sí conviene pensar.
     const HARD: [&str; 16] = [
-        "analiza", "compara", "explica por", "por qué", "por que", "razona", "demuestra",
-        "paso a paso", "código", "codigo", "programa", "calcula", "resuelve", "diseña",
-        "plan", "estrategia",
+        "analiza",
+        "compara",
+        "explica por",
+        "por qué",
+        "por que",
+        "razona",
+        "demuestra",
+        "paso a paso",
+        "código",
+        "codigo",
+        "programa",
+        "calcula",
+        "resuelve",
+        "diseña",
+        "plan",
+        "estrategia",
     ];
     if HARD.iter().any(|k| p.contains(k)) {
         return true;
@@ -990,7 +1078,9 @@ async fn library_ingest(Json(body): Json<IngestBody>) -> Json<serde_json::Value>
     let mut lib = crate::library::Library::open(crate::knowledge_path());
     let p = std::path::PathBuf::from(&body.path);
     match lib.ingest_file(&body.domain, &p).await {
-        Ok(n) => Json(serde_json::json!({ "ok": true, "passages": n, "total_chunks": lib.total_chunks() })),
+        Ok(n) => Json(
+            serde_json::json!({ "ok": true, "passages": n, "total_chunks": lib.total_chunks() }),
+        ),
         Err(e) => Json(serde_json::json!({ "error": e })),
     }
 }
@@ -1007,7 +1097,8 @@ struct UploadBody {
 /// un temporal con su nombre (para conservar la extensión) y lo ingiere.
 async fn library_upload(Json(body): Json<UploadBody>) -> Json<serde_json::Value> {
     use base64::Engine;
-    let bytes = match base64::engine::general_purpose::STANDARD.decode(body.content_b64.as_bytes()) {
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(body.content_b64.as_bytes())
+    {
         Ok(b) => b,
         Err(e) => return Json(serde_json::json!({ "error": format!("base64 inválido: {e}") })),
     };
@@ -1033,7 +1124,8 @@ async fn library_upload(Json(body): Json<UploadBody>) -> Json<serde_json::Value>
 /// registra el trabajo. Devuelve al instante (no bloquea). El worker lo procesa.
 async fn library_enqueue(Json(body): Json<UploadBody>) -> Json<serde_json::Value> {
     use base64::Engine;
-    let bytes = match base64::engine::general_purpose::STANDARD.decode(body.content_b64.as_bytes()) {
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(body.content_b64.as_bytes())
+    {
         Ok(b) => b,
         Err(e) => return Json(serde_json::json!({ "error": format!("base64 inválido: {e}") })),
     };
@@ -1068,7 +1160,9 @@ struct RemoveBody {
 async fn library_remove(Json(body): Json<RemoveBody>) -> Json<serde_json::Value> {
     let mut lib = crate::library::Library::open(crate::knowledge_path());
     match lib.remove(&body.domain, &body.source) {
-        Ok(n) => Json(serde_json::json!({ "ok": true, "removed": n, "total_chunks": lib.total_chunks() })),
+        Ok(n) => Json(
+            serde_json::json!({ "ok": true, "removed": n, "total_chunks": lib.total_chunks() }),
+        ),
         Err(e) => Json(serde_json::json!({ "error": e })),
     }
 }
@@ -1138,7 +1232,10 @@ async fn library_ask(Json(body): Json<AskBody>) -> Json<serde_json::Value> {
                 "Responde USANDO SOLO los pasajes. Cita la fuente con [n] donde uses cada \
                  dato. Si no contienen la respuesta, dilo con franqueza; no inventes. Español.",
             ),
-            Message::user(format!("Pasajes:\n{grounding}\nPregunta: {}\n\nRespuesta:", body.query)),
+            Message::user(format!(
+                "Pasajes:\n{grounding}\nPregunta: {}\n\nRespuesta:",
+                body.query
+            )),
         ],
         think: false,
         temperature: Some(0.3),

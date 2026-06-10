@@ -38,7 +38,8 @@ impl Tool for FilesTool {
          Carpetas válidas: escritorio, documentos, descargas, imágenes, inicio (o una ruta)."
     }
     async fn run(&self, input: &str) -> Result<String, String> {
-        let home = std::env::var("HOME").map_err(|_| "no encuentro tu carpeta de usuario".to_string())?;
+        let home =
+            std::env::var("HOME").map_err(|_| "no encuentro tu carpeta de usuario".to_string())?;
         let home = std::path::PathBuf::from(home);
         let mut it = input.split_whitespace();
         let folder = it.next().unwrap_or("").to_lowercase();
@@ -62,12 +63,15 @@ impl Tool for FilesTool {
             }
         };
         // Seguridad: la carpeta debe estar dentro de HOME.
-        let canon = dir.canonicalize().map_err(|_| format!("no encuentro la carpeta «{folder}»"))?;
+        let canon = dir
+            .canonicalize()
+            .map_err(|_| format!("no encuentro la carpeta «{folder}»"))?;
         if !canon.starts_with(&home) {
             return Err("por seguridad solo puedo leer dentro de tu carpeta de usuario".into());
         }
 
-        let entries = std::fs::read_dir(&canon).map_err(|e| format!("no pude leer la carpeta: {e}"))?;
+        let entries =
+            std::fs::read_dir(&canon).map_err(|e| format!("no pude leer la carpeta: {e}"))?;
         let mut names: Vec<String> = Vec::new();
         for e in entries.flatten() {
             if !e.path().is_file() {
@@ -90,11 +94,20 @@ impl Tool for FilesTool {
             Some(x) => format!("archivos .{x}"),
             None => "archivos".into(),
         };
-        let sample = names.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
+        let sample = names
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
         Ok(format!(
             "{total} {label} en {}{}",
             folder,
-            if sample.is_empty() { String::new() } else { format!(": {sample}") }
+            if sample.is_empty() {
+                String::new()
+            } else {
+                format!(": {sample}")
+            }
         ))
     }
 }
@@ -207,13 +220,19 @@ impl Tool for NetTool {
         let mut devices: Vec<(String, String, String)> = Vec::new(); // (ip, mac, host)
         for line in table.lines() {
             let Some(open) = line.find('(') else { continue };
-            let Some(close) = line.find(')') else { continue };
+            let Some(close) = line.find(')') else {
+                continue;
+            };
             let ip = line[open + 1..close].trim().to_string();
             if !ip.starts_with(&format!("{prefix}.")) {
                 continue;
             }
             // Descarta red (.0), broadcast (.255) y multicast — no son equipos.
-            let last: u8 = ip.rsplit('.').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let last: u8 = ip
+                .rsplit('.')
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
             if last == 0 || last == 255 {
                 continue;
             }
@@ -238,8 +257,16 @@ impl Tool for NetTool {
             devices.push((my_ip.clone(), "—".into(), "este equipo".into()));
         }
         devices.sort_by(|a, b| {
-            let pa: u8 = a.0.rsplit('.').next().and_then(|s| s.parse().ok()).unwrap_or(0);
-            let pb: u8 = b.0.rsplit('.').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let pa: u8 =
+                a.0.rsplit('.')
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+            let pb: u8 =
+                b.0.rsplit('.')
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
             pa.cmp(&pb)
         });
 
@@ -250,7 +277,11 @@ impl Tool for NetTool {
             .iter()
             .map(|(ip, mac, host)| {
                 let tag = if ip == &my_ip { " (este equipo)" } else { "" };
-                let h = if host.is_empty() { String::new() } else { format!(" — {host}") };
+                let h = if host.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {host}")
+                };
                 format!("{ip} [{mac}]{h}{tag}")
             })
             .collect::<Vec<_>>()
@@ -292,7 +323,8 @@ impl Tool for FileReadTool {
          notas, código o documentos antes de responder."
     }
     async fn run(&self, input: &str) -> Result<String, String> {
-        let home = std::env::var("HOME").map_err(|_| "no encuentro tu carpeta de usuario".to_string())?;
+        let home =
+            std::env::var("HOME").map_err(|_| "no encuentro tu carpeta de usuario".to_string())?;
         let home = std::path::PathBuf::from(&home);
         let raw = input.trim();
         if raw.is_empty() {
@@ -303,7 +335,9 @@ impl Tool for FileReadTool {
         } else {
             std::path::PathBuf::from(raw)
         };
-        let canon = p.canonicalize().map_err(|_| format!("no encuentro el archivo «{raw}»"))?;
+        let canon = p
+            .canonicalize()
+            .map_err(|_| format!("no encuentro el archivo «{raw}»"))?;
         if !canon.starts_with(&home) {
             return Err("por seguridad solo puedo leer dentro de tu carpeta de usuario".into());
         }
@@ -401,7 +435,11 @@ impl Tool for SearchTool {
          resultados (título, URL, fragmento). Luego usa web_fetch para leer una URL."
     }
     async fn run(&self, input: &str) -> Result<String, String> {
-        let results = self.web.search(input.trim(), 5).await.map_err(|e| e.to_string())?;
+        let results = self
+            .web
+            .search(input.trim(), 5)
+            .await
+            .map_err(|e| e.to_string())?;
         if results.is_empty() {
             return Ok("(sin resultados)".into());
         }

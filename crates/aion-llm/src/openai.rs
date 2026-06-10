@@ -18,7 +18,11 @@ pub struct OpenAiEngine {
 }
 
 impl OpenAiEngine {
-    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
         let base_url = base_url.into();
         let model = model.into();
         Self {
@@ -126,7 +130,9 @@ impl LlmEngine for OpenAiEngine {
                     if let Some(t) = v["choices"][0]["delta"]["content"].as_str() {
                         if !t.is_empty() {
                             tokens += 1;
-                            on_chunk(StreamChunk::Answer { text: t.to_string() });
+                            on_chunk(StreamChunk::Answer {
+                                text: t.to_string(),
+                            });
                         }
                     }
                 }
