@@ -102,6 +102,16 @@ fn chrome_path() -> Option<String> {
         .map(|p| p.to_string())
 }
 
+/// UA realista de Chrome estable (NO "HeadlessChrome", que delata al bot). Override
+/// con AION_BROWSER_UA.
+fn stealth_ua() -> String {
+    std::env::var("AION_BROWSER_UA").unwrap_or_else(|_| {
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+         (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+            .into()
+    })
+}
+
 /// Lanza el navegador si aún no hay sesión. Devuelve error claro si falta Chrome.
 async fn ensure(sess: &mut Option<Session>) -> Result<()> {
     if sess.is_some() {
@@ -117,9 +127,18 @@ async fn ensure(sess: &mut Option<Session>) -> Result<()> {
     let _ = std::fs::create_dir_all(&profile);
     builder = builder
         .user_data_dir(profile)
+        // STEALTH (legítimo): hace que el navegador del agente parezca uno normal.
+        // Son las mismas medidas estándar de puppeteer-stealth/undetected-chromedriver.
+        .arg("--disable-blink-features=AutomationControlled") // quita navigator.webdriver
+        .arg(format!("--user-agent={}", stealth_ua()))
+        .arg("--lang=es-ES,es")
+        .arg("--window-size=1280,800")
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
-        .arg("--disable-extensions");
+        .arg("--disable-extensions")
+        .arg("--disable-infobars");
+    // Headless "new": más fiel a un Chrome real que el headless antiguo (menos detectable).
+    builder = builder.new_headless_mode();
     let config = builder
         .build()
         .map_err(|e| AionError::Internal(format!("no encuentro Chrome para el navegador: {e}. Instala Google Chrome o define AION_CHROME.")))?;
@@ -170,9 +189,17 @@ impl BrowserDriver for ChromiumoxideDriver {
         let mut guard = cell().lock().await;
         ensure(&mut guard).await?;
         let sess = guard.as_mut().unwrap();
+        // Página en blanco → inyecta stealth ANTES de navegar → navega. Así el script
+        // que oculta las señales de automatización se ejecuta en cada documento nuevo.
         let page = sess
             .browser
-            .new_page(url)
+            .new_page("about:blank")
+            .await
+            .map_err(|e| AionError::Internal(format!("no pude crear la página: {e}")))?;
+        let _ = page.evaluate_on_new_document(STEALTH_JS).await;
+        // Override fiable del UA por CDP (elimina "HeadlessChrome").
+        let _ = page.set_user_agent(stealth_ua()).await;
+        page.goto(url)
             .await
             .map_err(|e| AionError::Internal(format!("no pude abrir la página: {e}")))?;
         let _ = page.wait_for_navigation().await;
@@ -262,6 +289,34 @@ impl BrowserDriver for ChromiumoxideDriver {
 fn no_page() -> AionError {
     AionError::Internal("no hay ninguna página abierta; usa browser_open primero".into())
 }
+
+/// JS de **stealth** inyectado en cada documento nuevo: oculta las señales típicas de
+/// automatización (las mismas que parchea puppeteer-stealth). Hace que el navegador del
+/// agente parezca uno normal — legítimo para automatizar tus propias sesiones.
+const STEALTH_JS: &str = r#"
+(() => {
+  try {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    Object.defineProperty(navigator, 'languages', { get: () => ['es-ES','es','en'] });
+    Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+    window.chrome = window.chrome || { runtime: {} };
+    const q = navigator.permissions && navigator.permissions.query;
+    if (q) {
+      navigator.permissions.query = (p) =>
+        p && p.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission })
+          : q(p);
+    }
+    // WebGL vendor/renderer realistas (otra señal habitual de headless).
+    const gp = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function (p) {
+      if (p === 37445) return 'Intel Inc.';
+      if (p === 37446) return 'Intel Iris OpenGL Engine';
+      return gp.call(this, p);
+    };
+  } catch (e) {}
+})();
+"#;
 
 /// JS que recorre el DOM, etiqueta los elementos INTERACTIVOS visibles con
 /// `data-aion-ref` y devuelve un JSON `[{ref, role, name, kind}]`. Es el "árbol de
