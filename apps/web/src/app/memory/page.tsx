@@ -5,15 +5,18 @@ import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
 import {
   libraryAsk,
+  libraryEnqueue,
   libraryList,
+  libraryQueue,
+  libraryQueueClear,
   libraryRemove,
-  libraryUpload,
   memoryExport,
   memoryImport,
   memoryRemember,
   memorySleep,
   memoryStats,
   type LibraryDoc,
+  type QueueStatus,
   type SleepReport,
 } from "@/lib/api";
 
@@ -29,7 +32,7 @@ export default function MemoryPage() {
   // ── Biblioteca (Academias) ──
   const [docs, setDocs] = useState<LibraryDoc[]>([]);
   const [domain, setDomain] = useState("documentos");
-  const [progress, setProgress] = useState<{ done: number; total: number; name: string } | null>(null);
+  const [queue, setQueue] = useState<QueueStatus | null>(null);
   const [dragging, setDragging] = useState(false);
   const [libMsg, setLibMsg] = useState<string | null>(null);
   const [ask, setAsk] = useState("");
@@ -57,6 +60,26 @@ export default function MemoryPage() {
     refreshLibrary();
   }, []);
 
+  // Sondea la cola de ingesta en segundo plano; refresca la lista al terminar lote.
+  useEffect(() => {
+    let prevActive = 0;
+    const id = setInterval(async () => {
+      try {
+        const q = await libraryQueue();
+        const active = q.pending + q.processing;
+        setQueue(active > 0 ? q : null);
+        if (active === 0 && prevActive > 0) {
+          await refreshLibrary();
+          await libraryQueueClear();
+        }
+        prevActive = active;
+      } catch {
+        /* servidor no disponible */
+      }
+    }, 2000);
+    return () => clearInterval(id);
+  }, []);
+
   function readAsBase64(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
       const r = new FileReader();
@@ -66,32 +89,27 @@ export default function MemoryPage() {
     });
   }
 
-  // Subida MASIVA: ingiere muchos libros en cola, con progreso.
+  // Subida MASIVA en SEGUNDO PLANO: encola todos los libros (rápido) y un worker los
+  // procesa sin bloquear; la UI sondea el progreso. Puedes seguir usando AION.
   async function uploadBooks(files: FileList | File[]) {
     const list = Array.from(files);
-    if (list.length === 0 || progress) return;
+    if (list.length === 0) return;
     const dom = domain.trim() || "documentos";
     setLibMsg(null);
-    let totalPassages = 0;
-    let okCount = 0;
+    let queued = 0;
     const errors: string[] = [];
-    for (let i = 0; i < list.length; i++) {
-      const f = list[i];
-      setProgress({ done: i, total: list.length, name: f.name });
+    for (const f of list) {
       try {
         const b64 = await readAsBase64(f);
-        const r = await libraryUpload(dom, f.name, b64);
-        totalPassages += r.passages;
-        okCount++;
+        await libraryEnqueue(dom, f.name, b64);
+        queued++;
       } catch (e) {
         errors.push(`${f.name}: ${e instanceof Error ? e.message : "error"}`);
       }
     }
-    setProgress(null);
-    await refreshLibrary();
     setLibMsg(
-      `✅ ${okCount}/${list.length} libros indexados en «${dom}» · ${totalPassages} pasajes` +
-        (errors.length ? ` · ⚠️ ${errors.length} con error` : ""),
+      `📥 ${queued} libros en cola en «${dom}» — se indexan en segundo plano` +
+        (errors.length ? ` · ⚠️ ${errors.length} no se pudieron leer` : ""),
     );
   }
 
@@ -242,15 +260,26 @@ export default function MemoryPage() {
           onChange={(e) => { if (e.target.files?.length) uploadBooks(e.target.files); e.target.value = ""; }}
         />
 
-        {progress && (
+        {queue && (
           <div className="mt-3">
-            <div className="flex justify-between text-xs mb-1" style={{ color: "var(--text-3)" }}>
-              <span>Indexando: {progress.name}</span>
-              <span>{progress.done}/{progress.total}</span>
-            </div>
-            <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--surface-2)" }}>
-              <div className="h-full rounded-full" style={{ width: `${(progress.done / progress.total) * 100}%`, background: "var(--accent)", transition: "width .3s" }} />
-            </div>
+            {(() => {
+              const total = queue.pending + queue.processing + queue.done;
+              const pct = total > 0 ? (queue.done / total) * 100 : 0;
+              return (
+                <>
+                  <div className="flex justify-between text-xs mb-1" style={{ color: "var(--text-3)" }}>
+                    <span className="inline-flex items-center gap-1.5">
+                      <Icon name="refresh" size={13} /> Indexando en segundo plano{queue.current ? `: ${queue.current}` : "…"}
+                    </span>
+                    <span>{queue.done}/{total} · faltan {queue.pending + queue.processing}</span>
+                  </div>
+                  <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--surface-2)" }}>
+                    <div className="h-full rounded-full" style={{ width: `${pct}%`, background: "var(--accent)", transition: "width .3s" }} />
+                  </div>
+                  <p className="text-xs mt-1" style={{ color: "var(--text-3)" }}>Puedes seguir usando AION mientras tanto.</p>
+                </>
+              );
+            })()}
           </div>
         )}
         {libMsg && <p className="mt-3 text-sm" style={{ color: "var(--accent)" }}>{libMsg}</p>}

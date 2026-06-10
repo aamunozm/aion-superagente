@@ -91,6 +91,31 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // WORKER DE INGESTA EN SEGUNDO PLANO: procesa la cola de libros sin bloquear el
+    // chat. De uno en uno (el embebido es intensivo en CPU). Sobrevive a reinicios.
+    tokio::spawn(async {
+        loop {
+            match crate::ingest_queue::take_next() {
+                Some(job) => {
+                    let mut lib = crate::library::Library::open(crate::knowledge_path());
+                    let path = std::path::PathBuf::from(&job.path);
+                    match lib.ingest_file_as(&job.domain, &job.source, &path).await {
+                        Ok(n) => {
+                            crate::ingest_queue::complete(&job.id, n);
+                            tracing::info!(source = %job.source, passages = n, "libro ingerido (cola)");
+                        }
+                        Err(e) => {
+                            crate::ingest_queue::fail(&job.id, &e);
+                            tracing::warn!(source = %job.source, "fallo de ingesta: {e}");
+                        }
+                    }
+                    let _ = std::fs::remove_file(&path); // limpia el staging
+                }
+                None => tokio::time::sleep(std::time::Duration::from_millis(1500)).await,
+            }
+        }
+    });
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -116,6 +141,9 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/library", get(library_list))
         .route("/api/library/ingest", post(library_ingest))
         .route("/api/library/upload", post(library_upload))
+        .route("/api/library/enqueue", post(library_enqueue))
+        .route("/api/library/queue", get(library_queue))
+        .route("/api/library/queue/clear", post(library_queue_clear))
         .route("/api/library/remove", post(library_remove))
         .route("/api/library/ask", post(library_ask))
         .route("/api/vision", post(vision))
@@ -301,6 +329,8 @@ async fn chat(
     // RAG: recupera de la memoria lo RELEVANTE a esta pregunta (no solo lo reciente),
     // para que AION APLIQUE lo que aprendió/investigó.
     let grounding = relevant_knowledge(&body.prompt).await;
+    // BIBLIOTECA: el chat también consulta tus libros/documentos (bases de conocimiento).
+    let lib_grounding = library_grounding(&body.prompt).await;
     // PROMPT DINÁMICO: elige el modo (persona) según lo que el usuario necesita.
     let mode = crate::prompts::route(&*engine, &body.prompt).await;
     // EMPATÍA: adapta el tono al estado del usuario (frustración, prisa, confusión…).
@@ -315,20 +345,20 @@ async fn chat(
     } else {
         ""
     };
+    let mem_block = if grounding.is_empty() { String::new() } else { format!("\n\n{grounding}") };
+    let lib_block = if lib_grounding.is_empty() { String::new() } else { format!("\n\n{lib_grounding}") };
+    let empathy_block = match &empathy {
+        Some(d) => format!("\n\n{d}"),
+        None => String::new(),
+    };
     let self_ctx = format!(
-        "{}\n\n{}{}{}{}",
+        "{}\n\n{}{}{}{}{}",
         self_awareness_prompt(),
         crate::prompts::persona(&mode),
-        match &empathy {
-            Some(d) => format!("\n\n{d}"),
-            None => String::new(),
-        },
+        empathy_block,
         think_note,
-        if grounding.is_empty() {
-            String::new()
-        } else {
-            format!("\n\n{grounding}")
-        }
+        mem_block,
+        lib_block,
     );
 
     // CONTEXTO INFINITO (compresión activa): añade el turno al hilo y, si crece
@@ -759,6 +789,37 @@ async fn relevant_knowledge(prompt: &str) -> String {
     s
 }
 
+/// Aterrizaje en la BIBLIOTECA (Academias): recupera pasajes relevantes de los
+/// documentos/libros ingeridos para que el CHAT normal los aplique y CITE — son bases
+/// de conocimiento, siempre consultables. Multilingüe (BGE-M3).
+async fn library_grounding(prompt: &str) -> String {
+    if is_trivial_query(prompt) {
+        return String::new();
+    }
+    let lib = crate::library::Library::open(crate::knowledge_path());
+    if lib.total_chunks() == 0 {
+        return String::new();
+    }
+    let hits = match lib.search(prompt, 4, None).await {
+        Ok(h) => h,
+        Err(_) => return String::new(),
+    };
+    // Umbral: el coseno BGE-M3 separa relevante (~0.5+) de ruido (~0.3). 0.40 filtra bien.
+    let useful: Vec<_> = hits.into_iter().filter(|p| p.score >= 0.40).collect();
+    if useful.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "Conocimiento de TU BIBLIOTECA relevante para esto (úsalo y cita la fuente entre \
+         corchetes cuando lo apliques):\n",
+    );
+    for (i, p) in useful.iter().enumerate() {
+        let c = p.content.chars().take(300).collect::<String>();
+        s.push_str(&format!("[{}] (fuente: {}) {c}\n", i + 1, p.source));
+    }
+    s
+}
+
 /// Aterrizaje del AGENTE con **reranker LLM** (Self-RAG): recupera (híbrido+MMR) y
 /// luego un juez decide qué recuerdos son realmente ÚTILES para la tarea antes de
 /// aplicarlos. Más precisión que el umbral solo (la latencia aquí es aceptable).
@@ -966,6 +1027,35 @@ async fn library_upload(Json(body): Json<UploadBody>) -> Json<serde_json::Value>
         })),
         Err(e) => Json(serde_json::json!({ "error": e })),
     }
+}
+
+/// Encola un libro para ingesta en SEGUNDO PLANO: guarda los bytes en staging y
+/// registra el trabajo. Devuelve al instante (no bloquea). El worker lo procesa.
+async fn library_enqueue(Json(body): Json<UploadBody>) -> Json<serde_json::Value> {
+    use base64::Engine;
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(body.content_b64.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => return Json(serde_json::json!({ "error": format!("base64 inválido: {e}") })),
+    };
+    let safe = body.filename.replace(['/', '\\'], "_");
+    let id = uuid::Uuid::new_v4().to_string();
+    let staged = crate::ingest_queue::staging_dir().join(format!("{id}_{safe}"));
+    if let Err(e) = std::fs::write(&staged, &bytes) {
+        return Json(serde_json::json!({ "error": format!("no pude guardar el archivo: {e}") }));
+    }
+    crate::ingest_queue::enqueue(&id, &body.domain, &safe, &staged.to_string_lossy());
+    Json(serde_json::json!({ "ok": true, "id": id, "queued": safe }))
+}
+
+/// Estado de la cola de ingesta (para que la UI muestre el progreso).
+async fn library_queue() -> Json<serde_json::Value> {
+    Json(crate::ingest_queue::snapshot())
+}
+
+/// Limpia de la cola los trabajos ya terminados.
+async fn library_queue_clear() -> Json<serde_json::Value> {
+    let n = crate::ingest_queue::clear_finished();
+    Json(serde_json::json!({ "ok": true, "cleared": n }))
 }
 
 #[derive(Deserialize)]

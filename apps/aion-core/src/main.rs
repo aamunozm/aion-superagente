@@ -9,6 +9,7 @@ mod agent_tools;
 mod empathy;
 mod evals;
 mod inbox;
+mod ingest_queue;
 mod library;
 mod memory_tool;
 mod onboarding;

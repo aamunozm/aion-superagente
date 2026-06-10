@@ -143,6 +143,37 @@ export async function libraryList(): Promise<{ total_chunks: number; documents: 
   return jsonCall(`/api/library`);
 }
 
+/** Encola un libro para ingesta en segundo plano (no bloquea). */
+export async function libraryEnqueue(
+  domain: string,
+  filename: string,
+  contentB64: string,
+): Promise<{ ok: boolean; id: string; queued: string }> {
+  return jsonCall(`/api/library/enqueue`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ domain, filename, content_b64: contentB64 }),
+  });
+}
+
+export type QueueStatus = {
+  pending: number;
+  processing: number;
+  done: number;
+  error: number;
+  current: string | null;
+};
+
+/** Estado de la cola de ingesta. */
+export async function libraryQueue(): Promise<QueueStatus> {
+  return jsonCall(`/api/library/queue`);
+}
+
+/** Limpia de la cola los trabajos terminados. */
+export async function libraryQueueClear(): Promise<{ cleared: number }> {
+  return jsonCall(`/api/library/queue/clear`, { method: "POST" });
+}
+
 /** Elimina un documento de la biblioteca. */
 export async function libraryRemove(domain: string, source: string): Promise<{ removed: number }> {
   return jsonCall(`/api/library/remove`, {
