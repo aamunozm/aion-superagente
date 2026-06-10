@@ -1,0 +1,24 @@
+#!/bin/sh
+# AION — pre-commit: formatea Rust automáticamente para que NUNCA llegue a CI un
+# commit sin formato (CI Rust ejecuta `cargo fmt --check`). Solo actúa si hay
+# archivos .rs en el "stage"; reformatea y los vuelve a añadir. Rápido y silencioso.
+
+# Asegura cargo en el PATH (algunos clientes Git no cargan el perfil del shell).
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+
+staged_rs=$(git diff --cached --name-only --diff-filter=ACM | grep '\.rs$')
+[ -z "$staged_rs" ] && exit 0
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-commit: cargo no está disponible; me salto el formateo." >&2
+  exit 0
+fi
+
+echo "pre-commit: formateando Rust (cargo fmt)…"
+cargo fmt --all
+
+# Re-añade solo los .rs que ya estaban en el stage (no arrastra cambios ajenos).
+echo "$staged_rs" | while IFS= read -r f; do
+  [ -f "$f" ] && git add "$f"
+done
+exit 0
