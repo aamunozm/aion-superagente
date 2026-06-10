@@ -1,6 +1,26 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import Link from "next/link";
 
 export default function Home() {
+  // Un SOLO CTA contextual: si ya empezaste (hay sesión), "Abrir chat"; si es la
+  // primera vez, "Empezar". Evita el "uno u otro" confuso de dos botones.
+  const [ready, setReady] = useState(false);
+  const [returning, setReturning] = useState(false);
+
+  useEffect(() => {
+    try {
+      setReturning(!!localStorage.getItem("aion_token"));
+    } catch {
+      /* sin acceso a storage */
+    }
+    setReady(true);
+  }, []);
+
+  const href = returning ? "/chat" : "/login";
+  const label = returning ? "Abrir chat" : "Empezar";
+
   return (
     <main className="min-h-screen flex flex-col items-center justify-center px-6 text-center">
       <div className="max-w-xl">
@@ -18,17 +38,21 @@ export default function Home() {
           Tu super-agente de IA que razona, recuerda y evoluciona — toda la
           cognición en tu dispositivo.
         </p>
-        <div className="flex gap-3 justify-center">
-          <Link href="/login" className="btn">
-            Empezar
-          </Link>
+        <div className="flex flex-col items-center gap-3">
+          {/* Botón principal único; invisible hasta saber el estado (evita parpadeo). */}
           <Link
-            href="/chat"
+            href={href}
             className="btn"
-            style={{ background: "transparent", color: "var(--text-1)", border: "1px solid var(--border-2)" }}
+            style={{ minWidth: 200, opacity: ready ? 1 : 0, transition: "opacity .15s" }}
           >
-            Abrir chat
+            {label}
           </Link>
+          {/* Si ya empezaste, un enlace secundario y discreto para reconfigurar. */}
+          {ready && returning && (
+            <Link href="/login" className="text-sm" style={{ color: "var(--text-3)" }}>
+              o volver a configurar
+            </Link>
+          )}
         </div>
       </div>
     </main>
