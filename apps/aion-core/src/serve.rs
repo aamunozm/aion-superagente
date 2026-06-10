@@ -186,6 +186,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
             get(credentials_list).post(credentials_set),
         )
         .route("/api/credentials/remove", post(credentials_remove))
+        .route("/api/confirm", post(confirm_decision))
         .layer(cors)
         .layer(
             TraceLayer::new_for_http()
@@ -580,6 +581,7 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::CredentialLoginTool::new(
             browser,
         )));
+        tools.register(Arc::new(crate::agent_tools::ConfirmActionTool::new()));
 
         let bus = EventBus::default();
 
@@ -618,9 +620,18 @@ async fn agent(
                 ctx.push_str(&format!("- {n}: {d}\n"));
             }
         }
+        // HUMAN-IN-THE-LOOP: confirmación del usuario antes de acciones sensibles
+        // (login, compra/pago). El callback emite un evento «confirm» por SSE y espera
+        // tu decisión (endpoint /api/confirm).
+        let confirm_tx = tx.clone();
+        let confirm: aion_orchestrator::ConfirmFn = std::sync::Arc::new(move |desc: String| {
+            let tx = confirm_tx.clone();
+            Box::pin(async move { request_confirmation(&tx, desc).await })
+        });
         let agent = ReActAgent::new(&*engine, &tools, bus.clone())
             .with_context(ctx)
-            .with_verify(true);
+            .with_verify(true)
+            .with_confirm(confirm);
         let result = agent.run(&body.task).await;
         fwd.abort();
 
@@ -706,6 +717,7 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::CredentialLoginTool::new(
             browser,
         )));
+        tools.register(Arc::new(crate::agent_tools::ConfirmActionTool::new()));
 
         let bus = EventBus::default();
         // Reenvía la actividad de CADA agente con su rol (jerarquía visible).
@@ -1261,6 +1273,53 @@ async fn library_remove(Json(body): Json<RemoveBody>) -> Json<serde_json::Value>
             serde_json::json!({ "ok": true, "removed": n, "total_chunks": lib.total_chunks() }),
         ),
         Err(e) => Json(serde_json::json!({ "error": e })),
+    }
+}
+
+// ── Human-in-the-loop: confirmaciones pendientes ────────────────────────────
+
+type Pending =
+    std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<bool>>>;
+
+fn pending_confirms() -> &'static Pending {
+    static P: std::sync::OnceLock<Pending> = std::sync::OnceLock::new();
+    P.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Pide confirmación al usuario: emite un evento «confirm» por SSE y espera su
+/// decisión (vía /api/confirm). Por seguridad, si no responde en 5 min → DENIEGA.
+async fn request_confirmation(tx: &tokio::sync::mpsc::Sender<Event>, desc: String) -> bool {
+    let id = uuid::Uuid::new_v4().to_string();
+    let (otx, orx) = tokio::sync::oneshot::channel();
+    pending_confirms().lock().unwrap().insert(id.clone(), otx);
+    let _ = tx
+        .send(
+            Event::default()
+                .data(serde_json::json!({ "kind": "confirm", "id": id, "text": desc }).to_string()),
+        )
+        .await;
+    match tokio::time::timeout(std::time::Duration::from_secs(300), orx).await {
+        Ok(Ok(approved)) => approved,
+        _ => {
+            pending_confirms().lock().unwrap().remove(&id);
+            false // timeout o canal caído → no ejecutar (seguro por defecto)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ConfirmDecision {
+    id: String,
+    approved: bool,
+}
+
+/// El usuario aprueba o rechaza una acción sensible pendiente.
+async fn confirm_decision(Json(b): Json<ConfirmDecision>) -> Json<serde_json::Value> {
+    if let Some(tx) = pending_confirms().lock().unwrap().remove(&b.id) {
+        let _ = tx.send(b.approved);
+        Json(serde_json::json!({ "ok": true }))
+    } else {
+        Json(serde_json::json!({ "ok": false, "error": "confirmación no encontrada o expirada" }))
     }
 }
 

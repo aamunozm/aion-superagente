@@ -64,6 +64,9 @@ const ES: Dict = {
   "chat.history": "Historial",
   "chat.noHistory": "Sin conversaciones todavía",
   "chat.untitled": "Sin título",
+  "chat.confirmTitle": "AION pide tu confirmación",
+  "chat.approve": "Aprobar",
+  "chat.reject": "Rechazar",
   "chat.send": "Enviar",
 };
 
@@ -120,6 +123,9 @@ const IT: Dict = {
   "chat.history": "Cronologia",
   "chat.noHistory": "Ancora nessuna conversazione",
   "chat.untitled": "Senza titolo",
+  "chat.confirmTitle": "AION chiede la tua conferma",
+  "chat.approve": "Approva",
+  "chat.reject": "Rifiuta",
   "chat.send": "Invia",
 };
 
@@ -176,6 +182,9 @@ const EN: Dict = {
   "chat.history": "History",
   "chat.noHistory": "No conversations yet",
   "chat.untitled": "Untitled",
+  "chat.confirmTitle": "AION needs your confirmation",
+  "chat.approve": "Approve",
+  "chat.reject": "Reject",
   "chat.send": "Send",
 };
 

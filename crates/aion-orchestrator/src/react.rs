@@ -6,6 +6,14 @@ use aion_kernel::events::{AionEvent, EventBus};
 use aion_kernel::traits::{GenerateRequest, LlmEngine};
 use aion_kernel::types::Message;
 use aion_kernel::Result;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+/// Callback de confirmación humana: recibe la descripción de la acción y devuelve
+/// `true` si el usuario la aprueba. Lo provee la capa HTTP (pide el OK por la UI).
+pub type ConfirmFn =
+    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
 
 /// Resultado de una ejecución del agente.
 #[derive(Debug, Clone)]
@@ -26,6 +34,8 @@ pub struct ReActAgent<'a> {
     /// Si verifica la respuesta final contra las observaciones reales de las
     /// herramientas (juez de groundedness) antes de devolverla. Anti-alucinación.
     verify: bool,
+    /// Confirmación humana para acciones sensibles (login, compra…). Opcional.
+    confirm: Option<ConfirmFn>,
 }
 
 impl<'a> ReActAgent<'a> {
@@ -38,12 +48,19 @@ impl<'a> ReActAgent<'a> {
             name: "aion".to_string(),
             context: None,
             verify: false,
+            confirm: None,
         }
     }
 
     /// Activa la verificación de la respuesta final (juez de groundedness).
     pub fn with_verify(mut self, verify: bool) -> Self {
         self.verify = verify;
+        self
+    }
+
+    /// Registra el callback de confirmación humana (acciones sensibles).
+    pub fn with_confirm(mut self, confirm: ConfirmFn) -> Self {
+        self.confirm = Some(confirm);
         self
     }
 
@@ -207,10 +224,25 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
             });
 
             let observation = match self.tools.get(&action) {
-                Some(tool) => match tool.run(input.trim()).await {
-                    Ok(out) => out,
-                    Err(e) => format!("error de herramienta: {e}"),
-                },
+                Some(tool) => {
+                    // HUMAN-IN-THE-LOOP: si la acción es sensible (login, compra…), pide
+                    // el OK del usuario antes de ejecutarla. Si la rechaza, no se ejecuta.
+                    let approved = match (tool.needs_confirm(input.trim()), &self.confirm) {
+                        (None, _) => true,
+                        (Some(desc), Some(confirm)) => confirm(desc).await,
+                        // Necesita confirmación pero no hay forma de pedirla → DENEGAR
+                        // (fail-closed: nunca ejecutar una acción sensible sin tu OK).
+                        (Some(_), None) => false,
+                    };
+                    if !approved {
+                        "❌ acción cancelada por el usuario (no se ejecutó).".to_string()
+                    } else {
+                        match tool.run(input.trim()).await {
+                            Ok(out) => out,
+                            Err(e) => format!("error de herramienta: {e}"),
+                        }
+                    }
+                }
                 None => format!("herramienta desconocida: '{action}'"),
             };
 

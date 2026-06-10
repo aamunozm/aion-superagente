@@ -9,6 +9,7 @@ import {
   crewStream,
   chatStream,
   chatReset,
+  confirmDecision,
   inboxList,
   inboxRead,
   libraryUpload,
@@ -82,6 +83,8 @@ export default function ChatPage() {
   const [convoId, setConvoId] = useState<string>("");
   const [convos, setConvos] = useState<ConvoMeta[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  // Confirmación humana pendiente (login, compra…): se muestra una tarjeta con OK/No.
+  const [pendingConfirm, setPendingConfirm] = useState<{ id: string; text: string } | null>(null);
   // Adjunto de imagen pendiente (se envía con el siguiente mensaje, vía visión).
   const [pendingImage, setPendingImage] = useState<{ name: string; b64: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -280,6 +283,7 @@ export default function ChatPage() {
             }));
           else if (ev.kind === "answer")
             update((t) => ({ ...t, answer: ev.text, meta: ev.steps ? `${ev.steps} ${ev.steps === 1 ? "paso" : "pasos"}` : undefined }));
+          else if (ev.kind === "confirm") setPendingConfirm({ id: ev.id, text: ev.text });
           else if (ev.kind === "error") update((t) => ({ ...t, answer: `⚠️ ${ev.text}` }));
           scroll();
         });
@@ -449,6 +453,34 @@ export default function ChatPage() {
         <div ref={endRef} />
       </div>
 
+      {pendingConfirm && (
+        <div
+          className="rounded-xl p-3 mb-1 flex items-center gap-3"
+          style={{ background: "var(--accent-subtle)", border: "1px solid var(--accent)" }}
+        >
+          <Icon name="shield" size={18} />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold" style={{ color: "var(--gold-deep)" }}>
+              {t("chat.confirmTitle")}
+            </p>
+            <p className="text-sm truncate" style={{ color: "var(--text-1)" }}>{pendingConfirm.text}</p>
+          </div>
+          <button
+            className="btn shrink-0"
+            onClick={() => { confirmDecision(pendingConfirm.id, true); setPendingConfirm(null); }}
+            style={{ background: "var(--accent)", color: "#04201f" }}
+          >
+            {t("chat.approve")}
+          </button>
+          <button
+            className="btn shrink-0"
+            onClick={() => { confirmDecision(pendingConfirm.id, false); setPendingConfirm(null); }}
+            style={{ background: "var(--surface-2)", color: "var(--text-2)" }}
+          >
+            {t("chat.reject")}
+          </button>
+        </div>
+      )}
       {pendingImage && (
         <div className="flex items-center gap-2 -mb-1">
           <span className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full"

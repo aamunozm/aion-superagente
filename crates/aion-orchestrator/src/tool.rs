@@ -14,6 +14,12 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     async fn run(&self, input: &str) -> Result<String, String>;
+    /// Si esta invocación requiere CONFIRMACIÓN del usuario (acción sensible: login,
+    /// compra/pago, algo irreversible), devuelve la descripción a mostrar. El bucle
+    /// del agente pedirá el OK antes de ejecutar (human-in-the-loop).
+    fn needs_confirm(&self, _input: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Registro de herramientas disponibles para el agente.

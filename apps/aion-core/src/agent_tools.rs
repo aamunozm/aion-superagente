@@ -627,6 +627,12 @@ impl Tool for CredentialLoginTool {
          contraseña: solo se rellena. Si no hay credenciales guardadas, pídele al usuario \
          que las añada en Ajustes → Credenciales (NUNCA pidas la contraseña por el chat)."
     }
+    fn needs_confirm(&self, input: &str) -> Option<String> {
+        let host = crate::credentials::normalize_host(input);
+        Some(format!(
+            "Iniciar sesión en «{host}» con tus credenciales guardadas"
+        ))
+    }
     async fn run(&self, input: &str) -> Result<String, String> {
         let host = crate::credentials::normalize_host(input);
         // get() solo lo llama el backend; el valor jamás se devuelve al agente.
@@ -646,6 +652,40 @@ impl Tool for CredentialLoginTool {
             "credenciales de «{host}» introducidas en el formulario (campos: {filled}). \
              Ahora pulsa el botón de iniciar sesión con browser_click."
         ))
+    }
+}
+
+/// Puerta de CONFIRMACIÓN para acciones sensibles (comprar, pagar, enviar, borrar,
+/// algo irreversible). El agente DEBE llamarla antes de hacerlas; el usuario aprueba
+/// o rechaza en la UI. Si aprueba, el agente procede; si no, se detiene.
+pub struct ConfirmActionTool;
+impl ConfirmActionTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for ConfirmActionTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[async_trait]
+impl Tool for ConfirmActionTool {
+    fn name(&self) -> &str {
+        "confirm_action"
+    }
+    fn description(&self) -> &str {
+        "Pide al USUARIO confirmación antes de una acción sensible o irreversible \
+         (comprar, pagar, enviar un formulario de pedido, borrar). Entrada: descripción \
+         clara de la acción y su coste (p. ej. \"comprar «Libro X» por 19,90€ en Amazon\"). \
+         Solo procede con la acción si esto devuelve «aprobado»."
+    }
+    fn needs_confirm(&self, input: &str) -> Option<String> {
+        Some(input.trim().to_string())
+    }
+    async fn run(&self, _input: &str) -> Result<String, String> {
+        // Si llegamos aquí, el usuario YA aprobó (el gate se evaluó antes de run).
+        Ok("aprobado por el usuario: procede con la acción.".into())
     }
 }
 

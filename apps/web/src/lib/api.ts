@@ -51,8 +51,18 @@ export type AgentEvent =
   | { kind: "action"; text: string; agent?: string }
   | { kind: "observation"; text: string; agent?: string }
   | { kind: "answer"; text: string; steps?: number; agent?: string }
+  | { kind: "confirm"; id: string; text: string }
   | { kind: "done" }
   | { kind: "error"; text: string };
+
+/** Aprueba o rechaza una acción sensible que AION pidió confirmar (HITL). */
+export async function confirmDecision(id: string, approved: boolean): Promise<void> {
+  await fetch(`${BRIDGE_URL}/api/confirm`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id, approved }),
+  }).catch(() => {});
+}
 
 /** Lee un cuerpo SSE y entrega cada evento `data:` parseado a `onEvent`. */
 async function readSse<T>(res: Response, onEvent: (e: T) => void): Promise<void> {
