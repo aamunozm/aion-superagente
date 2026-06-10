@@ -3,7 +3,10 @@
 yanked = "deny"
 
 [licenses]
-allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+# MPL-2.0 (copyleft por fichero, no infecta nuestro código) y CDLA-Permissive-2.0
+# (licencia de datos permisiva) las introduce wasmtime 45 vía deps; ambas son seguras
+# para un proyecto MIT/Apache.
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "MPL-2.0", "CDLA-Permissive-2.0"]
 confidence-threshold = 0.9
 
 [bans]
