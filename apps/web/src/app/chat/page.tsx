@@ -526,7 +526,7 @@ export default function ChatPage() {
           <span className="text-xs" style={{ color: "var(--text-3)" }}>se analizará al enviar (pregunta opcional)</span>
         </div>
       )}
-      <form onSubmit={send} className="py-4 flex gap-2 items-center border-t" style={{ borderColor: "var(--border)" }}>
+      <form onSubmit={send} className="py-4 flex gap-2 items-center border-t shrink-0" style={{ borderColor: "var(--border)" }}>
         <input
           ref={fileRef}
           type="file"

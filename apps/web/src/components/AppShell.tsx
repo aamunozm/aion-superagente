@@ -56,7 +56,7 @@ export default function AppShell({
   }
 
   return (
-    <div className="min-h-screen flex" style={{ background: "var(--bg)" }}>
+    <div className="h-screen overflow-hidden flex" style={{ background: "var(--bg)" }}>
       {/* ── SIDEBAR ─────────────────────────────────────────── */}
       <aside
         className="flex flex-col shrink-0 transition-all"
