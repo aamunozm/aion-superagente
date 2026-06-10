@@ -57,6 +57,14 @@ fn main() {
                         use std::os::unix::process::CommandExt;
                         ollama_cmd.process_group(0);
                     }
+                    // Windows: SIN ventana de consola. Sin esto, ollama (y sus runners
+                    // llama-server) heredan una consola y aparece una terminal negra.
+                    #[cfg(windows)]
+                    {
+                        use std::os::windows::process::CommandExt;
+                        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                        ollama_cmd.creation_flags(CREATE_NO_WINDOW);
+                    }
                     match ollama_cmd.spawn()
                     {
                         Ok(child) => {

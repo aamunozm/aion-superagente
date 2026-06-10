@@ -1760,9 +1760,22 @@ fn run_models_ensure() {
     let embed = std::env::var("AION_EMBED_MODEL").unwrap_or_else(|_| "bge-m3".to_string());
     let embed: &str = &embed;
 
+    // Windows: ejecuta ollama SIN abrir una ventana de consola negra.
+    fn no_window(cmd: Command) -> Command {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let mut cmd = cmd;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            return cmd;
+        }
+        #[cfg(not(windows))]
+        cmd
+    }
+
     // OLLAMA_HOST se hereda del proceso padre (lo fija el shell de escritorio).
     let list = || -> Option<String> {
-        Command::new(&bin)
+        no_window(Command::new(&bin))
             .arg("list")
             .output()
             .ok()
@@ -1798,7 +1811,7 @@ fn run_models_ensure() {
     );
 
     if need_embed {
-        let ok = Command::new(&bin)
+        let ok = no_window(Command::new(&bin))
             .args(["pull", embed])
             .status()
             .map(|s| s.success())
@@ -1809,7 +1822,7 @@ fn run_models_ensure() {
     }
 
     if need_chat {
-        let mut cmd = Command::new(&bin);
+        let mut cmd = no_window(Command::new(&bin));
         cmd.args(["create", CHAT]);
         if !modelfile.is_empty() {
             cmd.args(["-f", &modelfile]);
