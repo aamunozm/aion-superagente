@@ -35,4 +35,18 @@ echo "==> verificando runtime Ollama vendorizado (debe existir y ser universal)"
 echo "==> construyendo .app UNIVERSAL"
 cd apps/desktop
 cargo tauri build --target "$UNI" --bundles app
-echo "==> .app universal en target/$UNI/release/bundle/macos/AION.app"
+
+# Firma con la identidad ESTABLE propia ("AION Local Signing") si está en el
+# llavero: así el hash de firma no cambia entre builds y macOS CONSERVA los
+# permisos (Grabación de pantalla / Accesibilidad) tras cada actualización.
+# Si no existe (CI u otra máquina), cae a ad-hoc — sigue funcionando.
+APP="target/$UNI/release/bundle/macos/AION.app"
+if security find-identity -p codesigning 2>/dev/null | grep -q "AION Local Signing"; then
+  echo "==> firmando con identidad estable 'AION Local Signing' (permisos persistentes)"
+  codesign --force --deep --sign "AION Local Signing" "$APP"
+else
+  echo "==> identidad estable no encontrada → firma ad-hoc (los permisos se reconceden por versión)"
+  codesign --force --deep --sign - "$APP"
+fi
+codesign -dvv "$APP" 2>&1 | grep -E "Authority=|Signature=" | head -2 || true
+echo "==> .app universal en $APP"
