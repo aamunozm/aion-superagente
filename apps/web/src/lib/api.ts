@@ -79,6 +79,12 @@ async function readSse<T>(res: Response, onEvent: (e: T) => void): Promise<void>
 }
 
 /** Chat con streaming de razonamiento + respuesta. */
+/** Idioma elegido por el usuario (para que AION responda en él). */
+function lang(): string {
+  if (typeof window === "undefined") return "es";
+  return localStorage.getItem("aion_lang") || "es";
+}
+
 export async function chatStream(
   prompt: string,
   think: boolean,
@@ -87,7 +93,7 @@ export async function chatStream(
   const res = await fetch(`${BRIDGE_URL}/api/chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt, think }),
+    body: JSON.stringify({ prompt, think, lang: lang() }),
   });
   await readSse(res, onEvent);
 }
@@ -100,7 +106,7 @@ export async function agentStream(
   const res = await fetch(`${BRIDGE_URL}/api/agent`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ task }),
+    body: JSON.stringify({ task, lang: lang() }),
   });
   await readSse(res, onEvent);
 }
@@ -113,7 +119,7 @@ export async function crewStream(
   const res = await fetch(`${BRIDGE_URL}/api/crew`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ task }),
+    body: JSON.stringify({ task, lang: lang() }),
   });
   await readSse(res, onEvent);
 }

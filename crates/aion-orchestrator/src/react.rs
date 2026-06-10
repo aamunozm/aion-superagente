@@ -118,14 +118,15 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
              NO sirve para archivos, web ni texto. No la uses fuera de eso.\n\
              • Si una herramienta falla o falta una capacidad real, dilo con honestidad; no \
              improvises un resultado.\n\
+             • IDIOMA: responde en el idioma que se te indique en el contexto (por defecto \
+             español); si el usuario está en italiano o inglés, responde en ese idioma.\n\
              • AUTOCRÍTICA Y CALIDAD: tras CADA observación, evalúa si REALMENTE responde la \
              tarea. Si el resultado es irrelevante, vacío o de baja calidad (p. ej. una \
              búsqueda que solo trae una definición genérica), NO te conformes ni concluyas con \
              eso: PRUEBA OTRA herramienta o fuente de las que tienes (mira la lista de arriba) \
              o reformula la entrada. Tienes varias herramientas: ELIGE la más adecuada para \
              cada tarea y CAMBIA de enfoque si la primera no sirve, antes de dar una respuesta \
-             pobre. Intenta al menos un enfoque alternativo antes de rendirte.\n\
-             Responde en español.{context}",
+             pobre. Intenta al menos un enfoque alternativo antes de rendirte.{context}",
             tools = self.tools.describe(),
             context = match &self.context {
                 Some(c) => format!(

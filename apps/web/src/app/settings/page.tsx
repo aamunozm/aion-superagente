@@ -2,8 +2,10 @@
 
 import { useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
+import { LANGS, useT } from "@/lib/i18n";
 
 export default function SettingsPage() {
+  const { t, lang, setLang } = useT();
   const [email, setEmail] = useState<string | null>(null);
   const [dark, setDark] = useState(false);
 
@@ -22,45 +24,79 @@ export default function SettingsPage() {
   }
 
   return (
-    <AppShell title="Ajustes">
+    <AppShell title={t("nav.settings")}>
       <div className="max-w-2xl mx-auto px-6 py-8 flex flex-col gap-6">
         <div className="card">
           <h2 className="t-section mb-3" style={{ color: "var(--text-2)" }}>
-            Cuenta
+            {t("settings.account")}
           </h2>
           <p className="text-sm" style={{ color: "var(--text-2)" }}>
             Email: <strong>{email ?? "—"}</strong>
           </p>
           <p className="text-xs mt-1" style={{ color: "var(--text-3)" }}>
-            Tu cuenta y tus datos viven solo en este dispositivo.
+            {t("settings.localNote")}
           </p>
+        </div>
+
+        {/* ── Idioma (ES / IT / EN) ── */}
+        <div className="card">
+          <h2 className="t-section mb-1" style={{ color: "var(--text-2)" }}>
+            {t("settings.language")}
+          </h2>
+          <p className="text-sm mb-3" style={{ color: "var(--text-3)" }}>
+            {t("settings.languageNote")}
+          </p>
+          <div className="flex gap-2">
+            {LANGS.map((l) => {
+              const active = lang === l.code;
+              return (
+                <button
+                  key={l.code}
+                  onClick={() => setLang(l.code)}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm transition-all"
+                  style={{
+                    background: active ? "var(--accent-subtle)" : "var(--surface-2)",
+                    color: active ? "var(--gold-deep)" : "var(--text-2)",
+                    fontWeight: active ? 600 : 500,
+                    border: `1px solid ${active ? "var(--accent)" : "transparent"}`,
+                  }}
+                >
+                  <span
+                    className="text-[10px] font-bold px-1.5 py-0.5 rounded"
+                    style={{ background: "var(--surface-1)", color: "var(--text-3)" }}
+                  >
+                    {l.flag}
+                  </span>
+                  {l.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div className="card flex items-center justify-between">
           <div>
             <h2 className="t-section" style={{ color: "var(--text-2)" }}>
-              Apariencia
+              {t("settings.appearance")}
             </h2>
             <p className="text-sm mt-1" style={{ color: "var(--text-3)" }}>
-              Tema {dark ? "oscuro" : "claro"}
+              {t("settings.themeIs")} {dark ? t("settings.dark") : t("settings.light")}
             </p>
           </div>
           <button className="btn" onClick={toggleTheme}>
-            Cambiar a {dark ? "claro" : "oscuro"}
+            {t("settings.switchTo")} {dark ? t("settings.light") : t("settings.dark")}
           </button>
         </div>
 
         <div className="card">
           <h2 className="t-section mb-2" style={{ color: "var(--text-2)" }}>
-            Gobernanza del agente
+            {t("settings.governance")}
           </h2>
           <p className="text-sm" style={{ color: "var(--text-2)" }}>
-            Postura por defecto: <strong>Conservadora</strong> (acciones que escriben, envían,
-            borran o gastan piden tu confirmación). Papelera reversible 30 días, kill switch y
-            registro de auditoría activos.
+            {t("settings.governanceBody")}
           </p>
           <p className="text-xs mt-2" style={{ color: "var(--text-3)" }}>
-            La configuración fina se gestiona en <code>~/Library/Application Support/AION/policy.json</code>.
+            <code>~/Library/Application Support/AION/policy.json</code>
           </p>
         </div>
       </div>

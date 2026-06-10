@@ -2,10 +2,12 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useT } from "@/lib/i18n";
 
 export default function Home() {
   // Un SOLO CTA contextual: si ya empezaste (hay sesión), "Abrir chat"; si es la
   // primera vez, "Empezar". Evita el "uno u otro" confuso de dos botones.
+  const { t } = useT();
   const [ready, setReady] = useState(false);
   const [returning, setReturning] = useState(false);
 
@@ -19,7 +21,7 @@ export default function Home() {
   }, []);
 
   const href = returning ? "/chat" : "/login";
-  const label = returning ? "Abrir chat" : "Empezar";
+  const label = returning ? t("home.open") : t("home.start");
 
   return (
     <main className="min-h-screen flex flex-col items-center justify-center px-6 text-center">
@@ -29,14 +31,13 @@ export default function Home() {
           style={{ background: "var(--accent-subtle)", color: "var(--accent)" }}
         >
           <span className="w-2 h-2 rounded-full" style={{ background: "var(--accent)" }} />
-          local-first · privado · auto-evolutivo
+          {t("home.badge")}
         </div>
         <h1 className="font-display text-5xl font-bold mb-4" style={{ color: "var(--text-1)" }}>
           AION
         </h1>
         <p className="text-lg mb-8" style={{ color: "var(--text-2)" }}>
-          Tu super-agente de IA que razona, recuerda y evoluciona — toda la
-          cognición en tu dispositivo.
+          {t("home.subtitle")}
         </p>
         <div className="flex flex-col items-center gap-3">
           {/* Botón principal único; invisible hasta saber el estado (evita parpadeo). */}
@@ -50,7 +51,7 @@ export default function Home() {
           {/* Si ya empezaste, un enlace secundario y discreto para reconfigurar. */}
           {ready && returning && (
             <Link href="/login" className="text-sm" style={{ color: "var(--text-3)" }}>
-              o volver a configurar
+              {t("home.reconfigure")}
             </Link>
           )}
         </div>

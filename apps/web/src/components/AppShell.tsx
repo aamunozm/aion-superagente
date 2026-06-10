@@ -4,23 +4,24 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import Icon from "./Icon";
+import { useT } from "@/lib/i18n";
 
-type NavItem = { href: string; label: string; icon: "chat" | "folder" | "tools" | "memory" };
-type NavGroup = { title: string; items: NavItem[] };
+type NavItem = { href: string; key: string; icon: "chat" | "folder" | "tools" | "memory" };
+type NavGroup = { titleKey: string; items: NavItem[] };
 
 const GROUPS: NavGroup[] = [
   {
-    title: "Principal",
+    titleKey: "group.main",
     items: [
-      { href: "/chat", label: "Chat", icon: "chat" },
-      { href: "/projects", label: "Proyectos", icon: "folder" },
+      { href: "/chat", key: "nav.chat", icon: "chat" },
+      { href: "/projects", key: "nav.projects", icon: "folder" },
     ],
   },
   {
-    title: "Inteligencia",
+    titleKey: "group.intelligence",
     items: [
-      { href: "/tools", label: "Herramientas", icon: "tools" },
-      { href: "/memory", label: "Memoria", icon: "memory" },
+      { href: "/tools", key: "nav.tools", icon: "tools" },
+      { href: "/memory", key: "nav.memory", icon: "memory" },
     ],
   },
 ];
@@ -38,6 +39,7 @@ export default function AppShell({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  const { t } = useT();
   const [email, setEmail] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(false);
 
@@ -76,7 +78,7 @@ export default function AppShell({
             <div className="leading-tight">
               <div className="font-display font-bold text-sm">AION</div>
               <div className="text-[10px]" style={{ color: "var(--text-3)" }}>
-                super-agente local
+                {t("brand.tagline")}
               </div>
             </div>
           )}
@@ -92,17 +94,18 @@ export default function AppShell({
         {/* Navegación agrupada por secciones */}
         <nav className="flex flex-col gap-4 px-3 mt-3">
           {GROUPS.map((group) => (
-            <div key={group.title} className="flex flex-col gap-1">
+            <div key={group.titleKey} className="flex flex-col gap-1">
               {!collapsed && (
                 <span
                   className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-[0.12em]"
                   style={{ color: "var(--text-3)" }}
                 >
-                  {group.title}
+                  {t(group.titleKey)}
                 </span>
               )}
               {group.items.map((item) => {
                 const active = pathname === item.href;
+                const label = t(item.key);
                 return (
                   <Link
                     key={item.href}
@@ -113,10 +116,10 @@ export default function AppShell({
                       color: active ? "var(--gold-deep)" : "var(--text-2)",
                       fontWeight: active ? 600 : 500,
                     }}
-                    title={item.label}
+                    title={label}
                   >
                     <Icon name={item.icon} size={18} className="shrink-0" />
-                    {!collapsed && <span>{item.label}</span>}
+                    {!collapsed && <span>{label}</span>}
                   </Link>
                 );
               })}
@@ -134,7 +137,7 @@ export default function AppShell({
             style={{ color: "var(--text-2)" }}
           >
             <Icon name="settings" size={18} />
-            {!collapsed && <span>Ajustes</span>}
+            {!collapsed && <span>{t("nav.settings")}</span>}
           </Link>
           <div
             className="mt-2 flex items-center gap-2 px-3 py-2 rounded-lg"
@@ -149,14 +152,14 @@ export default function AppShell({
             {!collapsed && (
               <div className="min-w-0 flex-1">
                 <div className="text-xs truncate" style={{ color: "var(--text-2)" }}>
-                  {email ?? "invitado"}
+                  {email ?? t("account.guest")}
                 </div>
                 <button
                   onClick={logout}
                   className="text-[11px]"
                   style={{ color: "var(--text-3)" }}
                 >
-                  Cerrar sesión
+                  {t("account.logout")}
                 </button>
               </div>
             )}

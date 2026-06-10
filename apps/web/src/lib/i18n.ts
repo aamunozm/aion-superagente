@@ -1,0 +1,153 @@
+"use client";
+
+import { useEffect, useState } from "react";
+
+export type Lang = "es" | "it" | "en";
+export const LANGS: { code: Lang; label: string; flag: string }[] = [
+  { code: "es", label: "Español", flag: "ES" },
+  { code: "it", label: "Italiano", flag: "IT" },
+  { code: "en", label: "English", flag: "EN" },
+];
+
+type Dict = Record<string, string>;
+
+const ES: Dict = {
+  "nav.chat": "Chat",
+  "nav.projects": "Proyectos",
+  "nav.tools": "Herramientas",
+  "nav.memory": "Memoria",
+  "nav.settings": "Ajustes",
+  "group.main": "Principal",
+  "group.intelligence": "Inteligencia",
+  "brand.tagline": "super-agente local",
+  "account.logout": "Cerrar sesión",
+  "account.guest": "invitado",
+  "settings.account": "Cuenta",
+  "settings.localNote": "Tu cuenta y tus datos viven solo en este dispositivo.",
+  "settings.appearance": "Apariencia",
+  "settings.themeIs": "Tema",
+  "settings.light": "claro",
+  "settings.dark": "oscuro",
+  "settings.switchTo": "Cambiar a",
+  "settings.language": "Idioma",
+  "settings.languageNote": "Idioma de la interfaz y de las respuestas de AION.",
+  "settings.governance": "Gobernanza del agente",
+  "settings.governanceBody":
+    "Postura por defecto: Conservadora (acciones que escriben, envían, borran o gastan piden tu confirmación). Papelera reversible 30 días, kill switch y registro de auditoría activos.",
+  "home.badge": "local-first · privado · auto-evolutivo",
+  "home.subtitle":
+    "Tu super-agente de IA que razona, recuerda y evoluciona — toda la cognición en tu dispositivo.",
+  "home.start": "Empezar",
+  "home.open": "Abrir chat",
+  "home.reconfigure": "o volver a configurar",
+  "chat.modeChat": "Chat",
+  "chat.modeAgent": "Agente",
+  "chat.modeCrew": "Equipo",
+  "chat.placeholderChat": "Pregunta a AION…",
+  "chat.placeholderAgent": "Tarea para el agente…",
+  "chat.placeholderCrew": "Tarea para el equipo…",
+  "chat.send": "Enviar",
+};
+
+const IT: Dict = {
+  "nav.chat": "Chat",
+  "nav.projects": "Progetti",
+  "nav.tools": "Strumenti",
+  "nav.memory": "Memoria",
+  "nav.settings": "Impostazioni",
+  "group.main": "Principale",
+  "group.intelligence": "Intelligenza",
+  "brand.tagline": "super-agente locale",
+  "account.logout": "Esci",
+  "account.guest": "ospite",
+  "settings.account": "Account",
+  "settings.localNote": "Il tuo account e i tuoi dati restano solo su questo dispositivo.",
+  "settings.appearance": "Aspetto",
+  "settings.themeIs": "Tema",
+  "settings.light": "chiaro",
+  "settings.dark": "scuro",
+  "settings.switchTo": "Passa a",
+  "settings.language": "Lingua",
+  "settings.languageNote": "Lingua dell'interfaccia e delle risposte di AION.",
+  "settings.governance": "Governance dell'agente",
+  "settings.governanceBody":
+    "Postura predefinita: Conservativa (le azioni che scrivono, inviano, eliminano o spendono richiedono la tua conferma). Cestino reversibile 30 giorni, kill switch e registro di audit attivi.",
+  "home.badge": "local-first · privato · auto-evolutivo",
+  "home.subtitle":
+    "Il tuo super-agente IA che ragiona, ricorda ed evolve — tutta la cognizione sul tuo dispositivo.",
+  "home.start": "Inizia",
+  "home.open": "Apri chat",
+  "home.reconfigure": "o riconfigura",
+  "chat.modeChat": "Chat",
+  "chat.modeAgent": "Agente",
+  "chat.modeCrew": "Squadra",
+  "chat.placeholderChat": "Chiedi ad AION…",
+  "chat.placeholderAgent": "Compito per l'agente…",
+  "chat.placeholderCrew": "Compito per la squadra…",
+  "chat.send": "Invia",
+};
+
+const EN: Dict = {
+  "nav.chat": "Chat",
+  "nav.projects": "Projects",
+  "nav.tools": "Tools",
+  "nav.memory": "Memory",
+  "nav.settings": "Settings",
+  "group.main": "Main",
+  "group.intelligence": "Intelligence",
+  "brand.tagline": "local super-agent",
+  "account.logout": "Sign out",
+  "account.guest": "guest",
+  "settings.account": "Account",
+  "settings.localNote": "Your account and data live only on this device.",
+  "settings.appearance": "Appearance",
+  "settings.themeIs": "Theme",
+  "settings.light": "light",
+  "settings.dark": "dark",
+  "settings.switchTo": "Switch to",
+  "settings.language": "Language",
+  "settings.languageNote": "Interface language and the language AION replies in.",
+  "settings.governance": "Agent governance",
+  "settings.governanceBody":
+    "Default posture: Conservative (actions that write, send, delete or spend ask for your confirmation). 30-day reversible trash, kill switch and audit log active.",
+  "home.badge": "local-first · private · self-evolving",
+  "home.subtitle":
+    "Your AI super-agent that reasons, remembers and evolves — all cognition on your device.",
+  "home.start": "Get started",
+  "home.open": "Open chat",
+  "home.reconfigure": "or reconfigure",
+  "chat.modeChat": "Chat",
+  "chat.modeAgent": "Agent",
+  "chat.modeCrew": "Team",
+  "chat.placeholderChat": "Ask AION…",
+  "chat.placeholderAgent": "Task for the agent…",
+  "chat.placeholderCrew": "Task for the team…",
+  "chat.send": "Send",
+};
+
+const DICTS: Record<Lang, Dict> = { es: ES, it: IT, en: EN };
+
+export function getLang(): Lang {
+  if (typeof window === "undefined") return "es";
+  const v = localStorage.getItem("aion_lang");
+  return v === "it" || v === "en" || v === "es" ? v : "es";
+}
+
+export function setLang(l: Lang) {
+  localStorage.setItem("aion_lang", l);
+  document.documentElement.lang = l;
+  window.dispatchEvent(new Event("aion-lang"));
+}
+
+/** Hook reactivo: devuelve el idioma actual, un traductor t() y el setter. */
+export function useT() {
+  const [lang, setL] = useState<Lang>("es");
+  useEffect(() => {
+    setL(getLang());
+    const h = () => setL(getLang());
+    window.addEventListener("aion-lang", h);
+    return () => window.removeEventListener("aion-lang", h);
+  }, []);
+  const t = (key: string) => DICTS[lang][key] ?? ES[key] ?? key;
+  return { lang, t, setLang };
+}

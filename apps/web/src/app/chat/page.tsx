@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
+import { useT } from "@/lib/i18n";
 import {
   agentStream,
   crewStream,
@@ -43,6 +44,7 @@ const STEP_STYLE: Record<Step["kind"], { icon: React.ComponentProps<typeof Icon>
 };
 
 export default function ChatPage() {
+  const { t } = useT();
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<Mode>("agent");
   const [think, setThink] = useState(true);
@@ -218,7 +220,7 @@ export default function ChatPage() {
   }
 
   return (
-    <AppShell title="Chat">
+    <AppShell title={t("nav.chat")}>
       <div className="flex flex-col h-full max-w-4xl mx-auto w-full px-6">
       <div className="flex items-center gap-2 py-3 shrink-0">
         <span className="text-xs" style={{ color: "var(--text-3)" }}>
@@ -235,7 +237,7 @@ export default function ChatPage() {
                 color: mode === m ? "var(--primary-contrast)" : "var(--text-2)",
               }}
             >
-              {m === "chat" ? "Chat" : m === "agent" ? "Agente" : "Equipo"}
+              {m === "chat" ? t("chat.modeChat") : m === "agent" ? t("chat.modeAgent") : t("chat.modeCrew")}
             </button>
           ))}
         </div>
@@ -375,12 +377,12 @@ export default function ChatPage() {
         )}
         <input
           className="input"
-          placeholder={mode === "chat" ? "Pregunta a AION…" : mode === "crew" ? "Tarea para el equipo…" : "Tarea para el agente…"}
+          placeholder={mode === "chat" ? t("chat.placeholderChat") : mode === "crew" ? t("chat.placeholderCrew") : t("chat.placeholderAgent")}
           value={input}
           onChange={(e) => setInput(e.target.value)}
         />
         <button className="btn shrink-0" disabled={busy}>
-          {busy ? "…" : "Enviar"}
+          {busy ? "…" : t("chat.send")}
         </button>
       </form>
       </div>

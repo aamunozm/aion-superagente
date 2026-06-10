@@ -67,6 +67,17 @@ struct ChatBody {
     prompt: String,
     #[serde(default)]
     think: bool,
+    #[serde(default)]
+    lang: Option<String>,
+}
+
+/// Directiva de idioma de RESPUESTA según el ajuste del usuario (es/it/en).
+fn lang_directive(lang: &Option<String>) -> String {
+    match lang.as_deref() {
+        Some("it") => "Responde SIEMPRE en italiano.".into(),
+        Some("en") => "Always respond in English.".into(),
+        _ => "Responde SIEMPRE en español.".into(),
+    }
 }
 
 /// Arranca el puente HTTP en la dirección indicada.
@@ -381,8 +392,9 @@ async fn chat(
         None => String::new(),
     };
     let self_ctx = format!(
-        "{}\n\n{}{}{}{}{}",
+        "{}\n\n{}\n\n{}{}{}{}{}",
         self_awareness_prompt(),
+        lang_directive(&body.lang),
         crate::prompts::persona(&mode),
         empathy_block,
         think_note,
@@ -464,6 +476,8 @@ async fn chat(
 #[derive(Deserialize)]
 struct AgentBody {
     task: String,
+    #[serde(default)]
+    lang: Option<String>,
 }
 
 /// Agente ReAct con herramientas. Emite por SSE los pasos (thought/action/
@@ -569,7 +583,8 @@ async fn agent(
         // Aterriza al agente en lo que YA SABE: conocimiento relevante a la tarea
         // + catálogo de skills que se ha forjado. Así aplica su saber y sus
         // herramientas para hacerlo mejor (autónomo + acumulativo).
-        let mut ctx = grounding_for_agent(&*engine, &body.task).await;
+        let mut ctx = format!("{}\n", lang_directive(&body.lang));
+        ctx.push_str(&grounding_for_agent(&*engine, &body.task).await);
         let skills = crate::skill_store::catalog();
         if !skills.is_empty() {
             ctx.push_str("\nSkills que ya te has forjado (úsalas con skill_invoke si aplican):\n");
@@ -686,7 +701,8 @@ async fn crew(
         });
 
         let orchestrator = aion_orchestrator::Orchestrator::new(&*engine, &tools, bus.clone());
-        let result = orchestrator.run(&body.task).await;
+        let task = format!("{}\n\n{}", lang_directive(&body.lang), body.task);
+        let result = orchestrator.run(&task).await;
         fwd.abort();
 
         let final_event = match result {
