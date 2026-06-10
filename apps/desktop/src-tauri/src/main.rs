@@ -117,6 +117,13 @@ fn main() {
             }
 
             *app.state::<Sidecars>().tauri.lock().unwrap() = tauri_children;
+
+            // Abrir MAXIMIZADA para aprovechar todo el espacio. El `maximized: true`
+            // del tauri.conf.json no es fiable en el primer arranque (macOS lo ignora
+            // a menudo cuando hay width/height + center); forzarlo aquí sí funciona.
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.maximize();
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
