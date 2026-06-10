@@ -116,6 +116,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/library", get(library_list))
         .route("/api/library/ingest", post(library_ingest))
         .route("/api/library/upload", post(library_upload))
+        .route("/api/library/remove", post(library_remove))
         .route("/api/library/ask", post(library_ask))
         .route("/api/vision", post(vision))
         .layer(cors)
@@ -949,19 +950,35 @@ async fn library_upload(Json(body): Json<UploadBody>) -> Json<serde_json::Value>
         Ok(b) => b,
         Err(e) => return Json(serde_json::json!({ "error": format!("base64 inválido: {e}") })),
     };
-    // Nombre seguro (sin separadores de ruta) en el directorio temporal.
+    // Nombre seguro (sin separadores de ruta). El temporal lleva prefijo único, pero
+    // la FUENTE guardada es el nombre original del libro (UX limpia + borrado correcto).
     let safe = body.filename.replace(['/', '\\'], "_");
     let tmp = std::env::temp_dir().join(format!("aion_upload_{safe}"));
     if let Err(e) = std::fs::write(&tmp, &bytes) {
         return Json(serde_json::json!({ "error": format!("no pude guardar el archivo: {e}") }));
     }
     let mut lib = crate::library::Library::open(crate::knowledge_path());
-    let result = lib.ingest_file(&body.domain, &tmp).await;
+    let result = lib.ingest_file_as(&body.domain, &safe, &tmp).await;
     let _ = std::fs::remove_file(&tmp);
     match result {
         Ok(n) => Json(serde_json::json!({
             "ok": true, "passages": n, "source": safe, "total_chunks": lib.total_chunks()
         })),
+        Err(e) => Json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct RemoveBody {
+    domain: String,
+    source: String,
+}
+
+/// Elimina un documento de la biblioteca (todos sus pasajes).
+async fn library_remove(Json(body): Json<RemoveBody>) -> Json<serde_json::Value> {
+    let mut lib = crate::library::Library::open(crate::knowledge_path());
+    match lib.remove(&body.domain, &body.source) {
+        Ok(n) => Json(serde_json::json!({ "ok": true, "removed": n, "total_chunks": lib.total_chunks() })),
         Err(e) => Json(serde_json::json!({ "error": e })),
     }
 }

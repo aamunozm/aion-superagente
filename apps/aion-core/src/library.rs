@@ -79,6 +79,19 @@ impl Library {
         self.ingest_text(domain, &source, &text).await
     }
 
+    /// Como `ingest_file` pero con un nombre de fuente EXPLÍCITO (p. ej. para subidas
+    /// desde la UI, donde el archivo se guarda en un temporal pero queremos conservar
+    /// el nombre original del libro).
+    pub async fn ingest_file_as(
+        &mut self,
+        domain: &str,
+        source: &str,
+        file: &Path,
+    ) -> Result<usize, String> {
+        let text = extract_text(file)?;
+        self.ingest_text(domain, source, &text).await
+    }
+
     /// Ingesta texto plano bajo (dominio, fuente). Reemplaza si ya existía.
     pub async fn ingest_text(
         &mut self,
@@ -113,6 +126,19 @@ impl Library {
         }
         self.persist()?;
         Ok(added)
+    }
+
+    /// Elimina un documento (todos sus pasajes) por dominio+fuente. Devuelve cuántos
+    /// pasajes se borraron.
+    pub fn remove(&mut self, domain: &str, source: &str) -> Result<usize, String> {
+        let before = self.chunks.len();
+        self.chunks
+            .retain(|c| !(c.domain == domain && c.source == source));
+        let removed = before - self.chunks.len();
+        if removed > 0 {
+            self.persist()?;
+        }
+        Ok(removed)
     }
 
     /// Busca los `k` pasajes más relevantes (opcionalmente dentro de un dominio).

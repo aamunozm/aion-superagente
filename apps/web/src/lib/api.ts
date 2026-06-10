@@ -136,6 +136,34 @@ export async function libraryUpload(
   return data;
 }
 
+export type LibraryDoc = { domain: string; source: string; chunks: number };
+
+/** Lista los documentos de la biblioteca (agrupados por dominio/fuente). */
+export async function libraryList(): Promise<{ total_chunks: number; documents: LibraryDoc[] }> {
+  return jsonCall(`/api/library`);
+}
+
+/** Elimina un documento de la biblioteca. */
+export async function libraryRemove(domain: string, source: string): Promise<{ removed: number }> {
+  return jsonCall(`/api/library/remove`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ domain, source }),
+  });
+}
+
+/** Pregunta a la biblioteca: respuesta fundamentada con fuentes. */
+export async function libraryAsk(
+  query: string,
+  domain?: string,
+): Promise<{ answer: string; sources: { n: number; domain: string; source: string; idx: number; score: number }[] }> {
+  return jsonCall(`/api/library/ask`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ query, domain }),
+  });
+}
+
 /** Analiza una imagen adjunta con visión (gemma multimodal, local). */
 export async function visionAsk(prompt: string, imageB64: string): Promise<string> {
   const res = await fetch(`${BRIDGE_URL}/api/vision`, {
