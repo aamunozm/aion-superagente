@@ -10,7 +10,7 @@
 mod driver;
 mod html;
 
-pub use driver::{BrowserDriver, ChromiumoxideDriver, PageView};
+pub use driver::{BrowserDriver, ChromiumoxideDriver, El, PageView, Snapshot};
 
 use aion_kernel::{AionError, Result};
 use std::time::Duration;

@@ -413,8 +413,39 @@ impl Tool for LibrarySearchTool {
 
 // ── Navegador agéntico real (Chrome headless vía CDP) ───────────────────────
 
-/// Abre una página en un navegador REAL (ejecuta JavaScript) y devuelve título +
-/// texto visible. Mejor que web_fetch para sitios dinámicos (apps, JS, paneles).
+/// Formatea una instantánea de accesibilidad para el LLM: texto visible + lista de
+/// elementos interactivos NUMERADOS (el agente actúa por número, no por selector CSS).
+fn format_snapshot(s: &aion_browser::Snapshot) -> String {
+    let mut out = format!("[{}] {}\n{}\n", s.view.title, s.view.url, s.view.text);
+    if s.elements.is_empty() {
+        out.push_str("\n(sin elementos interactivos detectados)");
+        return out;
+    }
+    out.push_str("\nElementos interactivos (usa el número con browser_click / browser_type):\n");
+    for e in &s.elements {
+        let name = if e.name.is_empty() {
+            "(sin etiqueta)"
+        } else {
+            &e.name
+        };
+        out.push_str(&format!("[{}] {} «{}»\n", e.ref_id, e.kind, name));
+    }
+    out
+}
+
+/// Convierte la entrada del agente (un NÚMERO de ref, o un selector CSS) en un
+/// selector usable por el driver. Un número → [data-aion-ref="N"].
+fn resolve_target(input: &str) -> String {
+    let t = input.trim();
+    if t.chars().all(|c| c.is_ascii_digit()) && !t.is_empty() {
+        format!("[data-aion-ref=\"{t}\"]")
+    } else {
+        t.to_string()
+    }
+}
+
+/// Abre una URL en un navegador REAL (ejecuta JS) y devuelve texto + elementos
+/// interactivos numerados (snapshot de accesibilidad).
 pub struct BrowserOpenTool {
     driver: Arc<dyn BrowserDriver>,
 }
@@ -429,21 +460,22 @@ impl Tool for BrowserOpenTool {
         "browser_open"
     }
     fn description(&self) -> &str {
-        "Abre una URL en un navegador REAL (con JavaScript) y devuelve el título y el \
-         texto visible de la página. Úsalo para webs dinámicas o cuando vayas a \
-         interactuar (luego browser_click / browser_type / browser_read). Entrada: la URL."
+        "Abre una URL en un navegador REAL (con JavaScript) y devuelve el texto visible \
+         MÁS la lista de elementos interactivos numerados. Úsalo para webs dinámicas o \
+         para interactuar (luego browser_click / browser_type usando esos números). \
+         Entrada: la URL."
     }
     async fn run(&self, input: &str) -> Result<String, String> {
-        let v = self
-            .driver
+        self.driver
             .open(input.trim())
             .await
             .map_err(|e| e.to_string())?;
-        Ok(format!("[{}] {}\n{}", v.title, v.url, v.text))
+        let s = self.driver.snapshot().await.map_err(|e| e.to_string())?;
+        Ok(format_snapshot(&s))
     }
 }
 
-/// Re-lee la página abierta actualmente (tras un clic o que cargue contenido).
+/// Re-lee la página + sus elementos interactivos (tras un clic o carga dinámica).
 pub struct BrowserReadTool {
     driver: Arc<dyn BrowserDriver>,
 }
@@ -458,16 +490,16 @@ impl Tool for BrowserReadTool {
         "browser_read"
     }
     fn description(&self) -> &str {
-        "Lee de nuevo el título y el texto visible de la página abierta ahora mismo \
-         (útil después de browser_click o cuando la página cargó más contenido)."
+        "Vuelve a leer la página abierta: texto visible + elementos interactivos \
+         numerados (úsalo tras browser_click o cuando la página cargó más contenido)."
     }
     async fn run(&self, _input: &str) -> Result<String, String> {
-        let v = self.driver.read().await.map_err(|e| e.to_string())?;
-        Ok(format!("[{}] {}\n{}", v.title, v.url, v.text))
+        let s = self.driver.snapshot().await.map_err(|e| e.to_string())?;
+        Ok(format_snapshot(&s))
     }
 }
 
-/// Hace clic en un elemento (selector CSS) de la página abierta.
+/// Hace clic en un elemento por NÚMERO (del snapshot) o selector CSS.
 pub struct BrowserClickTool {
     driver: Arc<dyn BrowserDriver>,
 }
@@ -482,23 +514,20 @@ impl Tool for BrowserClickTool {
         "browser_click"
     }
     fn description(&self) -> &str {
-        "Hace clic en un elemento de la página abierta. Entrada: un selector CSS \
-         (p. ej. \"button.login\", \"a[href='/precios']\", \"#enviar\")."
+        "Hace clic en un elemento de la página abierta. Entrada: el NÚMERO del elemento \
+         (de la lista que dio browser_open/browser_read), p. ej. \"3\"; o un selector CSS."
     }
     async fn run(&self, input: &str) -> Result<String, String> {
         self.driver
-            .click(input.trim())
+            .click(&resolve_target(input))
             .await
             .map_err(|e| e.to_string())?;
-        let v = self.driver.read().await.map_err(|e| e.to_string())?;
-        Ok(format!(
-            "clic hecho. Página ahora: [{}] {}\n{}",
-            v.title, v.url, v.text
-        ))
+        let s = self.driver.snapshot().await.map_err(|e| e.to_string())?;
+        Ok(format!("clic hecho.\n{}", format_snapshot(&s)))
     }
 }
 
-/// Escribe texto en un campo (selector CSS) de la página abierta.
+/// Escribe texto en un campo por NÚMERO (del snapshot) o selector CSS.
 pub struct BrowserTypeTool {
     driver: Arc<dyn BrowserDriver>,
 }
@@ -513,18 +542,65 @@ impl Tool for BrowserTypeTool {
         "browser_type"
     }
     fn description(&self) -> &str {
-        "Escribe texto en un campo de la página abierta. Entrada: \"selector ::: texto\", \
-         p. ej. \"input[name=q] ::: gemma 12B\" o \"#email ::: ariel@ejemplo.com\"."
+        "Escribe texto en un campo de la página abierta. Entrada: \"objetivo ::: texto\", \
+         donde objetivo es el NÚMERO del campo (del snapshot) o un selector CSS. \
+         P. ej. \"3 ::: gemma 12B\" o \"#email ::: ariel@ejemplo.com\"."
     }
     async fn run(&self, input: &str) -> Result<String, String> {
-        let (sel, text) = input
-            .split_once(":::")
-            .ok_or_else(|| "usa el formato \"selector ::: texto\"".to_string())?;
+        let (target, text) = input.split_once(":::").ok_or_else(|| {
+            "usa el formato \"objetivo ::: texto\" (objetivo = número o selector)".to_string()
+        })?;
         self.driver
-            .type_text(sel.trim(), text.trim())
+            .type_text(&resolve_target(target), text.trim())
             .await
             .map_err(|e| e.to_string())?;
-        Ok(format!("escrito «{}» en {}", text.trim(), sel.trim()))
+        Ok(format!(
+            "escrito «{}» en el objetivo {}",
+            text.trim(),
+            target.trim()
+        ))
+    }
+}
+
+/// VISIÓN SELECTIVA: captura la página actual y la describe con el modelo multimodal
+/// (para cuando el texto/snapshot no basta: gráficos, captchas visuales, layout).
+pub struct BrowserSeeTool {
+    driver: Arc<dyn BrowserDriver>,
+}
+impl BrowserSeeTool {
+    pub fn new(driver: Arc<dyn BrowserDriver>) -> Self {
+        Self { driver }
+    }
+}
+#[async_trait]
+impl Tool for BrowserSeeTool {
+    fn name(&self) -> &str {
+        "browser_see"
+    }
+    fn description(&self) -> &str {
+        "MIRA la página abierta como una imagen (visión) y la describe. Úsalo cuando el \
+         texto no baste: gráficos, diagramas, disposición visual, elementos sin etiqueta. \
+         Entrada opcional: qué quieres saber de la imagen."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let b64 = self
+            .driver
+            .screenshot_b64()
+            .await
+            .map_err(|e| e.to_string())?;
+        let prompt = if input.trim().is_empty() {
+            "Describe lo que se ve en esta página web."
+        } else {
+            input.trim()
+        };
+        let model = std::env::var("AION_VISION_MODEL")
+            .unwrap_or_else(|_| "huihui_ai/gemma-4-abliterated:12b".into());
+        let engine = OllamaEngine::new(OllamaEngine::base_url_from_env(), model);
+        engine
+            .generate_with_image(prompt, &b64)
+            .await
+            .map(|m| m.content)
+            .map_err(|e| e.to_string())
     }
 }
 

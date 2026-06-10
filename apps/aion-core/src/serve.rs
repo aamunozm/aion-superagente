@@ -536,7 +536,10 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::BrowserClickTool::new(
             browser.clone(),
         )));
-        tools.register(Arc::new(crate::agent_tools::BrowserTypeTool::new(browser)));
+        tools.register(Arc::new(crate::agent_tools::BrowserTypeTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::BrowserSeeTool::new(browser)));
 
         let bus = EventBus::default();
 
@@ -653,7 +656,10 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::BrowserClickTool::new(
             browser.clone(),
         )));
-        tools.register(Arc::new(crate::agent_tools::BrowserTypeTool::new(browser)));
+        tools.register(Arc::new(crate::agent_tools::BrowserTypeTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::BrowserSeeTool::new(browser)));
 
         let bus = EventBus::default();
         // Reenvía la actividad de CADA agente con su rol (jerarquía visible).

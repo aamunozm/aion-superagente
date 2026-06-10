@@ -106,9 +106,11 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
              locales, ni la red local, ni direcciones (para eso, place_lookup).\n\
              • NAVEGAR DE VERDAD (sitios con JavaScript, paneles, o INTERACTUAR: iniciar \
              sesión, rellenar formularios, pulsar botones): usa browser_open (abre la URL en \
-             un navegador real), luego browser_click / browser_type / browser_read sobre esa \
-             misma página. Para solo LEER texto estático basta web_fetch; para webs dinámicas \
-             o interacción usa el navegador.\n\
+             un navegador real y te da el texto + una lista NUMERADA de elementos \
+             interactivos). Para actuar, usa el NÚMERO del elemento: browser_click «3» o \
+             browser_type «3 ::: texto». Tras actuar, browser_read te da el nuevo estado. Si \
+             el texto no basta (gráficos, layout, captcha visual), usa browser_see (visión). \
+             Para solo LEER texto estático basta web_fetch.\n\
              • memory_search: SOLO para datos concretos que pudieras haber guardado; nunca para \
              saber quién eres ni para contar archivos.\n\
              • Aritmética: usa la calculadora.\n\

@@ -21,6 +21,9 @@ use tokio::sync::Mutex;
 pub trait BrowserDriver: Send + Sync {
     async fn open(&self, url: &str) -> Result<PageView>;
     async fn read(&self) -> Result<PageView>;
+    /// Árbol de accesibilidad: elementos INTERACTIVOS numerados (el LLM elige por
+    /// etiqueta, no por selector CSS). Es la forma robusta de navegar (2026).
+    async fn snapshot(&self) -> Result<Snapshot>;
     async fn click(&self, selector: &str) -> Result<()>;
     async fn type_text(&self, selector: &str, text: &str) -> Result<()>;
     async fn screenshot_b64(&self) -> Result<String>;
@@ -33,6 +36,24 @@ pub struct PageView {
     pub title: String,
     pub url: String,
     pub text: String,
+}
+
+/// Un elemento interactivo etiquetado (ref estable para click/type por número).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct El {
+    #[serde(rename = "ref")]
+    pub ref_id: u32,
+    pub role: String,
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+}
+
+/// Instantánea de accesibilidad: vista + elementos interactivos numerados.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub view: PageView,
+    pub elements: Vec<El>,
 }
 
 const MAX_TEXT: usize = 6000;
@@ -90,6 +111,15 @@ async fn ensure(sess: &mut Option<Session>) -> Result<()> {
     if let Some(p) = chrome_path() {
         builder = builder.chrome_executable(p);
     }
+    // PERFIL DEDICADO: evita el conflicto SingletonLock con el Chrome del usuario o con
+    // una instancia previa. Cada proceso de AION usa su propio user-data-dir temporal.
+    let profile = std::env::temp_dir().join(format!("aion-chrome-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&profile);
+    builder = builder
+        .user_data_dir(profile)
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--disable-extensions");
     let config = builder
         .build()
         .map_err(|e| AionError::Internal(format!("no encuentro Chrome para el navegador: {e}. Instala Google Chrome o define AION_CHROME.")))?;
@@ -158,6 +188,23 @@ impl BrowserDriver for ChromiumoxideDriver {
         page_view(page).await
     }
 
+    async fn snapshot(&self) -> Result<Snapshot> {
+        let guard = cell().lock().await;
+        let sess = guard.as_ref().ok_or_else(no_page)?;
+        let page = sess.page.as_ref().ok_or_else(no_page)?;
+        let view = page_view(page).await?;
+        // Etiqueta cada elemento interactivo VISIBLE con data-aion-ref=N y devuelve la
+        // lista. Luego click/type usan el selector [data-aion-ref="N"].
+        let json = page
+            .evaluate(AX_SNAPSHOT_JS)
+            .await
+            .ok()
+            .and_then(|r| r.into_value::<String>().ok())
+            .unwrap_or_else(|| "[]".into());
+        let elements: Vec<El> = serde_json::from_str(&json).unwrap_or_default();
+        Ok(Snapshot { view, elements })
+    }
+
     async fn click(&self, selector: &str) -> Result<()> {
         let guard = cell().lock().await;
         let sess = guard.as_ref().ok_or_else(no_page)?;
@@ -215,3 +262,31 @@ impl BrowserDriver for ChromiumoxideDriver {
 fn no_page() -> AionError {
     AionError::Internal("no hay ninguna página abierta; usa browser_open primero".into())
 }
+
+/// JS que recorre el DOM, etiqueta los elementos INTERACTIVOS visibles con
+/// `data-aion-ref` y devuelve un JSON `[{ref, role, name, kind}]`. Es el "árbol de
+/// accesibilidad" práctico: el LLM ve etiquetas legibles y actúa por número.
+const AX_SNAPSHOT_JS: &str = r#"
+(() => {
+  const q = 'a,button,input,textarea,select,[role=button],[role=link],[role=tab],[role=checkbox],[onclick]';
+  const els = Array.from(document.querySelectorAll(q));
+  const out = [];
+  let i = 0;
+  for (const el of els) {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) continue;
+    if (el.disabled || el.getAttribute('aria-hidden') === 'true') continue;
+    i++;
+    el.setAttribute('data-aion-ref', String(i));
+    const tag = el.tagName.toLowerCase();
+    const role = el.getAttribute('role') || tag;
+    let name = (el.innerText || el.value || el.placeholder ||
+      el.getAttribute('aria-label') || el.getAttribute('name') || el.title || '')
+      .trim().replace(/\s+/g, ' ').slice(0, 80);
+    const kind = (tag === 'input' ? (el.getAttribute('type') || 'text') : tag);
+    out.push({ ref: i, role, name, kind });
+    if (i >= 60) break;
+  }
+  return JSON.stringify(out);
+})()
+"#;
