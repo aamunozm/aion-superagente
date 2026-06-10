@@ -7,6 +7,7 @@
 
 pub mod input;
 pub mod screen;
+pub mod ui_tree;
 
 pub use input::ControlIntent;
 

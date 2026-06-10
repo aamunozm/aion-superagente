@@ -493,6 +493,33 @@ impl Tool for ScreenElementsTool {
          Requiere permiso de Accesibilidad."
     }
     async fn run(&self, _input: &str) -> Result<String, String> {
+        // 1) NATIVO primero: API de accesibilidad del SO (macOS AX / Windows UIA).
+        //    Rápido y desbloquea Electron (AXManualAccessibility). Si da resultados,
+        //    los usamos; si no, caemos al AppleScript (solo macOS).
+        let native = tokio::task::spawn_blocking(|| aion_control::ui_tree::frontmost_elements(60))
+            .await
+            .unwrap_or_default();
+        if !native.is_empty() {
+            let list = native
+                .iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    let name = if e.name.is_empty() {
+                        "(sin etiqueta)"
+                    } else {
+                        &e.name
+                    };
+                    format!("[{}] {} «{name}» en ({}, {})", i + 1, e.role, e.x, e.y)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Ok(format!(
+                "Elementos interactivos de la ventana frontal ({}, vía accesibilidad nativa):\n{list}",
+                native.len()
+            ));
+        }
+
+        // 2) FALLBACK (macOS): recorre el árbol vía AppleScript/System Events.
         // Recorre el árbol de accesibilidad RECURSIVAMENTE por `UI elements` (más
         // fiable que `entire contents`, que falla en varias apps) y se queda con los
         // roles interactivos + su posición central. El grounding lo da el SO: cero

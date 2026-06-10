@@ -17,3 +17,13 @@ tracing.workspace = true
 base64 = "0.22"
 enigo = "0.3"
 uuid.workspace = true
+
+# Accesibilidad NATIVA por sistema (lectura rápida del árbol + acciones). Cada SO usa
+# su API: macOS → AX API; Windows → UI Automation. Detrás del mismo trait.
+[target.'cfg(target_os = "macos")'.dependencies]
+accessibility = "0.2"
+accessibility-sys = "0.2"
+core-foundation = "0.10"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+uiautomation = "0.25"
