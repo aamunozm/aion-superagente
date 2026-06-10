@@ -1,8 +1,9 @@
 name: CI Web
 
 on:
+  workflow_dispatch:
   push:
-    paths: ["packages/**", "apps/web/**", "package.json", "pnpm-workspace.yaml", "turbo.json"]
+    paths: ["packages/**", "apps/web/**", "package.json", "pnpm-workspace.yaml", "turbo.json", ".github/workflows/ci-web.yml"]
   pull_request:
 
 jobs:
