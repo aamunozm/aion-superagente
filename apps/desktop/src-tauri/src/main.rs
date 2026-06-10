@@ -118,11 +118,15 @@ fn main() {
 
             *app.state::<Sidecars>().tauri.lock().unwrap() = tauri_children;
 
-            // Abrir MAXIMIZADA para aprovechar todo el espacio. El `maximized: true`
-            // del tauri.conf.json no es fiable en el primer arranque (macOS lo ignora
-            // a menudo cuando hay width/height + center); forzarlo aquí sí funciona.
+            // Abrir MAXIMIZADA sin salto visible. La ventana nace OCULTA
+            // (`"visible": false` en el config): la maximizamos mientras nadie la ve
+            // y solo entonces la mostramos. Así no se ve el paso "pequeña → grande".
+            // (El `maximized: true` del config no basta: macOS lo ignora a menudo en
+            // el primer arranque cuando hay width/height + center.)
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.maximize();
+                let _ = win.show();
+                let _ = win.set_focus();
             }
             Ok(())
         })
