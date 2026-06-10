@@ -121,6 +121,11 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
              para direcciones.\n\
              • web_search/web_fetch: solo para información de INTERNET, no para archivos \
              locales, ni la red local, ni direcciones (para eso, place_lookup).\n\
+             • PANTALLA Y CONTROL DEL PC (apps de escritorio, todo el Mac): usa screen_see \
+             para MIRAR la pantalla, screen_elements para localizar botones (coordenadas), y \
+             pc_click «x y» / pc_type / pc_key para ACTUAR. Cada acción de control pide tu OK. \
+             Para tareas en la WEB es mejor el navegador (browser_*); usa el control del PC \
+             solo para apps de escritorio.\n\
              • NAVEGAR DE VERDAD (sitios con JavaScript, paneles, o INTERACTUAR: iniciar \
              sesión, rellenar formularios, pulsar botones): usa browser_open (abre la URL en \
              un navegador real y te da el texto + una lista NUMERADA de elementos \

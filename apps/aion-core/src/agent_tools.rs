@@ -411,6 +411,268 @@ impl Tool for LibrarySearchTool {
     }
 }
 
+// ── Computer-use: ver la PANTALLA y controlar ratón/teclado (gobernado + HITL) ─
+
+/// Directorio de gobernanza del control (Governor/audit).
+fn control_dir() -> std::path::PathBuf {
+    crate::app_data_dir().join("control")
+}
+
+/// VE la pantalla del escritorio (captura) y la describe con el modelo de visión.
+/// Lectura, bajo el Governor. Para asistirte mirando lo que hay en tu Mac.
+pub struct ScreenSeeTool;
+impl ScreenSeeTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for ScreenSeeTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[async_trait]
+impl Tool for ScreenSeeTool {
+    fn name(&self) -> &str {
+        "screen_see"
+    }
+    fn description(&self) -> &str {
+        "MIRA la pantalla del escritorio (todo tu Mac, no solo el navegador) y la \
+         describe. Úsalo para ver qué hay en pantalla y asistir. Entrada opcional: qué \
+         quieres saber. Requiere permiso de Grabación de pantalla."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        // Captura (bloqueante) en hilo aparte; pasa por el Governor (look()).
+        let b64 = tokio::task::spawn_blocking(|| {
+            aion_control::Computer::open(control_dir())
+                .map_err(|e| e.to_string())
+                .and_then(|c| c.look().map_err(|e| e.to_string()))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let prompt = if input.trim().is_empty() {
+            "Describe lo que ves en la pantalla del escritorio."
+        } else {
+            input.trim()
+        };
+        let model = std::env::var("AION_VISION_MODEL")
+            .unwrap_or_else(|_| "huihui_ai/gemma-4-abliterated:12b".into());
+        let engine = OllamaEngine::new(OllamaEngine::base_url_from_env(), model);
+        engine
+            .generate_with_image(prompt, &b64)
+            .await
+            .map(|m| m.content)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Lista elementos interactivos (botones) de la ventana en primer plano con su
+/// posición central (a11y de macOS vía System Events). El agente luego usa pc_click
+/// con esas coordenadas. Best-effort (solo botones de la ventana frontal).
+pub struct ScreenElementsTool;
+impl ScreenElementsTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for ScreenElementsTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[async_trait]
+impl Tool for ScreenElementsTool {
+    fn name(&self) -> &str {
+        "screen_elements"
+    }
+    fn description(&self) -> &str {
+        "Lista los botones de la ventana en primer plano con su posición central (x,y) \
+         usando la accesibilidad de macOS. Úsalo para saber DÓNDE hacer clic; luego \
+         pc_click con esas coordenadas. Requiere permiso de Accesibilidad."
+    }
+    async fn run(&self, _input: &str) -> Result<String, String> {
+        let script = r#"tell application "System Events"
+  set out to ""
+  try
+    set frontApp to first application process whose frontmost is true
+    repeat with b in (buttons of window 1 of frontApp)
+      try
+        set p to position of b
+        set s to size of b
+        set nm to name of b
+        if nm is missing value then set nm to "(sin nombre)"
+        set cx to (item 1 of p) + ((item 1 of s) / 2)
+        set cy to (item 2 of p) + ((item 2 of s) / 2)
+        set out to out & nm & "|" & (cx as integer) & "|" & (cy as integer) & linefeed
+      end try
+    end repeat
+  end try
+  return out
+end tell"#;
+        let out = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(script)
+                .output()
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("no pude leer la accesibilidad: {e}"))?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut items = Vec::new();
+        for (i, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+            let parts: Vec<&str> = line.split('|').collect();
+            if parts.len() == 3 {
+                items.push(format!(
+                    "[{}] «{}» en ({}, {})",
+                    i + 1,
+                    parts[0],
+                    parts[1],
+                    parts[2]
+                ));
+            }
+        }
+        if items.is_empty() {
+            return Ok(
+                "(no detecté botones accesibles en la ventana frontal; quizá falta \
+                       permiso de Accesibilidad, o usa screen_see para mirar)"
+                    .into(),
+            );
+        }
+        Ok(format!(
+            "Botones de la ventana frontal:\n{}",
+            items.join("\n")
+        ))
+    }
+}
+
+/// Ejecuta una intención de control (clic/teclear/tecla) vía el Computer gobernado.
+/// Cada acción pasa por confirmación HITL (needs_confirm) antes de ejecutarse.
+fn run_control(intent: aion_control::ControlIntent) -> Result<String, String> {
+    let mut comp = aion_control::Computer::open(control_dir()).map_err(|e| e.to_string())?;
+    comp.dry_run = false; // acción REAL (ya aprobada por el usuario vía HITL)
+    match comp.execute_confirmed(intent) {
+        aion_control::ControlOutcome::Executed { summary, .. } => Ok(format!("hecho: {summary}")),
+        aion_control::ControlOutcome::Denied { reason } => Err(format!("denegado: {reason}")),
+        aion_control::ControlOutcome::NeedsConfirmation { reason, .. } => {
+            Err(format!("requiere confirmación: {reason}"))
+        }
+        aion_control::ControlOutcome::Failed { error } => Err(format!("falló: {error}")),
+    }
+}
+
+/// Clic del ratón en coordenadas de pantalla. Entrada: "x y".
+pub struct PcClickTool;
+impl PcClickTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for PcClickTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[async_trait]
+impl Tool for PcClickTool {
+    fn name(&self) -> &str {
+        "pc_click"
+    }
+    fn description(&self) -> &str {
+        "Hace clic del ratón en una posición de la PANTALLA del escritorio. Entrada: \
+         \"x y\" (coordenadas, de screen_elements). Requiere tu confirmación."
+    }
+    fn needs_confirm(&self, input: &str) -> Option<String> {
+        Some(format!("Hacer clic en la pantalla en ({})", input.trim()))
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let mut it = input.split_whitespace();
+        let x: i32 = it
+            .next()
+            .and_then(|s| s.parse().ok())
+            .ok_or("uso: \"x y\"")?;
+        let y: i32 = it
+            .next()
+            .and_then(|s| s.parse().ok())
+            .ok_or("uso: \"x y\"")?;
+        tokio::task::spawn_blocking(move || {
+            run_control(aion_control::ControlIntent::Click { x, y })
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+}
+
+/// Escribe texto con el teclado en la app en primer plano. Entrada: el texto.
+pub struct PcTypeTool;
+impl PcTypeTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for PcTypeTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[async_trait]
+impl Tool for PcTypeTool {
+    fn name(&self) -> &str {
+        "pc_type"
+    }
+    fn description(&self) -> &str {
+        "Escribe texto con el teclado en la app en primer plano. Entrada: el texto. \
+         Requiere tu confirmación."
+    }
+    fn needs_confirm(&self, input: &str) -> Option<String> {
+        Some(format!("Escribir con el teclado: «{}»", input.trim()))
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let text = input.trim().to_string();
+        if text.is_empty() {
+            return Err("nada que escribir".into());
+        }
+        tokio::task::spawn_blocking(move || run_control(aion_control::ControlIntent::Type { text }))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+}
+
+/// Pulsa una tecla especial (enter, tab, esc, cmd+c…). Entrada: el nombre de la tecla.
+pub struct PcKeyTool;
+impl PcKeyTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for PcKeyTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[async_trait]
+impl Tool for PcKeyTool {
+    fn name(&self) -> &str {
+        "pc_key"
+    }
+    fn description(&self) -> &str {
+        "Pulsa una tecla (p. ej. \"enter\", \"tab\", \"esc\"). Entrada: el nombre. \
+         Requiere tu confirmación."
+    }
+    fn needs_confirm(&self, input: &str) -> Option<String> {
+        Some(format!("Pulsar la tecla: {}", input.trim()))
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let name = input.trim().to_string();
+        if name.is_empty() {
+            return Err("indica la tecla".into());
+        }
+        tokio::task::spawn_blocking(move || run_control(aion_control::ControlIntent::Key { name }))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+}
+
 // ── Navegador agéntico real (Chrome headless vía CDP) ───────────────────────
 
 /// Formatea una instantánea de accesibilidad para el LLM: texto visible + lista de

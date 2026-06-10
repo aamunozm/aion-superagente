@@ -582,6 +582,11 @@ async fn agent(
             browser,
         )));
         tools.register(Arc::new(crate::agent_tools::ConfirmActionTool::new()));
+        tools.register(Arc::new(crate::agent_tools::ScreenSeeTool::new()));
+        tools.register(Arc::new(crate::agent_tools::ScreenElementsTool::new()));
+        tools.register(Arc::new(crate::agent_tools::PcClickTool::new()));
+        tools.register(Arc::new(crate::agent_tools::PcTypeTool::new()));
+        tools.register(Arc::new(crate::agent_tools::PcKeyTool::new()));
 
         let bus = EventBus::default();
 
@@ -718,6 +723,11 @@ async fn crew(
             browser,
         )));
         tools.register(Arc::new(crate::agent_tools::ConfirmActionTool::new()));
+        tools.register(Arc::new(crate::agent_tools::ScreenSeeTool::new()));
+        tools.register(Arc::new(crate::agent_tools::ScreenElementsTool::new()));
+        tools.register(Arc::new(crate::agent_tools::PcClickTool::new()));
+        tools.register(Arc::new(crate::agent_tools::PcTypeTool::new()));
+        tools.register(Arc::new(crate::agent_tools::PcKeyTool::new()));
 
         let bus = EventBus::default();
         // Reenvía la actividad de CADA agente con su rol (jerarquía visible).

@@ -27,8 +27,8 @@ const TOOLS: Tool[] = [
   { id: "web", name: "Investigación web", desc: "Busca y lee fuentes en internet.", icon: "globe", tint: "sky", status: "activa" },
   { id: "skills", name: "Skills (WASM)", desc: "El agente se forja herramientas nuevas en sandbox.", icon: "code", tint: "lavender", status: "activa" },
   { id: "calc", name: "Calculadora", desc: "Aritmética precisa para el agente.", icon: "calculator", tint: "gold", status: "activa" },
-  { id: "screen", name: "Visión de pantalla", desc: "Ver la pantalla para asistirte (requiere permiso).", icon: "eye", tint: "peach", status: "disponible" },
-  { id: "control", name: "Control del PC", desc: "Teclado y ratón bajo gobernanza (requiere permiso).", icon: "hand", tint: "sky", status: "disponible" },
+  { id: "screen", name: "Visión de pantalla", desc: "El agente ve tu escritorio (screen_see). Requiere permiso de Grabación de pantalla.", icon: "eye", tint: "peach", status: "activa" },
+  { id: "control", name: "Control del PC", desc: "Ratón y teclado (pc_click/type/key) con confirmación por acción. Requiere permiso de Accesibilidad.", icon: "hand", tint: "sky", status: "activa" },
   { id: "email", name: "Email", desc: "Leer y redactar correo (confirmación al enviar).", icon: "mail", tint: "lavender", status: "proximamente" },
   { id: "calendar", name: "Calendario", desc: "Consultar y crear eventos.", icon: "calendar", tint: "mint", status: "proximamente" },
 ];
