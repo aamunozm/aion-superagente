@@ -486,29 +486,57 @@ impl Tool for ScreenElementsTool {
         "screen_elements"
     }
     fn description(&self) -> &str {
-        "Lista los botones de la ventana en primer plano con su posición central (x,y) \
-         usando la accesibilidad de macOS. Úsalo para saber DÓNDE hacer clic; luego \
-         pc_click con esas coordenadas. Requiere permiso de Accesibilidad."
+        "Lista TODOS los elementos interactivos (botones, campos, casillas, menús, \
+         enlaces…) de la ventana en primer plano con su posición central (x,y), usando \
+         la accesibilidad de macOS. El SO da las coordenadas exactas (sin adivinar). \
+         Úsalo para saber DÓNDE hacer clic; luego pc_click con esas coordenadas. \
+         Requiere permiso de Accesibilidad."
     }
     async fn run(&self, _input: &str) -> Result<String, String> {
-        let script = r#"tell application "System Events"
-  set out to ""
-  try
-    set frontApp to first application process whose frontmost is true
-    repeat with b in (buttons of window 1 of frontApp)
-      try
-        set p to position of b
-        set s to size of b
-        set nm to name of b
-        if nm is missing value then set nm to "(sin nombre)"
-        set cx to (item 1 of p) + ((item 1 of s) / 2)
-        set cy to (item 2 of p) + ((item 2 of s) / 2)
-        set out to out & nm & "|" & (cx as integer) & "|" & (cy as integer) & linefeed
-      end try
-    end repeat
-  end try
-  return out
-end tell"#;
+        // Recorre el árbol de accesibilidad RECURSIVAMENTE por `UI elements` (más
+        // fiable que `entire contents`, que falla en varias apps) y se queda con los
+        // roles interactivos + su posición central. El grounding lo da el SO: cero
+        // coste de RAM, funciona con cualquier modelo.
+        let script = r#"on collectEls(el, depth)
+  set acc to ""
+  if depth > 5 then return acc
+  tell application "System Events"
+    set roleset to {"AXButton","AXTextField","AXTextArea","AXCheckBox","AXRadioButton","AXPopUpButton","AXMenuButton","AXComboBox","AXLink","AXTabButton","AXDisclosureTriangle"}
+    try
+      repeat with e in (UI elements of el)
+        try
+          set rc to role of e
+          if rc is in roleset then
+            set p to position of e
+            set s to size of e
+            if (item 1 of s) > 0 and (item 2 of s) > 0 then
+              set nm to ""
+              try
+                set nm to name of e
+              end try
+              if nm is missing value or nm is "" then
+                try
+                  set nm to (value of e) as string
+                end try
+              end if
+              if nm is missing value then set nm to ""
+              set cx to (item 1 of p) + ((item 1 of s) / 2)
+              set cy to (item 2 of p) + ((item 2 of s) / 2)
+              set acc to acc & rc & "|" & nm & "|" & (cx as integer) & "|" & (cy as integer) & linefeed
+            end if
+          end if
+        end try
+        set acc to acc & my collectEls(e, depth + 1)
+      end repeat
+    end try
+  end tell
+  return acc
+end collectEls
+
+tell application "System Events"
+  set w to window 1 of (first application process whose frontmost is true)
+end tell
+return my collectEls(w, 0)"#;
         let out = tokio::task::spawn_blocking(move || {
             std::process::Command::new("osascript")
                 .arg("-e")
@@ -520,27 +548,38 @@ end tell"#;
         .map_err(|e| format!("no pude leer la accesibilidad: {e}"))?;
         let text = String::from_utf8_lossy(&out.stdout);
         let mut items = Vec::new();
-        for (i, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
             let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() == 3 {
+            if parts.len() == 4 {
+                // rol legible (quita el prefijo AX) + etiqueta + coordenadas.
+                let kind = parts[0].trim_start_matches("AX").to_lowercase();
+                let name = if parts[1].trim().is_empty() {
+                    "(sin etiqueta)"
+                } else {
+                    parts[1].trim()
+                };
                 items.push(format!(
-                    "[{}] «{}» en ({}, {})",
-                    i + 1,
-                    parts[0],
-                    parts[1],
-                    parts[2]
+                    "[{}] {kind} «{name}» en ({}, {})",
+                    items.len() + 1,
+                    parts[2],
+                    parts[3]
                 ));
+            }
+            if items.len() >= 60 {
+                break; // tope para no saturar el contexto
             }
         }
         if items.is_empty() {
             return Ok(
-                "(no detecté botones accesibles en la ventana frontal; quizá falta \
-                       permiso de Accesibilidad, o usa screen_see para mirar)"
+                "(no detecté elementos accesibles en la ventana frontal; quizá la app no \
+                 expone accesibilidad o falta el permiso de Accesibilidad. Usa screen_see \
+                 para mirar la pantalla en su lugar)"
                     .into(),
             );
         }
         Ok(format!(
-            "Botones de la ventana frontal:\n{}",
+            "Elementos interactivos de la ventana frontal ({}):\n{}",
+            items.len(),
             items.join("\n")
         ))
     }
