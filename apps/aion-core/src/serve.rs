@@ -189,6 +189,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/credentials/remove", post(credentials_remove))
         .route("/api/confirm", post(confirm_decision))
+        .route("/api/ask", post(ask_answer))
         .layer(cors)
         .layer(
             TraceLayer::new_for_http()
@@ -685,15 +686,29 @@ async fn agent(
             let tx = confirm_tx.clone();
             Box::pin(async move { request_confirmation(&tx, desc).await })
         });
+        // El agente puede PREGUNTARTE un dato (pausa la tarea y espera tu respuesta).
+        let ask_tx = tx.clone();
+        let ask: aion_orchestrator::AskFn = std::sync::Arc::new(move |q: String| {
+            let tx = ask_tx.clone();
+            Box::pin(async move { request_user_answer(&tx, q).await })
+        });
         let agent = ReActAgent::new(&*engine, &tools, bus.clone())
             .with_context(ctx)
             .with_verify(true)
-            .with_confirm(confirm);
+            .with_confirm(confirm)
+            .with_ask(ask);
         let result = agent.run(&body.task).await;
         fwd.abort();
 
         let final_event = match result {
             Ok(run) => {
+                // 🧠 APRENDER DE LOS ERRORES: si hubo fallos, reflexiona una vez sobre
+                // la LECCIÓN duradera y la persiste en memoria, para recuperarla en
+                // tareas futuras (grounding_for_agent). Así el lazo se cierra: el agente
+                // mejora entre sesiones en vez de tropezar con la misma piedra.
+                if !run.failures.is_empty() {
+                    learn_from_failures(&*engine, &body.task, &run.failures).await;
+                }
                 serde_json::json!({ "kind": "answer", "text": run.answer, "steps": run.steps })
             }
             Err(e) => serde_json::json!({ "kind": "error", "text": e.to_string() }),
@@ -1102,6 +1117,39 @@ async fn grounding_for_agent(engine: &dyn LlmEngine, task: &str) -> String {
     s
 }
 
+/// **Aprender de los errores.** Tras una tarea con fallos, reflexiona UNA vez sobre
+/// la lección DURADERA (qué herramienta usar, qué permiso hace falta y cómo pedirlo,
+/// qué evitar) y la guarda en memoria con la etiqueta `[aprendizaje]`. Como
+/// `grounding_for_agent` recupera memorias relevantes, esa lección se le inyecta en
+/// tareas futuras parecidas: el agente deja de tropezar dos veces con la misma piedra.
+async fn learn_from_failures(engine: &dyn LlmEngine, task: &str, failures: &[String]) {
+    let list = failures.join("\n- ");
+    let req = GenerateRequest {
+        messages: vec![Message::user(format!(
+            "Durante una tarea me fallaron acciones.\nTarea: {task}\nFallos:\n- {list}\n\n\
+             Extrae UNA lección breve y DURADERA (1-2 frases) que me ayude a hacerlo mejor la \
+             próxima vez ante una tarea parecida: qué herramienta usar, qué permiso del sistema \
+             hace falta y cómo pedirlo al usuario, o qué evitar. Si no hay lección general útil, \
+             responde solo 'NINGUNA'. No incluyas datos efímeros (números, fechas, estados)."
+        ))],
+        think: false,
+        temperature: Some(0.2),
+        max_tokens: Some(120),
+    };
+    let lesson = match engine.generate(req).await {
+        Ok(m) => m.content.trim().to_string(),
+        Err(_) => return,
+    };
+    let l = lesson.trim();
+    if l.is_empty() || l.eq_ignore_ascii_case("ninguna") || l.len() < 12 {
+        return;
+    }
+    if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+        let _ = mem.store(&format!("[aprendizaje] {l}")).await;
+        tracing::info!(lesson = %l, "aprendizaje persistido tras fallos");
+    }
+}
+
 /// Heurística barata para decidir CUÁNDO no merece la pena consultar memoria
 /// (saludos, agradecimientos, entradas muy cortas sin contenido sustantivo).
 fn is_trivial_query(prompt: &str) -> bool {
@@ -1382,6 +1430,57 @@ async fn confirm_decision(Json(b): Json<ConfirmDecision>) -> Json<serde_json::Va
         Json(serde_json::json!({ "ok": true }))
     } else {
         Json(serde_json::json!({ "ok": false, "error": "confirmación no encontrada o expirada" }))
+    }
+}
+
+// ── El agente PREGUNTA al usuario (pausa la tarea y espera texto) ────────────
+
+type PendingAsks =
+    std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<String>>>;
+
+fn pending_asks() -> &'static PendingAsks {
+    static P: std::sync::OnceLock<PendingAsks> = std::sync::OnceLock::new();
+    P.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Emite un evento «ask» por SSE y espera la respuesta EN TEXTO del usuario (vía
+/// /api/ask). Si no responde en 10 min, devuelve `None` y el agente devuelve la
+/// pregunta al chat. Reusa el mismo patrón que la confirmación HITL.
+async fn request_user_answer(
+    tx: &tokio::sync::mpsc::Sender<Event>,
+    question: String,
+) -> Option<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let (otx, orx) = tokio::sync::oneshot::channel();
+    pending_asks().lock().unwrap().insert(id.clone(), otx);
+    let _ = tx
+        .send(
+            Event::default()
+                .data(serde_json::json!({ "kind": "ask", "id": id, "text": question }).to_string()),
+        )
+        .await;
+    match tokio::time::timeout(std::time::Duration::from_secs(600), orx).await {
+        Ok(Ok(answer)) => Some(answer),
+        _ => {
+            pending_asks().lock().unwrap().remove(&id);
+            None
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct AskAnswer {
+    id: String,
+    text: String,
+}
+
+/// El usuario responde a una pregunta del agente.
+async fn ask_answer(Json(b): Json<AskAnswer>) -> Json<serde_json::Value> {
+    if let Some(tx) = pending_asks().lock().unwrap().remove(&b.id) {
+        let _ = tx.send(b.text);
+        Json(serde_json::json!({ "ok": true }))
+    } else {
+        Json(serde_json::json!({ "ok": false, "error": "pregunta no encontrada o expirada" }))
     }
 }
 

@@ -15,11 +15,20 @@ use std::sync::Arc;
 pub type ConfirmFn =
     Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
 
+/// Callback de PREGUNTA al usuario: recibe la pregunta y devuelve la respuesta en
+/// texto (`None` si el usuario no contesta a tiempo). Permite al agente PAUSAR la
+/// tarea para pedir un dato y CONTINUAR con la respuesta, sin perder el contexto.
+pub type AskFn =
+    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync>;
+
 /// Resultado de una ejecución del agente.
 #[derive(Debug, Clone)]
 pub struct AgentRun {
     pub answer: String,
     pub steps: usize,
+    /// Acciones que fallaron o se cancelaron durante la tarea (para que la capa
+    /// superior reflexione y APRENDA de ellas, persistiéndolas en memoria).
+    pub failures: Vec<String>,
 }
 
 /// Agente ReAct configurable.
@@ -36,6 +45,8 @@ pub struct ReActAgent<'a> {
     verify: bool,
     /// Confirmación humana para acciones sensibles (login, compra…). Opcional.
     confirm: Option<ConfirmFn>,
+    /// Pregunta al usuario (pausa la tarea y espera su respuesta). Opcional.
+    ask: Option<AskFn>,
 }
 
 impl<'a> ReActAgent<'a> {
@@ -49,7 +60,14 @@ impl<'a> ReActAgent<'a> {
             context: None,
             verify: false,
             confirm: None,
+            ask: None,
         }
+    }
+
+    /// Registra el callback de PREGUNTA al usuario (pausa la tarea y espera texto).
+    pub fn with_ask(mut self, ask: AskFn) -> Self {
+        self.ask = Some(ask);
+        self
     }
 
     /// Activa la verificación de la respuesta final (juez de groundedness).
@@ -99,6 +117,10 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
              Cuando ya tengas la solución (o si no hace falta herramienta), responde:\n\
              Thought: tu razonamiento\n\
              Final Answer: la respuesta para el usuario\n\n\
+             Si necesitas un DATO que solo el usuario tiene para poder continuar, pregúntale \
+             (la tarea se PAUSA, el usuario responde y sigues con su respuesta):\n\
+             Thought: tu razonamiento\n\
+             Ask User: tu pregunta clara y concreta\n\n\
              Reglas:\n\
              • HONESTIDAD ABSOLUTA: NUNCA inventes el resultado de una acción. Un número, un \
              conteo, el contenido de un archivo o una página SOLO pueden salir de una \
@@ -128,11 +150,11 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
              solo para apps de escritorio.\n\
              • PREGUNTAR AL USUARIO: si te falta un dato que SOLO el usuario tiene (qué app o \
              ventana, qué archivo, una preferencia, una aclaración), NO uses herramientas para \
-             adivinarlo. Pregúntaselo DIRECTAMENTE con 'Final Answer:' y una pregunta clara. Las \
-             herramientas de control (pc_type, pc_click, pc_key) y memory_search NO son un canal \
-             de chat: pc_* solo escriben/clican sobre apps; JAMÁS las uses para hacerle una \
-             pregunta al usuario ni para teclear lo que en realidad querías preguntarle. Para \
-             preguntar algo, SIEMPRE Final Answer.\n\
+             adivinarlo. Pregúntaselo con 'Ask User: <pregunta>' (pausa la tarea y sigues con su \
+             respuesta) o, si ya no necesitas continuar, con 'Final Answer:'. Las herramientas de \
+             control (pc_type, pc_click, pc_key) y memory_search NO son un canal de chat: pc_* solo \
+             escriben/clican sobre apps; JAMÁS las uses para hacerle una pregunta al usuario ni \
+             para teclear lo que en realidad querías preguntarle.\n\
              • PERMISOS DEL SISTEMA: si screen_see, screen_elements o pc_* fallan por falta de \
              permiso (Grabación de pantalla o Accesibilidad), NO reintentes: díselo al usuario con \
              'Final Answer:' explicando qué permiso falta y cómo activarlo (Ajustes del Sistema → \
@@ -222,7 +244,47 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
                 return Ok(AgentRun {
                     answer,
                     steps: step + 1,
+                    failures: failed.values().cloned().collect(),
                 });
+            }
+
+            // ¿PREGUNTA al usuario? Pausa la tarea, espera su respuesta y CONTINÚA
+            // con ella (sin perder el contexto). Si no hay canal o no contesta, la
+            // pregunta se devuelve al chat como respuesta.
+            if let Some(question) = extract(&text, "Ask User:") {
+                self.bus.publish(AionEvent::ActionRequested {
+                    agent: self.name.clone(),
+                    action: format!("ask_user({question})"),
+                });
+                match &self.ask {
+                    Some(ask) => match ask(question.clone()).await {
+                        Some(ans) if !ans.trim().is_empty() => {
+                            self.bus.publish(AionEvent::ObservationReceived {
+                                agent: self.name.clone(),
+                                summary: format!("El usuario respondió: {ans}"),
+                            });
+                            scratchpad.push_str(&format!(
+                                "Thought: {}\nAsk User: {question}\nObservation: El usuario respondió: {ans}\n",
+                                extract(&text, "Thought:").unwrap_or_default()
+                            ));
+                            continue;
+                        }
+                        _ => {
+                            return Ok(AgentRun {
+                                answer: question,
+                                steps: step + 1,
+                                failures: failed.values().cloned().collect(),
+                            });
+                        }
+                    },
+                    None => {
+                        return Ok(AgentRun {
+                            answer: question,
+                            steps: step + 1,
+                            failures: failed.values().cloned().collect(),
+                        });
+                    }
+                }
             }
 
             // ¿Acción?
@@ -238,6 +300,7 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
                 return Ok(AgentRun {
                     answer: clean.to_string(),
                     steps: step + 1,
+                    failures: failed.values().cloned().collect(),
                 });
             };
             let action = action.lines().next().unwrap_or("").trim().to_string();
@@ -279,9 +342,20 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
                     }
                     None => format!("herramienta desconocida: '{action}'"),
                 };
-                // Si falló o se canceló, recuérdalo para no repetir esta acción idéntica.
+                // Si falló o se canceló, recuérdalo: (a) para no repetir esta acción
+                // idéntica y (b) para que la capa superior APRENDA del fallo.
                 if is_failure(&obs) {
-                    failed.insert(sig.clone(), first_line(&obs));
+                    let inp = input.trim();
+                    let human = if inp.is_empty() {
+                        format!("«{action}» → {}", first_line(&obs))
+                    } else {
+                        format!(
+                            "«{action}» (entrada: {}) → {}",
+                            inp.chars().take(60).collect::<String>(),
+                            first_line(&obs)
+                        )
+                    };
+                    failed.insert(sig.clone(), human);
                 }
                 obs
             };
@@ -318,10 +392,12 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
             Ok(m) if !sanitize(&m.content).is_empty() => Ok(AgentRun {
                 answer: sanitize(&m.content),
                 steps: self.max_steps,
+                failures: failed.values().cloned().collect(),
             }),
             _ => Ok(AgentRun {
                 answer: "No pude completar la tarea en los pasos disponibles.".into(),
                 steps: self.max_steps,
+                failures: failed.values().cloned().collect(),
             }),
         }
     }
@@ -385,6 +461,7 @@ fn extract(text: &str, label: &str) -> Option<String> {
         "Action Input:",
         "Action:",
         "Final Answer:",
+        "Ask User:",
         "Observation:",
     ];
     let mut end = rest.len();

@@ -1727,19 +1727,61 @@ fn notify_cooldown_elapsed() -> bool {
     }
 }
 
+/// Notificación nativa del sistema, MULTIPLATAFORMA (macOS / Windows / Linux).
+/// Best-effort: si el SO no la muestra, falla en silencio (nunca rompe el flujo).
 fn notify_user(title: &str, message: &str) {
     if std::env::var("AION_NOTIFY").as_deref() == Ok("0") {
         return;
     }
-    // Escapar comillas dobles para AppleScript.
-    let msg = message.replace('"', "'");
-    let title = title.replace('"', "'");
-    let script =
-        format!("display notification \"{msg}\" with title \"{title}\" sound name \"Glass\"");
-    let _ = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .status();
+
+    #[cfg(target_os = "macos")]
+    {
+        // AppleScript: notificación nativa con sonido.
+        let msg = message.replace('"', "'");
+        let title = title.replace('"', "'");
+        let script =
+            format!("display notification \"{msg}\" with title \"{title}\" sound name \"Glass\"");
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .status();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Toast nativo vía WinRT desde PowerShell (sin dependencias ni instalar nada).
+        // Usa el AppUserModelID de PowerShell para que aparezca en el Centro de
+        // actividades. Escapamos comillas simples (PowerShell) y '<' '&' (XML).
+        let esc = |s: &str| {
+            s.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('\'', "''")
+        };
+        let title = esc(title);
+        let message = esc(message);
+        let ps = format!(
+            "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null; \
+             $xml = New-Object Windows.Data.Xml.Dom.XmlDocument; \
+             $xml.LoadXml('<toast><visual><binding template=\"ToastGeneric\"><text>{title}</text><text>{message}</text></binding></visual></toast>'); \
+             $toast = New-Object Windows.UI.Notifications.ToastNotification $xml; \
+             [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('AION').Show($toast);"
+        );
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // notify-send (libnotify) si está disponible en el entorno de escritorio.
+        let _ = std::process::Command::new("notify-send")
+            .args([title, message])
+            .status();
+    }
 }
 
 /// Bootstrap de modelos en primer arranque — MULTIPLATAFORMA (Mac/Windows).

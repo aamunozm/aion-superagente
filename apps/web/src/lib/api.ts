@@ -52,6 +52,7 @@ export type AgentEvent =
   | { kind: "observation"; text: string; agent?: string }
   | { kind: "answer"; text: string; steps?: number; agent?: string }
   | { kind: "confirm"; id: string; text: string }
+  | { kind: "ask"; id: string; text: string }
   | { kind: "done" }
   | { kind: "error"; text: string };
 
@@ -61,6 +62,15 @@ export async function confirmDecision(id: string, approved: boolean): Promise<vo
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ id, approved }),
+  }).catch(() => {});
+}
+
+/** Responde (en texto) a una pregunta que el agente hizo a mitad de tarea. */
+export async function answerQuestion(id: string, text: string): Promise<void> {
+  await fetch(`${BRIDGE_URL}/api/ask`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id, text }),
   }).catch(() => {});
 }
 

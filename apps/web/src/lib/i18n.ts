@@ -72,6 +72,7 @@ const ES: Dict = {
   "chat.approve": "Aprobar",
   "chat.reject": "Rechazar",
   "chat.send": "Enviar",
+  "chat.askPlaceholder": "Tu respuesta…",
 };
 
 const IT: Dict = {
@@ -135,6 +136,7 @@ const IT: Dict = {
   "chat.approve": "Approva",
   "chat.reject": "Rifiuta",
   "chat.send": "Invia",
+  "chat.askPlaceholder": "La tua risposta…",
 };
 
 const EN: Dict = {
@@ -198,6 +200,7 @@ const EN: Dict = {
   "chat.approve": "Approve",
   "chat.reject": "Reject",
   "chat.send": "Send",
+  "chat.askPlaceholder": "Your answer…",
 };
 
 const DICTS: Record<Lang, Dict> = { es: ES, it: IT, en: EN };

@@ -10,6 +10,7 @@ import {
   chatStream,
   chatReset,
   confirmDecision,
+  answerQuestion,
   inboxList,
   inboxRead,
   libraryUpload,
@@ -85,6 +86,8 @@ export default function ChatPage() {
   const [showHistory, setShowHistory] = useState(false);
   // Confirmación humana pendiente (login, compra…): se muestra una tarjeta con OK/No.
   const [pendingConfirm, setPendingConfirm] = useState<{ id: string; text: string } | null>(null);
+  const [pendingAsk, setPendingAsk] = useState<{ id: string; text: string } | null>(null);
+  const [askDraft, setAskDraft] = useState("");
   // Adjunto de imagen pendiente (se envía con el siguiente mensaje, vía visión).
   const [pendingImage, setPendingImage] = useState<{ name: string; b64: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -284,6 +287,7 @@ export default function ChatPage() {
           else if (ev.kind === "answer")
             update((t) => ({ ...t, answer: ev.text, meta: ev.steps ? `${ev.steps} ${ev.steps === 1 ? "paso" : "pasos"}` : undefined }));
           else if (ev.kind === "confirm") setPendingConfirm({ id: ev.id, text: ev.text });
+          else if (ev.kind === "ask") { setPendingAsk({ id: ev.id, text: ev.text }); setAskDraft(""); }
           else if (ev.kind === "error") update((t) => ({ ...t, answer: `⚠️ ${ev.text}` }));
           scroll();
         });
@@ -480,6 +484,37 @@ export default function ChatPage() {
             {t("chat.reject")}
           </button>
         </div>
+      )}
+      {pendingAsk && (
+        <form
+          className="rounded-xl p-3 mb-1"
+          style={{ background: "var(--accent-subtle)", border: "1px solid var(--accent)" }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!askDraft.trim()) return;
+            answerQuestion(pendingAsk.id, askDraft.trim());
+            setPendingAsk(null);
+            setAskDraft("");
+          }}
+        >
+          <div className="flex items-center gap-2 mb-2">
+            <Icon name="brain" size={18} />
+            <p className="text-sm" style={{ color: "var(--text-1)" }}>{pendingAsk.text}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              autoFocus
+              value={askDraft}
+              onChange={(e) => setAskDraft(e.target.value)}
+              placeholder={t("chat.askPlaceholder")}
+              className="flex-1 px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: "var(--surface-1)", border: "1px solid var(--border)", color: "var(--text-1)" }}
+            />
+            <button type="submit" className="btn shrink-0" style={{ background: "var(--accent)", color: "#04201f" }}>
+              {t("chat.send")}
+            </button>
+          </div>
+        </form>
       )}
       {pendingImage && (
         <div className="flex items-center gap-2 -mb-1">
