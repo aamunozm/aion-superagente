@@ -7,7 +7,10 @@
 //! Evolución futura: navegación autónoma con DOM+visión (browser-use sidecar →
 //! chromiumoxide/CDP) detrás de un trait `BrowserDriver`.
 
+mod driver;
 mod html;
+
+pub use driver::{BrowserDriver, ChromiumoxideDriver, PageView};
 
 use aion_kernel::{AionError, Result};
 use std::time::Duration;
@@ -261,7 +264,7 @@ impl WebClient {
 }
 
 /// Guarda anti-SSRF: solo http(s) y rechaza hosts internos/privados.
-fn guard_url(url: &str) -> Result<()> {
+pub(crate) fn guard_url(url: &str) -> Result<()> {
     let lower = url.to_lowercase();
     if !lower.starts_with("http://") && !lower.starts_with("https://") {
         return Err(AionError::PolicyDenied(

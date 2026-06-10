@@ -104,6 +104,11 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
              para direcciones.\n\
              • web_search/web_fetch: solo para información de INTERNET, no para archivos \
              locales, ni la red local, ni direcciones (para eso, place_lookup).\n\
+             • NAVEGAR DE VERDAD (sitios con JavaScript, paneles, o INTERACTUAR: iniciar \
+             sesión, rellenar formularios, pulsar botones): usa browser_open (abre la URL en \
+             un navegador real), luego browser_click / browser_type / browser_read sobre esa \
+             misma página. Para solo LEER texto estático basta web_fetch; para webs dinámicas \
+             o interacción usa el navegador.\n\
              • memory_search: SOLO para datos concretos que pudieras haber guardado; nunca para \
              saber quién eres ni para contar archivos.\n\
              • Aritmética: usa la calculadora.\n\

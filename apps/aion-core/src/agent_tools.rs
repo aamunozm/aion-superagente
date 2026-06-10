@@ -3,7 +3,7 @@
 //! sí mismo, validado en sandbox+tests) e invocación de las skills que ha forjado.
 //! Esto unifica los "órganos" de AION dentro del agente con el que hablas.
 
-use aion_browser::WebClient;
+use aion_browser::{BrowserDriver, WebClient};
 use aion_evolution::{Candidate, EvolutionEngine};
 use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, SkillHost};
 use aion_kernel::types::Message;
@@ -408,6 +408,123 @@ impl Tool for LibrarySearchTool {
             })
             .collect::<Vec<_>>()
             .join("\n"))
+    }
+}
+
+// ── Navegador agéntico real (Chrome headless vía CDP) ───────────────────────
+
+/// Abre una página en un navegador REAL (ejecuta JavaScript) y devuelve título +
+/// texto visible. Mejor que web_fetch para sitios dinámicos (apps, JS, paneles).
+pub struct BrowserOpenTool {
+    driver: Arc<dyn BrowserDriver>,
+}
+impl BrowserOpenTool {
+    pub fn new(driver: Arc<dyn BrowserDriver>) -> Self {
+        Self { driver }
+    }
+}
+#[async_trait]
+impl Tool for BrowserOpenTool {
+    fn name(&self) -> &str {
+        "browser_open"
+    }
+    fn description(&self) -> &str {
+        "Abre una URL en un navegador REAL (con JavaScript) y devuelve el título y el \
+         texto visible de la página. Úsalo para webs dinámicas o cuando vayas a \
+         interactuar (luego browser_click / browser_type / browser_read). Entrada: la URL."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let v = self
+            .driver
+            .open(input.trim())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(format!("[{}] {}\n{}", v.title, v.url, v.text))
+    }
+}
+
+/// Re-lee la página abierta actualmente (tras un clic o que cargue contenido).
+pub struct BrowserReadTool {
+    driver: Arc<dyn BrowserDriver>,
+}
+impl BrowserReadTool {
+    pub fn new(driver: Arc<dyn BrowserDriver>) -> Self {
+        Self { driver }
+    }
+}
+#[async_trait]
+impl Tool for BrowserReadTool {
+    fn name(&self) -> &str {
+        "browser_read"
+    }
+    fn description(&self) -> &str {
+        "Lee de nuevo el título y el texto visible de la página abierta ahora mismo \
+         (útil después de browser_click o cuando la página cargó más contenido)."
+    }
+    async fn run(&self, _input: &str) -> Result<String, String> {
+        let v = self.driver.read().await.map_err(|e| e.to_string())?;
+        Ok(format!("[{}] {}\n{}", v.title, v.url, v.text))
+    }
+}
+
+/// Hace clic en un elemento (selector CSS) de la página abierta.
+pub struct BrowserClickTool {
+    driver: Arc<dyn BrowserDriver>,
+}
+impl BrowserClickTool {
+    pub fn new(driver: Arc<dyn BrowserDriver>) -> Self {
+        Self { driver }
+    }
+}
+#[async_trait]
+impl Tool for BrowserClickTool {
+    fn name(&self) -> &str {
+        "browser_click"
+    }
+    fn description(&self) -> &str {
+        "Hace clic en un elemento de la página abierta. Entrada: un selector CSS \
+         (p. ej. \"button.login\", \"a[href='/precios']\", \"#enviar\")."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        self.driver
+            .click(input.trim())
+            .await
+            .map_err(|e| e.to_string())?;
+        let v = self.driver.read().await.map_err(|e| e.to_string())?;
+        Ok(format!(
+            "clic hecho. Página ahora: [{}] {}\n{}",
+            v.title, v.url, v.text
+        ))
+    }
+}
+
+/// Escribe texto en un campo (selector CSS) de la página abierta.
+pub struct BrowserTypeTool {
+    driver: Arc<dyn BrowserDriver>,
+}
+impl BrowserTypeTool {
+    pub fn new(driver: Arc<dyn BrowserDriver>) -> Self {
+        Self { driver }
+    }
+}
+#[async_trait]
+impl Tool for BrowserTypeTool {
+    fn name(&self) -> &str {
+        "browser_type"
+    }
+    fn description(&self) -> &str {
+        "Escribe texto en un campo de la página abierta. Entrada: \"selector ::: texto\", \
+         p. ej. \"input[name=q] ::: gemma 12B\" o \"#email ::: ariel@ejemplo.com\"."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let (sel, text) = input
+            .split_once(":::")
+            .ok_or_else(|| "usa el formato \"selector ::: texto\"".to_string())?;
+        self.driver
+            .type_text(sel.trim(), text.trim())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(format!("escrito «{}» en {}", text.trim(), sel.trim()))
     }
 }
 

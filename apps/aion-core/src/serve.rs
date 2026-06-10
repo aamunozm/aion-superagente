@@ -525,6 +525,18 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
         tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
+        let browser: std::sync::Arc<dyn aion_browser::BrowserDriver> =
+            std::sync::Arc::new(aion_browser::ChromiumoxideDriver);
+        tools.register(Arc::new(crate::agent_tools::BrowserOpenTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::BrowserReadTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::BrowserClickTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::BrowserTypeTool::new(browser)));
 
         let bus = EventBus::default();
 
@@ -630,6 +642,18 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
         tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
+        let browser: std::sync::Arc<dyn aion_browser::BrowserDriver> =
+            std::sync::Arc::new(aion_browser::ChromiumoxideDriver);
+        tools.register(Arc::new(crate::agent_tools::BrowserOpenTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::BrowserReadTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::BrowserClickTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::BrowserTypeTool::new(browser)));
 
         let bus = EventBus::default();
         // Reenvía la actividad de CADA agente con su rol (jerarquía visible).
