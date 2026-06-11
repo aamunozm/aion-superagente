@@ -787,7 +787,8 @@ impl Tool for MakeDocumentTool {
             })
             .collect();
         let name: String = {
-            let t = safe.trim();
+            // Quita guiones bajos/espacios sobrantes de los bordes (p. ej. de «¿…?»).
+            let t = safe.trim().trim_matches(|c| c == '_' || c == ' ');
             if t.is_empty() {
                 "Documento".to_string()
             } else {
