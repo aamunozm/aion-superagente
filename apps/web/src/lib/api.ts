@@ -160,6 +160,12 @@ export const projectSourceAdd = (project_id: string, title: string, kind: string
     kind,
     content,
   });
+export const projectSourceUpload = (project_id: string, filename: string, content_b64: string) =>
+  jpost<{ ok: boolean; source?: ProjectSource; error?: string }>("/api/project/source/upload", {
+    project_id,
+    filename,
+    content_b64,
+  });
 export const projectSourceToggle = (project_id: string, id: string, active: boolean) =>
   jpost<{ ok: boolean }>("/api/project/source/toggle", { project_id, id, active });
 export const projectSourceRemove = (project_id: string, id: string) =>

@@ -197,6 +197,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/projects/remove", post(projects_remove))
         .route("/api/project/get", post(project_get))
         .route("/api/project/source/add", post(project_source_add))
+        .route("/api/project/source/upload", post(project_source_upload))
         .route("/api/project/source/toggle", post(project_source_toggle))
         .route("/api/project/source/remove", post(project_source_remove))
         .route(
@@ -1586,6 +1587,49 @@ async fn project_source_add(Json(b): Json<SrcAdd>) -> Json<serde_json::Value> {
         }
     }
     let s = crate::projects::add_source(&b.project_id, &title, &b.kind, &content);
+    Json(serde_json::json!({ "ok": true, "source": s }))
+}
+
+#[derive(Deserialize)]
+struct SrcUpload {
+    project_id: String,
+    filename: String,
+    /// Contenido del archivo en base64 (la UI lo lee con FileReader).
+    content_b64: String,
+}
+/// Sube un DOCUMENTO (.pdf/.txt/.md) como fuente del proyecto: extrae su texto
+/// (reusando la Biblioteca) y lo guarda como contenido para el grounding.
+async fn project_source_upload(Json(b): Json<SrcUpload>) -> Json<serde_json::Value> {
+    use base64::Engine;
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(b.content_b64.as_bytes()) {
+        Ok(v) => v,
+        Err(e) => {
+            return Json(
+                serde_json::json!({ "ok": false, "error": format!("base64 inválido: {e}") }),
+            )
+        }
+    };
+    let safe = b.filename.replace(['/', '\\'], "_");
+    let tmp = std::env::temp_dir().join(format!("aion_projsrc_{safe}"));
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        return Json(
+            serde_json::json!({ "ok": false, "error": format!("no pude guardar el archivo: {e}") }),
+        );
+    }
+    let extracted = crate::library::extract_text(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    let text = match extracted {
+        Ok(t) if !t.trim().is_empty() => t,
+        Ok(_) => {
+            return Json(
+                serde_json::json!({ "ok": false, "error": "el documento no tiene texto extraíble" }),
+            )
+        }
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+    // Recorta para no inflar el grounding; el documento completo queda referenciado.
+    let content: String = text.chars().take(40000).collect();
+    let s = crate::projects::add_source(&b.project_id, &safe, "archivo", &content);
     Json(serde_json::json!({ "ok": true, "source": s }))
 }
 

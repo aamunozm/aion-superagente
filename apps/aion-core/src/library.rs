@@ -198,8 +198,9 @@ fn load(path: &Path) -> Vec<Chunk> {
         .collect()
 }
 
-/// Extrae texto de un archivo según su extensión (.txt/.md/.pdf).
-fn extract_text(file: &Path) -> Result<String, String> {
+/// Extrae texto de un archivo según su extensión (.txt/.md/.pdf). Público para que
+/// los Proyectos puedan subir documentos como fuentes reusando esta extracción.
+pub fn extract_text(file: &Path) -> Result<String, String> {
     let ext = file
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())

@@ -7,6 +7,7 @@ import Icon from "@/components/Icon";
 import {
   projectGet,
   projectSourceAdd,
+  projectSourceUpload,
   projectSourceToggle,
   projectSourceRemove,
   projectStudioGenerate,
@@ -40,6 +41,8 @@ export default function ProjectWorkspace() {
   const [srcKind, setSrcKind] = useState("nota");
   const [srcTitle, setSrcTitle] = useState("");
   const [srcContent, setSrcContent] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   // Chat
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -83,6 +86,23 @@ export default function ProjectWorkspace() {
       setSrcTitle("");
       setSrcContent("");
       setAdding(false);
+    }
+  }
+  async function uploadFile(file: File) {
+    setUploading(true);
+    const b64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve((reader.result as string).split(",")[1] ?? "");
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+    const r = await projectSourceUpload(id, file.name, b64);
+    setUploading(false);
+    if (r.ok && r.source) {
+      setSources((s) => [r.source!, ...s]);
+      setAdding(false);
+    } else if (r.error) {
+      alert(r.error);
     }
   }
   async function toggleSource(s: ProjectSource) {
@@ -181,7 +201,7 @@ export default function ProjectWorkspace() {
           {adding && (
             <div className="p-3 flex flex-col gap-2" style={{ borderBottom: "1px solid var(--border)", background: "var(--surface-1)" }}>
               <div className="flex gap-1">
-                {["nota", "texto", "web"].map((k) => (
+                {["nota", "texto", "web", "archivo"].map((k) => (
                   <button
                     key={k}
                     onClick={() => setSrcKind(k)}
@@ -195,24 +215,53 @@ export default function ProjectWorkspace() {
                   </button>
                 ))}
               </div>
-              <input
-                className="input text-sm"
-                placeholder={srcKind === "web" ? "https://…" : "Título"}
-                value={srcTitle}
-                onChange={(e) => setSrcTitle(e.target.value)}
-              />
-              {srcKind !== "web" && (
-                <textarea
-                  className="input text-sm"
-                  rows={4}
-                  placeholder="Contenido…"
-                  value={srcContent}
-                  onChange={(e) => setSrcContent(e.target.value)}
-                />
+
+              {srcKind === "archivo" ? (
+                <>
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    accept=".pdf,.txt,.md,.markdown"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) uploadFile(f);
+                      e.target.value = "";
+                    }}
+                  />
+                  <button
+                    className="btn text-sm"
+                    disabled={uploading}
+                    onClick={() => fileRef.current?.click()}
+                  >
+                    {uploading ? "Subiendo…" : "Elegir PDF / TXT / MD"}
+                  </button>
+                  <p className="text-[10px]" style={{ color: "var(--text-3)" }}>
+                    Se extrae el texto del documento para que el chat lo use.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <input
+                    className="input text-sm"
+                    placeholder={srcKind === "web" ? "https://…" : "Título"}
+                    value={srcTitle}
+                    onChange={(e) => setSrcTitle(e.target.value)}
+                  />
+                  {srcKind !== "web" && (
+                    <textarea
+                      className="input text-sm"
+                      rows={4}
+                      placeholder="Contenido…"
+                      value={srcContent}
+                      onChange={(e) => setSrcContent(e.target.value)}
+                    />
+                  )}
+                  <button className="btn text-sm" onClick={addSource}>
+                    Añadir
+                  </button>
+                </>
               )}
-              <button className="btn text-sm" onClick={addSource}>
-                Añadir
-              </button>
             </div>
           )}
 
