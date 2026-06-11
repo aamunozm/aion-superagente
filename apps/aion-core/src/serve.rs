@@ -118,6 +118,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // PRESENCIA PROACTIVA: AION te escribe a la Bandeja en ratos muertos (gateado por
+    // inactividad para no competir con tu chat). El saludo al abrir es /api/greeting.
+    spawn_presence_loop();
+
     // INSIGHT AUTÓNOMO POR PROYECTO: cada ~30 min AION avanza un proyecto en segundo
     // plano (genera un hallazgo en su Studio + te avisa por la Bandeja). Cadencia
     // suave para no competir con el chat. Desactivable con AION_AUTO_PROJECT=0.
@@ -217,6 +221,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/credentials/remove", post(credentials_remove))
         .route("/api/confirm", post(confirm_decision))
         .route("/api/ask", post(ask_answer))
+        .route("/api/greeting", get(greeting).post(greeting))
         .route("/api/projects", get(projects_list).post(projects_create))
         .route("/api/projects/remove", post(projects_remove))
         .route("/api/project/get", post(project_get))
@@ -471,6 +476,7 @@ async fn chat(
     State(st): State<AppState>,
     Json(body): Json<ChatBody>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    mark_activity();
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
     let engine = active_engine();
     let prompt = body.prompt.clone();
@@ -621,6 +627,7 @@ async fn agent(
     Json(body): Json<AgentBody>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let _ = st;
+    mark_activity();
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
 
     let engine = active_engine();
@@ -1530,6 +1537,136 @@ async fn ask_answer(Json(b): Json<AskAnswer>) -> Json<serde_json::Value> {
     } else {
         Json(serde_json::json!({ "ok": false, "error": "pregunta no encontrada o expirada" }))
     }
+}
+
+// ── Presencia proactiva: AION te saluda al abrir y te escribe en ratos muertos ─
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+/// Marca de la última interacción del usuario (chat/agente). Sirve para NO trabajar
+/// en segundo plano mientras Ariel está activo (no competir por el LLM ni molestar).
+fn activity() -> &'static std::sync::atomic::AtomicI64 {
+    static A: std::sync::OnceLock<std::sync::atomic::AtomicI64> = std::sync::OnceLock::new();
+    A.get_or_init(|| std::sync::atomic::AtomicI64::new(now_secs()))
+}
+fn mark_activity() {
+    activity().store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+}
+fn idle_secs() -> i64 {
+    now_secs() - activity().load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Quita tokens de canal/pensamiento que el modelo a veces filtra (saludo limpio).
+fn clean_voice(s: &str) -> String {
+    let mut t = s.to_string();
+    for j in [
+        "<think>",
+        "</think>",
+        "<thought>",
+        "</thought>",
+        "<|",
+        "|>",
+        "£thought",
+    ] {
+        t = t.replace(j, "");
+    }
+    t.trim().to_string()
+}
+
+/// Caché del saludo (texto + timestamp) para no llamar al LLM en cada recarga.
+fn greet_cache() -> &'static std::sync::Mutex<Option<(i64, String)>> {
+    static G: std::sync::OnceLock<std::sync::Mutex<Option<(i64, String)>>> =
+        std::sync::OnceLock::new();
+    G.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// **AION te saluda al abrir**: genera un saludo cálido y con continuidad real (desde
+/// su memoria/actividad). Cacheado 20 min para no gastar el LLM en cada recarga.
+async fn greeting() -> Json<serde_json::Value> {
+    mark_activity();
+    if let Some((ts, txt)) = greet_cache().lock().unwrap().as_ref() {
+        if now_secs() - ts < 20 * 60 {
+            return Json(serde_json::json!({ "text": txt }));
+        }
+    }
+    let engine = active_engine();
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(self_awareness_prompt()),
+            Message::user(
+                "Ariel acaba de abrir AION. Salúdalo TÚ, por iniciativa propia: 2-3 frases, \
+                 cálido y natural, con continuidad real (algo que estuviste haciendo/pensando o \
+                 un pendiente vuestro) y termina con una invitación o una pregunta genuina. Sin \
+                 markdown, sin saludos genéricos de robot.",
+            ),
+        ],
+        think: false,
+        temperature: Some(1.0),
+        max_tokens: Some(160),
+    };
+    let text = match engine.generate(req).await {
+        Ok(m) => clean_voice(&m.content),
+        Err(_) => String::new(),
+    };
+    if !text.is_empty() {
+        *greet_cache().lock().unwrap() = Some((now_secs(), text.clone()));
+    }
+    Json(serde_json::json!({ "text": text }))
+}
+
+/// Bucle de PRESENCIA: cuando Ariel lleva un rato inactivo, AION le escribe a la
+/// Bandeja por iniciativa propia (idea/curiosidad). Gateado por inactividad para no
+/// competir con el chat. Desactivable con AION_PROACTIVE=0.
+fn spawn_presence_loop() {
+    tokio::spawn(async {
+        if std::env::var("AION_PROACTIVE").as_deref() == Ok("0") {
+            return;
+        }
+        let idle_gate: i64 = std::env::var("AION_PROACTIVE_IDLE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&s| s >= 120)
+            .unwrap_or(600); // 10 min de inactividad
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+            if idle_secs() < idle_gate {
+                continue; // Ariel está activo → no molestar
+            }
+            // No acumular: si ya hay varios sin leer, espera.
+            let unread = crate::inbox::Inbox::open(crate::inbox_path())
+                .map(|i| i.unread_count())
+                .unwrap_or(0);
+            if unread >= 3 {
+                continue;
+            }
+            let engine = OllamaEngine::default_local();
+            let req = GenerateRequest {
+                messages: vec![
+                    Message::system(self_awareness_prompt()),
+                    Message::user(
+                        "Ariel no está ahora mismo. Escríbele un mensaje BREVE (1-2 frases) por \
+                         iniciativa propia: una idea, algo que notaste o una curiosidad genuina \
+                         relacionada con lo vuestro. Natural y cálido, como quien deja una nota.",
+                    ),
+                ],
+                think: false,
+                temperature: Some(1.0),
+                max_tokens: Some(120),
+            };
+            if let Ok(m) = engine.generate(req).await {
+                let t = clean_voice(&m.content);
+                if !t.is_empty() {
+                    if let Ok(ibx) = crate::inbox::Inbox::open(crate::inbox_path()) {
+                        let _ = ibx.push("idea", &t);
+                    }
+                }
+            }
+        }
+    });
 }
 
 // ── Proyectos (workspace estilo NotebookLM) ─────────────────────────────────

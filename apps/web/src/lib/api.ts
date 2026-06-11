@@ -65,6 +65,16 @@ export async function confirmDecision(id: string, approved: boolean): Promise<vo
   }).catch(() => {});
 }
 
+/** Saludo proactivo de AION al abrir (cálido, con continuidad). Vacío si no hay. */
+export async function getGreeting(): Promise<string> {
+  try {
+    const r = await fetch(`${BRIDGE_URL}/api/greeting`, { method: "POST" }).then((x) => x.json());
+    return (r.text as string) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 /** Responde (en texto) a una pregunta que el agente hizo a mitad de tarea. */
 export async function answerQuestion(id: string, text: string): Promise<void> {
   await fetch(`${BRIDGE_URL}/api/ask`, {

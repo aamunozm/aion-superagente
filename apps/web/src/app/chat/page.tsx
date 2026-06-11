@@ -11,6 +11,7 @@ import {
   chatReset,
   confirmDecision,
   answerQuestion,
+  getGreeting,
   inboxList,
   inboxRead,
   libraryUpload,
@@ -178,6 +179,28 @@ export default function ChatPage() {
     return () => {
       alive = false;
       clearInterval(id);
+    };
+  }, []);
+
+  // Saludo proactivo: AION te habla PRIMERO al abrir (cálido, con continuidad).
+  // Se muestra una sola vez por sesión, junto a los "reachouts".
+  useEffect(() => {
+    if (sessionStorage.getItem("aion_greeted")) return;
+    let alive = true;
+    getGreeting().then((text) => {
+      if (!alive || !text.trim()) return;
+      sessionStorage.setItem("aion_greeted", "1");
+      setReachouts((prev) =>
+        prev.some((m) => m.id === "greeting")
+          ? prev
+          : [
+              { id: "greeting", at: new Date().toISOString(), kind: "saludo", text, read: false },
+              ...prev,
+            ],
+      );
+    });
+    return () => {
+      alive = false;
     };
   }, []);
 
