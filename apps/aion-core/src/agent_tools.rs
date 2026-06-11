@@ -739,6 +739,85 @@ impl Tool for PcKeyTool {
     }
 }
 
+// ── Crear documentos (robusto: archivo + abrir, sin tocar el teclado) ────────
+
+/// Crea un DOCUMENTO de texto en el Mac: lo escribe en un archivo del Escritorio y
+/// lo ABRE (p. ej. en TextEdit). Es la forma robusta de "hacer un documento": el
+/// agente redacta el contenido y se guarda; NO necesita ver la pantalla ni simular
+/// el teclado (cero permisos de Grabación de pantalla/Accesibilidad).
+pub struct MakeDocumentTool;
+impl MakeDocumentTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for MakeDocumentTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[async_trait]
+impl Tool for MakeDocumentTool {
+    fn name(&self) -> &str {
+        "make_document"
+    }
+    fn description(&self) -> &str {
+        "Crea un DOCUMENTO de texto en el Mac y lo ABRE (en TextEdit). Úsalo para \
+         «hazme/escribe un documento sobre X». Entrada: «Título ::: contenido completo». \
+         TÚ redactas el contenido entero. No necesita permisos de pantalla ni de teclado."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let (title, body) = match input.split_once(":::") {
+            Some((t, b)) => (t.trim().to_string(), b.trim().to_string()),
+            None => ("Documento".to_string(), input.trim().to_string()),
+        };
+        if body.is_empty() {
+            return Err("falta el contenido del documento (usa «Título ::: contenido»)".into());
+        }
+        let home =
+            std::env::var("HOME").map_err(|_| "no encuentro tu carpeta de usuario".to_string())?;
+        let safe: String = title
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let name: String = {
+            let t = safe.trim();
+            if t.is_empty() {
+                "Documento".to_string()
+            } else {
+                t.chars().take(60).collect()
+            }
+        };
+        let path = std::path::Path::new(&home)
+            .join("Desktop")
+            .join(format!("{name}.txt"));
+        std::fs::write(&path, &body).map_err(|e| format!("no pude escribir el documento: {e}"))?;
+        // Abrir en el editor de texto del sistema (best-effort, no bloquea el éxito).
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open")
+                .arg("-a")
+                .arg("TextEdit")
+                .arg(&path)
+                .status();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("notepad").arg(&path).status();
+        }
+        Ok(format!(
+            "documento creado y abierto en el Escritorio: {}",
+            path.display()
+        ))
+    }
+}
+
 // ── Navegador agéntico real (Chrome headless vía CDP) ───────────────────────
 
 /// Formatea una instantánea de accesibilidad para el LLM: texto visible + lista de

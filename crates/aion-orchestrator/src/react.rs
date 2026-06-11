@@ -148,6 +148,11 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
              pc_click «x y» / pc_type / pc_key para ACTUAR. Cada acción de control pide tu OK. \
              Para tareas en la WEB es mejor el navegador (browser_*); usa el control del PC \
              solo para apps de escritorio.\n\
+             • CREAR/ESCRIBIR UN DOCUMENTO (p. ej. «hazme un documento en TextEdit sobre X», \
+             «escribe una carta/informe y guárdalo»): usa SIEMPRE make_document con «Título ::: \
+             contenido completo» (TÚ redactas todo el contenido). Es robusto y NO necesita ver la \
+             pantalla ni teclear. NUNCA uses screen_see/screen_elements/pc_type para redactar un \
+             documento.\n\
              • PREGUNTAR AL USUARIO: si te falta un dato que SOLO el usuario tiene (qué app o \
              ventana, qué archivo, una preferencia, una aclaración), NO uses herramientas para \
              adivinarlo. Pregúntaselo con 'Ask User: <pregunta>' (pausa la tarea y sigues con su \

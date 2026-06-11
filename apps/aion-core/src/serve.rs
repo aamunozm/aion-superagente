@@ -699,6 +699,7 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::PcClickTool::new()));
         tools.register(Arc::new(crate::agent_tools::PcTypeTool::new()));
         tools.register(Arc::new(crate::agent_tools::PcKeyTool::new()));
+        tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
 
         let bus = EventBus::default();
 
@@ -854,6 +855,7 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::PcClickTool::new()));
         tools.register(Arc::new(crate::agent_tools::PcTypeTool::new()));
         tools.register(Arc::new(crate::agent_tools::PcKeyTool::new()));
+        tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
 
         let bus = EventBus::default();
         // Reenvía la actividad de CADA agente con su rol (jerarquía visible).
