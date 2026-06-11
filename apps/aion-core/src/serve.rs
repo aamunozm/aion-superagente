@@ -232,6 +232,9 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/project/studio/audio", post(project_studio_audio))
         .route("/api/project/audio", get(project_audio))
         .route("/api/project/studio/remove", post(project_studio_remove))
+        // Subidas grandes: documentos/PDF/Office pueden pesar (un PPTX ~20 MB). El
+        // límite por defecto de axum (2 MB) cortaría la conexión; lo subimos a 64 MB.
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(cors)
         .layer(
             TraceLayer::new_for_http()
