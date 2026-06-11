@@ -676,6 +676,39 @@ async fn agent(
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
 
     let engine = active_engine();
+
+    // VÍA RÁPIDA conversacional: saludos, identidad ("¿cómo te llamas?", "¿qué haces/
+    // estudias?"), estado ("¿cómo estás?") o mensajes cortos sin intención de herramienta
+    // se responden con UNA sola llamada (cálida, como el chat, presentándose como Umbral),
+    // SIN el bucle ReAct —que para esto daba 8 vueltas y agotaba el tiempo—.
+    if agent_is_conversational(&body.task) {
+        let task = body.task.clone();
+        let lang = body.lang.clone();
+        tokio::spawn(async move {
+            let sys = format!("{}\n\n{}", self_awareness_prompt(), lang_directive(&lang));
+            let req = GenerateRequest {
+                messages: vec![Message::system(sys), Message::user(task)],
+                think: false,
+                temperature: Some(0.85),
+                max_tokens: Some(450),
+            };
+            let ans = match engine.generate(req).await {
+                Ok(m) => m.content.trim().to_string(),
+                Err(e) => format!("⚠️ {e}"),
+            };
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "answer", "text": ans, "steps": 1 }).to_string(),
+                ))
+                .await;
+            let _ = tx
+                .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                .await;
+        });
+        let stream = ReceiverStream::new(rx).map(Ok);
+        return Sse::new(stream);
+    }
+
     tokio::spawn(async move {
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(CalculatorTool));
@@ -1382,6 +1415,71 @@ async fn learn_from_failures(engine: &dyn LlmEngine, task: &str, failures: &[Str
         let _ = mem.store(&format!("[aprendizaje] {l}")).await;
         tracing::info!(lesson = %l, "aprendizaje persistido tras fallos");
     }
+}
+
+/// ¿El mensaje al AGENTE es CHARLA (no una tarea con herramientas)? Saludos, identidad,
+/// estado, o mensajes cortos sin intención de herramienta → vía rápida de 1 llamada.
+fn agent_is_conversational(task: &str) -> bool {
+    let t = task.trim().to_lowercase();
+    // Si menciona una herramienta/acción real, NO es solo charla → agente completo.
+    const TOOLISH: [&str; 26] = [
+        "archivo",
+        "carpeta",
+        "documento",
+        "pdf",
+        "word",
+        "excel",
+        "nota",
+        "web",
+        "internet",
+        "busca",
+        "abre",
+        "crea",
+        "ejecuta",
+        "comando",
+        "terminal",
+        "red ",
+        "correo",
+        "email",
+        "navega",
+        "descarga",
+        "instala",
+        "pantalla",
+        "clic",
+        "proyecto",
+        "skill",
+        "calcul",
+    ];
+    if TOOLISH.iter().any(|k| t.contains(k)) {
+        return false;
+    }
+    if is_trivial_query(task) {
+        return true;
+    }
+    // Charla sobre sí mismo o casual.
+    const CONV: [&str; 16] = [
+        "te llamas",
+        "quién eres",
+        "quien eres",
+        "qué haces",
+        "que haces",
+        "qué estudias",
+        "que estudias",
+        "sueñas",
+        "suenas",
+        "cómo estás",
+        "como estas",
+        "qué tal",
+        "que tal",
+        "cuéntame de ti",
+        "quién soy",
+        "quien soy",
+    ];
+    if CONV.iter().any(|k| t.contains(k)) {
+        return true;
+    }
+    // Mensaje corto sin intención de herramienta → trátalo como charla (rápido).
+    t.split_whitespace().count() <= 8
 }
 
 /// Heurística barata para decidir CUÁNDO no merece la pena consultar memoria
