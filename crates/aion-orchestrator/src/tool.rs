@@ -49,7 +49,15 @@ impl ToolRegistry {
     pub fn describe(&self) -> String {
         self.tools
             .values()
-            .map(|t| format!("- {}: {}", t.name(), t.description()))
+            .map(|t| {
+                // VELOCIDAD: solo la PRIMERA frase (la esencia) de cada herramienta. El
+                // catálogo completo inflaba el prompt y, como el agente lo re-procesa en
+                // CADA paso, lo ralentizaba mucho. La primera frase basta para elegir bien.
+                let d = t.description();
+                let first = d.split_once(". ").map(|(a, _)| a).unwrap_or(d);
+                let short: String = first.chars().take(110).collect();
+                format!("- {}: {}", t.name(), short.trim())
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }

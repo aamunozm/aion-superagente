@@ -49,7 +49,13 @@ fn main() {
             {
                 Ok(ollama_bin) => {
                     let mut ollama_cmd = std::process::Command::new(&ollama_bin);
-                    ollama_cmd.arg("serve").env("OLLAMA_HOST", OLLAMA_HOST);
+                    ollama_cmd
+                        .arg("serve")
+                        .env("OLLAMA_HOST", OLLAMA_HOST)
+                        // VELOCIDAD/MEMORIA sin perder calidad: flash-attention ON y la caché
+                        // KV en q8_0 (la mitad de memoria, un poco más rápido, calidad ~igual).
+                        .env("OLLAMA_FLASH_ATTENTION", "1")
+                        .env("OLLAMA_KV_CACHE_TYPE", "q8_0");
                     // Unix: nuevo grupo de procesos (pgid = pid de ollama) para poder
                     // matar a ollama Y a sus runners llama-server de una sola vez.
                     #[cfg(unix)]
