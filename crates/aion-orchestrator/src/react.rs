@@ -229,7 +229,7 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                 messages: vec![Message::system(self.system_prompt()), Message::user(user)],
                 think: false,
                 temperature: Some(0.2),
-                max_tokens: Some(512),
+                max_tokens: Some(400),
             };
 
             let msg = self.engine.generate(req).await?;
@@ -244,10 +244,14 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
 
             // ¿Respuesta final?
             if let Some(answer) = extract(&text, "Final Answer:") {
-                // VERIFICACIÓN: si hubo observaciones de herramientas, un juez comprueba
-                // que la respuesta esté RESPALDADA por ellas (no inventada). Solo añade
-                // una llamada cuando de verdad se usaron herramientas.
-                let answer = if self.verify && !scratchpad.trim().is_empty() {
+                // VERIFICACIÓN (anti-alucinación): un juez comprueba que la respuesta esté
+                // RESPALDADA por las observaciones. VELOCIDAD: solo gastamos esa llamada extra
+                // cuando hay DATOS concretos que se pueden inventar (números, conteos, IPs,
+                // fechas). La prosa pura (documentos, charla) no la necesita.
+                let answer = if self.verify
+                    && !scratchpad.trim().is_empty()
+                    && needs_verification(&answer)
+                {
                     self.verify_answer(task, &scratchpad, &answer).await
                 } else {
                     answer
@@ -513,6 +517,12 @@ fn extract(text: &str, label: &str) -> Option<String> {
     } else {
         Some(val)
     }
+}
+
+/// ¿La respuesta contiene DATOS verificables (números, conteos, IPs, fechas)? Solo
+/// entonces vale la pena gastar la llamada extra del juez de groundedness.
+fn needs_verification(answer: &str) -> bool {
+    answer.chars().any(|c| c.is_ascii_digit())
 }
 
 /// ¿La observación indica que la acción falló, se denegó o se canceló? Se usa para

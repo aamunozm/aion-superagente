@@ -107,6 +107,22 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         convos: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
+    // RIGHT-SIZE del CONTEXTO según la RAM (latencia mínima en CUALQUIER equipo): un ctx
+    // demasiado grande en una máquina modesta presiona la memoria y lo ralentiza todo. Se
+    // fija UNA vez (no por petición → no provoca recargas del modelo). Override: AION_NUM_CTX.
+    if std::env::var("AION_NUM_CTX").is_err() {
+        let ram = crate::onboarding::scan().ram_gb;
+        let ctx = if ram < 10.0 {
+            "4096"
+        } else if ram < 20.0 {
+            "6144"
+        } else {
+            "8192"
+        };
+        std::env::set_var("AION_NUM_CTX", ctx);
+        tracing::info!(ctx, ram_gb = ram, "contexto right-sized según RAM");
+    }
+
     // PRECARGA: deja el modelo local caliente en memoria para que el PRIMER mensaje
     // no pague la carga (2–9 s). En segundo plano para no bloquear el arranque.
     tokio::spawn(async {
