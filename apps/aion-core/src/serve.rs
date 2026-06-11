@@ -1122,7 +1122,7 @@ async fn library_grounding(prompt: &str) -> String {
 /// Aterrizaje del AGENTE con **reranker LLM** (Self-RAG): recupera (híbrido+MMR) y
 /// luego un juez decide qué recuerdos son realmente ÚTILES para la tarea antes de
 /// aplicarlos. Más precisión que el umbral solo (la latencia aquí es aceptable).
-async fn grounding_for_agent(engine: &dyn LlmEngine, task: &str) -> String {
+async fn grounding_for_agent(_engine: &dyn LlmEngine, task: &str) -> String {
     if is_trivial_query(task) {
         return String::new();
     }
@@ -1139,45 +1139,12 @@ async fn grounding_for_agent(engine: &dyn LlmEngine, task: &str) -> String {
     if hits.is_empty() {
         return String::new();
     }
-    // Juez de relevancia: ¿cuáles sirven para ESTA tarea?
-    let listed = hits
-        .iter()
-        .enumerate()
-        .map(|(i, h)| {
-            format!(
-                "{}. {}",
-                i + 1,
-                h.content.chars().take(180).collect::<String>()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let judge = GenerateRequest {
-        messages: vec![Message::user(format!(
-            "Tarea: {task}\n\nRecuerdos candidatos:\n{listed}\n\n¿Cuáles son ÚTILES para \
-             resolver la tarea? Responde SOLO los números separados por coma (p. ej. 1,3), \
-             o 'ninguno'."
-        ))],
-        think: false,
-        temperature: Some(0.0),
-        max_tokens: Some(20),
-    };
-    let keep: Vec<usize> = match engine.generate(judge).await {
-        Ok(m) => m
-            .content
-            .split(|c: char| !c.is_ascii_digit())
-            .filter_map(|s| s.parse::<usize>().ok())
-            .filter(|&n| n >= 1 && n <= hits.len())
-            .map(|n| n - 1)
-            .collect(),
-        Err(_) => (0..hits.len().min(3)).collect(), // si falla el juez, usa los top
-    };
-    if keep.is_empty() {
-        return String::new();
-    }
+    // VELOCIDAD: antes había una llamada LLM extra (juez de relevancia) por cada tarea
+    // del agente. La quitamos: el umbral de la recuperación ya filtra bien; usamos los
+    // 3 recuerdos más relevantes directamente. Un round-trip menos por tarea.
     let mut s = String::from("CONOCIMIENTO QUE YA TIENES, útil para esta tarea (aplícalo):\n");
-    for i in keep {
-        s.push_str(&format!("- {}\n", hits[i].content));
+    for h in hits.iter().take(3) {
+        s.push_str(&format!("- {}\n", h.content));
     }
     s
 }

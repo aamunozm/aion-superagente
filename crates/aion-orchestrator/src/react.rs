@@ -543,6 +543,8 @@ fn sanitize(text: &str) -> String {
         "</channel>",
         "<think>",
         "</think>",
+        "<thought>",
+        "</thought>",
         "<|",
         "|>",
     ] {
