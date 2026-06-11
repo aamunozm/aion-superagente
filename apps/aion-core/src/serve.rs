@@ -1715,7 +1715,8 @@ async fn project_discover(Json(b): Json<Discover>) -> Json<serde_json::Value> {
 #[derive(Deserialize)]
 struct StudioGen {
     project_id: String,
-    /// "informe" | "resumen" | "mapa".
+    /// Tipo de salida; vacío para el endpoint de audio (que no lo usa).
+    #[serde(default)]
     kind: String,
     #[serde(default)]
     lang: Option<String>,
