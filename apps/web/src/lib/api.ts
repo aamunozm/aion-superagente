@@ -99,6 +99,19 @@ export async function agentImport(content_b64: string): Promise<{ ok: boolean; r
 export async function agentWipe(): Promise<{ ok: boolean; removed?: number }> {
   return jpost("/api/agent/wipe", {});
 }
+export type A2aPeer = { name: string; url: string };
+export type A2aConfig = { enabled: boolean; token: string; peers: A2aPeer[] };
+export async function a2aGet(): Promise<{ config: A2aConfig; identity: AionIdentity | null }> {
+  try {
+    return await fetch(`${BRIDGE_URL}/api/a2a`).then((x) => x.json());
+  } catch {
+    return { config: { enabled: false, token: "", peers: [] }, identity: null };
+  }
+}
+export const a2aSet = (config: A2aConfig) => jpost<{ ok: boolean }>("/api/a2a", config);
+export const a2aSend = (url: string, message: string) =>
+  jpost<{ ok?: boolean; reply?: string; name?: string; error?: string }>("/api/a2a/send", { url, message });
+
 export type AionIdentity = { id: string; name: string; born_at: string };
 export async function getIdentity(): Promise<AionIdentity | null> {
   try {

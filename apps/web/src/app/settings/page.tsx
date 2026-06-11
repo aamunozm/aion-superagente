@@ -18,7 +18,11 @@ import {
   agentImport,
   agentWipe,
   getIdentity,
+  a2aGet,
+  a2aSet,
+  a2aSend,
   type AionIdentity,
+  type A2aConfig,
   type CredMeta,
   type InstalledModel,
   type ModelOption,
@@ -38,10 +42,24 @@ export default function SettingsPage() {
   const [modelMsg, setModelMsg] = useState<string>("");
   const [backupMsg, setBackupMsg] = useState<string>("");
   const [ident, setIdent] = useState<AionIdentity | null>(null);
+  const [a2a, setA2a] = useState<A2aConfig>({ enabled: false, token: "", peers: [] });
+  const [a2aMsg, setA2aMsg] = useState<string>("");
+  const [newPeer, setNewPeer] = useState({ name: "", url: "" });
 
   useEffect(() => {
     getIdentity().then(setIdent);
+    a2aGet().then((r) => setA2a(r.config));
   }, []);
+
+  function saveA2a(next: A2aConfig) {
+    setA2a(next);
+    a2aSet(next);
+  }
+  async function testPeer(url: string) {
+    setA2aMsg("Contactando…");
+    const r = await a2aSend(url, "Hola, ¿quién eres? Preséntate con tu nombre e id.");
+    setA2aMsg(r.reply ? `${r.name ?? "Agente"}: ${r.reply}` : `Error: ${r.error ?? "sin respuesta"}`);
+  }
 
   async function importAgent(file: File) {
     setBackupMsg("Importando…");
@@ -412,6 +430,61 @@ export default function SettingsPage() {
 
           {backupMsg && (
             <p className="text-xs mt-3" style={{ color: "var(--text-2)" }}>{backupMsg}</p>
+          )}
+        </div>
+
+        {/* ── A2A: comunicación entre agentes ── */}
+        <div className="card">
+          <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
+            <Icon name="graph" size={16} /> Comunicación entre agentes (A2A)
+          </h2>
+          <p className="text-xs mb-3" style={{ color: "var(--text-3)" }}>
+            Deja que AION hable con otros agentes (otros AION u otros sistemas). Cada mensaje lleva su
+            identidad única; el secreto compartido protege quién puede hablarle. Ambos agentes deben
+            tener el MISMO secreto.
+          </p>
+          <label className="flex items-center gap-2 text-sm mb-3">
+            <input
+              type="checkbox"
+              checked={a2a.enabled}
+              onChange={(e) => saveA2a({ ...a2a, enabled: e.target.checked })}
+            />
+            Activar A2A (recibir y enviar mensajes de otros agentes)
+          </label>
+          <input
+            className="input mb-3"
+            placeholder="Secreto compartido (token)"
+            value={a2a.token}
+            onChange={(e) => setA2a({ ...a2a, token: e.target.value })}
+            onBlur={() => saveA2a(a2a)}
+          />
+          <p className="text-xs font-medium mb-1" style={{ color: "var(--text-2)" }}>Agentes conocidos</p>
+          {a2a.peers.length === 0 && (
+            <p className="text-[11px] mb-2" style={{ color: "var(--text-3)" }}>Aún no añadiste ningún agente.</p>
+          )}
+          {a2a.peers.map((p, i) => (
+            <div key={i} className="flex items-center gap-2 mb-1.5 text-sm">
+              <span className="flex-1 truncate"><strong>{p.name || "sin nombre"}</strong> · <span style={{ color: "var(--text-3)" }}>{p.url}</span></span>
+              <button className="text-xs" style={{ color: "var(--gold-deep)" }} onClick={() => testPeer(p.url)}>probar</button>
+              <button className="text-xs" style={{ color: "var(--text-3)" }} onClick={() => saveA2a({ ...a2a, peers: a2a.peers.filter((_, j) => j !== i) })}>✕</button>
+            </div>
+          ))}
+          <div className="flex flex-wrap items-center gap-2 mt-2">
+            <input className="input flex-1 min-w-[120px]" placeholder="Nombre" value={newPeer.name} onChange={(e) => setNewPeer({ ...newPeer, name: e.target.value })} />
+            <input className="input flex-1 min-w-[160px]" placeholder="http://IP:8765" value={newPeer.url} onChange={(e) => setNewPeer({ ...newPeer, url: e.target.value })} />
+            <button
+              className="btn"
+              onClick={() => {
+                if (!newPeer.url.trim()) return;
+                saveA2a({ ...a2a, peers: [...a2a.peers, { name: newPeer.name.trim(), url: newPeer.url.trim() }] });
+                setNewPeer({ name: "", url: "" });
+              }}
+            >
+              Añadir
+            </button>
+          </div>
+          {a2aMsg && (
+            <p className="text-xs mt-3 whitespace-pre-wrap" style={{ color: "var(--text-2)" }}>{a2aMsg}</p>
           )}
         </div>
       </div>

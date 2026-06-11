@@ -5,6 +5,7 @@
 //! - `chat <prompt...>` F1: chat real con el LLM local (streaming de razonamiento
 //!   y respuesta) usando `OllamaEngine` contra `gemma4-reason`.
 
+mod a2a;
 mod agent_tools;
 mod credentials;
 mod empathy;
