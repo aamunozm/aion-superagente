@@ -51,11 +51,20 @@ impl OllamaEngine {
         let base_url = base_url.into();
         let model = model.into();
         let id = format!("ollama:{model}");
+        // FIABILIDAD: timeouts. Sin esto, si el runner local se cuelga (p. ej. por
+        // contención de GPU con otro ollama), la petición se queda colgada PARA SIEMPRE
+        // y bloquea la cola. `read_timeout` corta si NO llegan bytes en 120s (las
+        // generaciones normales fluyen token a token, así que no las afecta).
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_default();
         Self {
             base_url,
             model,
             id,
-            http: reqwest::Client::new(),
+            http,
         }
     }
 
