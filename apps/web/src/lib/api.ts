@@ -130,7 +130,7 @@ export async function chatStream(
 
 export type Project = { id: string; name: string; desc: string; icon: string; created: string; updated: string };
 export type ProjectSource = { id: string; title: string; kind: string; content: string; active: boolean; created: string };
-export type ProjectOutput = { id: string; kind: string; title: string; content: string; created: string };
+export type ProjectOutput = { id: string; kind: string; title: string; content: string; created: string; audio?: string };
 
 async function jpost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BRIDGE_URL}${path}`, {
@@ -176,6 +176,15 @@ export const projectDiscover = (project_id: string, query: string) =>
     project_id,
     query,
   });
+/** Genera un Audio Overview (guion hablado + síntesis con el TTS del sistema). */
+export const projectStudioAudio = (project_id: string) =>
+  jpost<{ ok: boolean; output?: ProjectOutput; error?: string }>("/api/project/studio/audio", {
+    project_id,
+    lang: lang(),
+  });
+/** URL para reproducir el audio de una salida de Studio. */
+export const projectAudioUrl = (project_id: string, file: string) =>
+  `${BRIDGE_URL}/api/project/audio?project_id=${encodeURIComponent(project_id)}&file=${encodeURIComponent(file)}`;
 export const projectStudioGenerate = (project_id: string, kind: string) =>
   jpost<{ ok: boolean; output?: ProjectOutput; error?: string }>("/api/project/studio/generate", {
     project_id,

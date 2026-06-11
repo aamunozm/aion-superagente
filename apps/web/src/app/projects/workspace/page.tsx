@@ -12,6 +12,8 @@ import {
   projectSourceRemove,
   projectDiscover,
   projectStudioGenerate,
+  projectStudioAudio,
+  projectAudioUrl,
   projectStudioRemove,
   chatStream,
   type Project,
@@ -32,6 +34,7 @@ const STUDIO = [
   { kind: "guia", label: "Guía de estudio", icon: "folder" as const },
   { kind: "timeline", label: "Línea de tiempo", icon: "graph" as const },
   { kind: "plan", label: "Próximos pasos", icon: "brain" as const },
+  { kind: "audio", label: "Audio overview", icon: "wave" as const },
 ];
 
 export default function ProjectWorkspace() {
@@ -207,7 +210,7 @@ export default function ProjectWorkspace() {
   async function generate(kind: string) {
     if (generating) return;
     setGenerating(kind);
-    const r = await projectStudioGenerate(id, kind);
+    const r = kind === "audio" ? await projectStudioAudio(id) : await projectStudioGenerate(id, kind);
     setGenerating(null);
     if (r.ok && r.output) {
       setOutputs((o) => [r.output!, ...o]);
@@ -323,7 +326,7 @@ export default function ProjectWorkspace() {
                   <input
                     ref={fileRef}
                     type="file"
-                    accept=".pdf,.txt,.md,.markdown"
+                    accept=".pdf,.txt,.md,.markdown,.docx,.xlsx,.pptx"
                     className="hidden"
                     onChange={(e) => {
                       const f = e.target.files?.[0];
@@ -336,7 +339,7 @@ export default function ProjectWorkspace() {
                     disabled={uploading}
                     onClick={() => fileRef.current?.click()}
                   >
-                    {uploading ? "Subiendo…" : "Elegir PDF / TXT / MD"}
+                    {uploading ? "Subiendo…" : "Elegir PDF / Word / Excel / PPT / TXT"}
                   </button>
                   <p className="text-[10px]" style={{ color: "var(--text-3)" }}>
                     Se extrae el texto del documento para que el chat lo use.
@@ -537,6 +540,11 @@ export default function ProjectWorkspace() {
                 ✕
               </button>
             </div>
+            {viewing.kind === "audio" && viewing.audio && (
+              <audio controls className="w-full mb-3" src={projectAudioUrl(id, viewing.audio)}>
+                Tu navegador no puede reproducir el audio.
+              </audio>
+            )}
             <div className="text-sm whitespace-pre-wrap" style={{ color: "var(--text-1)" }}>
               {viewing.content}
             </div>

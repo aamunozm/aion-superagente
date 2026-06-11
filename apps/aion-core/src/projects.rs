@@ -47,11 +47,14 @@ fn yes() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Output {
     pub id: String,
-    /// "informe" | "resumen" | "mapa".
+    /// "informe" | "resumen" | "mapa" | "audio" | …
     pub kind: String,
     pub title: String,
     pub content: String,
     pub created: String,
+    /// Nombre del fichero de audio (si la salida es un "audio overview"). Vacío si no.
+    #[serde(default)]
+    pub audio: String,
 }
 
 fn now() -> String {
@@ -174,18 +177,37 @@ pub fn outputs(pid: &str) -> Vec<Output> {
 }
 
 pub fn add_output(pid: &str, kind: &str, title: &str, content: &str) -> Output {
+    add_output_audio(pid, kind, title, content, "")
+}
+
+/// Como `add_output` pero adjuntando el nombre del fichero de audio (audio overview).
+pub fn add_output_audio(pid: &str, kind: &str, title: &str, content: &str, audio: &str) -> Output {
     let o = Output {
         id: uuid::Uuid::new_v4().to_string(),
         kind: kind.trim().to_string(),
         title: title.trim().to_string(),
         content: content.trim().to_string(),
         created: now(),
+        audio: audio.trim().to_string(),
     };
     let mut all = outputs(pid);
     all.insert(0, o.clone());
     write_vec(&studio_path(pid), &all);
     touch(pid);
     o
+}
+
+/// Carpeta de audios del proyecto (se crea si no existe).
+pub fn audio_dir(pid: &str) -> PathBuf {
+    let d = base().join(pid).join("audio");
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+/// Ruta de un fichero de audio del proyecto (saneando el nombre).
+pub fn audio_path(pid: &str, file: &str) -> PathBuf {
+    let safe = file.replace(['/', '\\'], "_");
+    audio_dir(pid).join(safe)
 }
 
 pub fn remove_output(pid: &str, oid: &str) {

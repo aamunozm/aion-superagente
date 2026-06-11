@@ -20,8 +20,10 @@ use aion_memory::{ConsolidationConfig, VectorMemory};
 use aion_orchestrator::{CalculatorTool, ReActAgent, ToolRegistry};
 use aion_skills::{SkillManifest, WasmSkillHost, SUM_TO_WAT};
 use axum::{
-    extract::State,
+    extract::{Query, State},
+    http::{header, StatusCode},
     response::sse::{Event, Sse},
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -116,6 +118,28 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // INSIGHT AUTÓNOMO POR PROYECTO: cada ~30 min AION avanza un proyecto en segundo
+    // plano (genera un hallazgo en su Studio + te avisa por la Bandeja). Cadencia
+    // suave para no competir con el chat. Desactivable con AION_AUTO_PROJECT=0.
+    tokio::spawn(async {
+        if std::env::var("AION_AUTO_PROJECT").as_deref() == Ok("0") {
+            return;
+        }
+        let mins: u64 = std::env::var("AION_AUTO_PROJECT_MINS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&m| m >= 5)
+            .unwrap_or(30);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(mins * 60)).await;
+            let engine = OllamaEngine::default_local();
+            let (ok, detail) = crate::work_project_once(&engine).await;
+            if ok {
+                tracing::info!(detail = %detail, "insight autónomo de proyecto");
+            }
+        }
+    });
+
     // REINDEXADO: si cambió el modelo de embeddings (p. ej. nomic→BGE-M3), re-embebe
     // los recuerdos viejos UNA vez al arrancar para que la recuperación funcione.
     tokio::spawn(async {
@@ -205,6 +229,8 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
             "/api/project/studio/generate",
             post(project_studio_generate),
         )
+        .route("/api/project/studio/audio", post(project_studio_audio))
+        .route("/api/project/audio", get(project_audio))
         .route("/api/project/studio/remove", post(project_studio_remove))
         .layer(cors)
         .layer(
@@ -1785,6 +1811,156 @@ struct OutRemove {
 async fn project_studio_remove(Json(b): Json<OutRemove>) -> Json<serde_json::Value> {
     crate::projects::remove_output(&b.project_id, &b.id);
     Json(serde_json::json!({ "ok": true }))
+}
+
+/// **Audio Overview**: genera un GUION hablado de las fuentes y lo sintetiza a audio
+/// con el TTS del SISTEMA (sin instalar nada), reproducible en el navegador.
+async fn project_studio_audio(Json(b): Json<StudioGen>) -> Json<serde_json::Value> {
+    let Some(p) = crate::projects::get(&b.project_id) else {
+        return Json(serde_json::json!({ "ok": false, "error": "proyecto no encontrado" }));
+    };
+    let active = crate::projects::sources(&b.project_id)
+        .into_iter()
+        .filter(|s| s.active)
+        .count();
+    if active == 0 {
+        return Json(
+            serde_json::json!({ "ok": false, "error": "añade al menos una fuente activa antes de generar" }),
+        );
+    }
+    // 1) Guion hablado (prosa natural, sin markdown).
+    let grounding = crate::projects::grounding(&b.project_id);
+    let engine = active_engine();
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(format!(
+                "{}\nEscribe un GUION HABLADO, natural y ameno, de 150-220 palabras, que resuma \
+                 las fuentes del proyecto para ESCUCHARLO. Prosa fluida, sin markdown, sin viñetas, \
+                 sin títulos. Empieza saludando brevemente.",
+                lang_directive(&b.lang)
+            )),
+            Message::user(grounding),
+        ],
+        think: false,
+        temperature: Some(0.6),
+        max_tokens: Some(500),
+    };
+    let script = match engine.generate(req).await {
+        Ok(m) => m.content.trim().to_string(),
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    };
+    if script.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "no se pudo generar el guion" }));
+    }
+    // 2) Sintetizar (bloqueante → hilo aparte).
+    let pid = b.project_id.clone();
+    let out_id = uuid::Uuid::new_v4().to_string();
+    let script_for_synth = script.clone();
+    let audio = tokio::task::spawn_blocking(move || synth_audio(&pid, &out_id, &script_for_synth))
+        .await
+        .map_err(|e| e.to_string());
+    let audio = match audio {
+        Ok(Ok(file)) => file,
+        Ok(Err(e)) => return Json(serde_json::json!({ "ok": false, "error": e })),
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+    // 3) Guardar la salida con su fichero de audio.
+    let o = crate::projects::add_output_audio(
+        &b.project_id,
+        "audio",
+        &format!("Audio overview · {}", p.name),
+        &script,
+        &audio,
+    );
+    Json(serde_json::json!({ "ok": true, "output": o }))
+}
+
+/// Sintetiza `text` a un fichero de audio reproducible en el navegador usando el TTS
+/// del SISTEMA (macOS `say`+`afconvert`, Windows System.Speech). Devuelve el nombre
+/// del fichero generado dentro de la carpeta de audio del proyecto.
+fn synth_audio(pid: &str, out_id: &str, text: &str) -> Result<String, String> {
+    let dir = crate::projects::audio_dir(pid);
+    let script = dir.join(format!("{out_id}.txt"));
+    std::fs::write(&script, text).map_err(|e| format!("no pude escribir el guion: {e}"))?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let aiff = dir.join(format!("{out_id}.aiff"));
+        let m4a = dir.join(format!("{out_id}.m4a"));
+        let st = std::process::Command::new("say")
+            .arg("-f")
+            .arg(&script)
+            .arg("-o")
+            .arg(&aiff)
+            .status()
+            .map_err(|e| format!("say falló: {e}"))?;
+        if !st.success() {
+            return Err("el TTS del sistema (say) no pudo generar el audio".into());
+        }
+        // AIFF → M4A (AAC), que el navegador reproduce de forma fiable.
+        let conv = std::process::Command::new("afconvert")
+            .arg(&aiff)
+            .arg(&m4a)
+            .args(["-f", "m4af", "-d", "aac"])
+            .status();
+        let _ = std::fs::remove_file(&aiff);
+        let _ = std::fs::remove_file(&script);
+        match conv {
+            Ok(s) if s.success() => Ok(format!("{out_id}.m4a")),
+            _ => Err("afconvert no pudo convertir el audio".into()),
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let wav = dir.join(format!("{out_id}.wav"));
+        let ps = format!(
+            "Add-Type -AssemblyName System.Speech; \
+             $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; \
+             $s.SetOutputToWaveFile('{}'); \
+             $s.Speak([System.IO.File]::ReadAllText('{}')); $s.Dispose();",
+            wav.to_string_lossy().replace('\'', "''"),
+            script.to_string_lossy().replace('\'', "''"),
+        );
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let st = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map_err(|e| format!("powershell TTS falló: {e}"))?;
+        let _ = std::fs::remove_file(&script);
+        if st.success() {
+            Ok(format!("{out_id}.wav"))
+        } else {
+            Err("el TTS de Windows no pudo generar el audio".into())
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (out_id, &script);
+        Err("síntesis de audio no disponible en esta plataforma".into())
+    }
+}
+
+#[derive(Deserialize)]
+struct AudioQuery {
+    project_id: String,
+    file: String,
+}
+/// Sirve el fichero de audio de una salida de Studio (audio overview).
+async fn project_audio(Query(q): Query<AudioQuery>) -> axum::response::Response {
+    let path = crate::projects::audio_path(&q.project_id, &q.file);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let ct = if q.file.ends_with(".wav") {
+                "audio/wav"
+            } else {
+                "audio/mp4"
+            };
+            ([(header::CONTENT_TYPE, ct)], bytes).into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, "audio no encontrado").into_response(),
+    }
 }
 
 // ── Bóveda de credenciales (Llavero) ────────────────────────────────────────

@@ -34,6 +34,7 @@ async-trait.workspace = true
 base64 = "0.22"
 sysinfo = "0.32"
 pdf-extract = "0.7"
+zip = "8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors", "trace"] }

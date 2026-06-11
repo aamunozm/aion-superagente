@@ -211,10 +211,82 @@ pub fn extract_text(file: &Path) -> Result<String, String> {
         }
         "pdf" => pdf_extract::extract_text(file)
             .map_err(|e| format!("no pude extraer el texto del PDF: {e}")),
+        // Office (OOXML) = ZIP de XML. Leemos las partes con texto y quitamos las etiquetas.
+        "docx" => extract_office(file, OfficeKind::Docx),
+        "xlsx" => extract_office(file, OfficeKind::Xlsx),
+        "pptx" => extract_office(file, OfficeKind::Pptx),
         other => Err(format!(
-            "formato no soportado todavía: «.{other}» (por ahora: .txt, .md, .pdf)"
+            "formato no soportado todavía: «.{other}» (por ahora: .txt, .md, .pdf, .docx, .xlsx, .pptx)"
         )),
     }
+}
+
+enum OfficeKind {
+    Docx,
+    Xlsx,
+    Pptx,
+}
+
+/// Extrae el texto de un documento OOXML (Word/Excel/PowerPoint): abre el ZIP, lee
+/// las partes XML con contenido y elimina las etiquetas. Sin dependencias pesadas.
+fn extract_office(file: &Path, kind: OfficeKind) -> Result<String, String> {
+    use std::io::Read;
+    let f = std::fs::File::open(file).map_err(|e| format!("no pude abrir el archivo: {e}"))?;
+    let mut zip = zip::ZipArchive::new(f).map_err(|e| format!("no es un Office válido: {e}"))?;
+
+    // Qué partes leer según el tipo.
+    let names: Vec<String> = match kind {
+        OfficeKind::Docx => vec!["word/document.xml".to_string()],
+        OfficeKind::Xlsx => vec!["xl/sharedStrings.xml".to_string()],
+        OfficeKind::Pptx => (0..zip.len())
+            .filter_map(|i| zip.by_index(i).ok().map(|e| e.name().to_string()))
+            .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
+            .collect(),
+    };
+
+    let mut out = String::new();
+    for name in names {
+        if let Ok(mut entry) = zip.by_name(&name) {
+            let mut xml = String::new();
+            if entry.read_to_string(&mut xml).is_ok() {
+                out.push_str(&strip_xml(&xml));
+                out.push('\n');
+            }
+        }
+    }
+    let out = out.trim().to_string();
+    if out.is_empty() {
+        Err("el documento no tiene texto extraíble".into())
+    } else {
+        Ok(out)
+    }
+}
+
+/// Convierte XML de OOXML a texto plano: cierres de párrafo/celda → salto de línea,
+/// se eliminan las etiquetas y se decodifican las entidades XML básicas.
+fn strip_xml(xml: &str) -> String {
+    // Marca fin de párrafo (Word), fila (Excel) y párrafo de forma (PowerPoint).
+    let mut s = xml
+        .replace("</w:p>", "\n")
+        .replace("</a:p>", "\n")
+        .replace("</row>", "\n");
+    // Elimina todas las etiquetas.
+    let mut text = String::with_capacity(s.len());
+    let mut inside = false;
+    for c in s.drain(..) {
+        match c {
+            '<' => inside = true,
+            '>' => inside = false,
+            _ if !inside => text.push(c),
+            _ => {}
+        }
+    }
+    // Entidades XML básicas.
+    text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
 }
 
 /// Trocea texto en pasajes por ventana de palabras con solape (preserva contexto
