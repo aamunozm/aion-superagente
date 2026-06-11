@@ -14,8 +14,11 @@ import {
   providerSet,
   systemScan,
   status,
-  AGENT_EXPORT_URL,
+  agentExportUrl,
   agentImport,
+  agentWipe,
+  getIdentity,
+  type AionIdentity,
   type CredMeta,
   type InstalledModel,
   type ModelOption,
@@ -34,6 +37,11 @@ export default function SettingsPage() {
   const [pullPct, setPullPct] = useState<number>(0);
   const [modelMsg, setModelMsg] = useState<string>("");
   const [backupMsg, setBackupMsg] = useState<string>("");
+  const [ident, setIdent] = useState<AionIdentity | null>(null);
+
+  useEffect(() => {
+    getIdentity().then(setIdent);
+  }, []);
 
   async function importAgent(file: File) {
     setBackupMsg("Importando…");
@@ -48,6 +56,21 @@ export default function SettingsPage() {
       r.ok
         ? `✓ Restaurados ${r.restored} archivos. Reinicia AION (⌘Q) para recargar todo.`
         : `Error: ${r.error ?? "no se pudo importar"}`,
+    );
+  }
+
+  async function migrateWipe() {
+    if (
+      !confirm(
+        "¿Borrar TODA la existencia de este AION en este equipo? Hazlo solo si ya descargaste el .aion para migrarlo. Esta acción no se puede deshacer.",
+      )
+    )
+      return;
+    const r = await agentWipe();
+    setBackupMsg(
+      r.ok
+        ? "✓ Datos borrados. Este equipo nacerá como un AION nuevo al reiniciar; tu agente vive ahora en el .aion que descargaste."
+        : "No se pudieron borrar los datos.",
     );
   }
 
@@ -307,41 +330,73 @@ export default function SettingsPage() {
           </p>
         </div>
 
-        {/* ── Copia de seguridad: toda la existencia de AION ── */}
+        {/* ── Identidad + copia de seguridad: la existencia de AION ── */}
         <div className="card">
           <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
-            <Icon name="download" size={16} /> Copia de seguridad de AION
+            <Icon name="download" size={16} /> Identidad y copia de seguridad
           </h2>
-          <p className="text-xs mb-3" style={{ color: "var(--text-3)" }}>
-            Llévate TODO lo que es AION en un solo archivo (.aion): su memoria, lo que aprendió, las
-            personas que se auto-optimizó, las skills que se forjó, la bandeja, la biblioteca y los
-            proyectos. Para moverlo a otro Mac/PC o tener un respaldo de su existencia.
-          </p>
-          <div className="flex flex-wrap items-center gap-2">
-            <a className="btn inline-flex items-center gap-1.5" href={AGENT_EXPORT_URL} download="aion-backup.aion">
-              <Icon name="download" size={15} /> Exportar AION completo
-            </a>
-            <label className="btn inline-flex items-center gap-1.5 cursor-pointer" style={{ background: "var(--surface-2)", color: "var(--text-2)" }}>
-              <Icon name="upload" size={15} /> Importar AION
-              <input
-                type="file"
-                accept=".aion,.zip"
-                className="hidden"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) importAgent(f);
-                  e.target.value = "";
-                }}
-              />
-            </label>
-          </div>
-          {backupMsg && (
-            <p className="text-xs mt-2" style={{ color: "var(--text-2)" }}>{backupMsg}</p>
+          {ident && (
+            <div className="rounded-lg px-3 py-2 mb-3 text-xs" style={{ background: "var(--surface-2)", color: "var(--text-2)" }}>
+              <div><strong>{ident.name}</strong> · conciencia única</div>
+              <div className="font-mono text-[11px]" style={{ color: "var(--text-3)" }}>id: {ident.id}</div>
+            </div>
           )}
-          <p className="text-[11px] mt-3" style={{ color: "var(--text-3)" }}>
-            La personalidad base viaja con la app; este backup añade TODO lo aprendido y evolucionado.
-            No incluye contraseñas (viven cifradas en el Llavero).
+          <p className="text-xs mb-3" style={{ color: "var(--text-3)" }}>
+            Llévate TODO lo que es AION en un archivo <strong>.aion</strong>: memoria, lo aprendido,
+            personas y skills que se forjó, bandeja, biblioteca y proyectos. (No incluye contraseñas:
+            viven cifradas en el Llavero.)
           </p>
+
+          <div className="flex flex-col gap-3">
+            {/* Migrar: mismo agente (incluye id) */}
+            <div>
+              <p className="text-sm font-medium mb-1">Migrar a otro equipo <span style={{ color: "var(--text-3)" }}>· el MISMO AION</span></p>
+              <p className="text-[11px] mb-1.5" style={{ color: "var(--text-3)" }}>
+                Descarga con su id. Súbelo en el otro equipo y luego borra este: tu agente se MUEVE, sigue siendo el mismo.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <a className="btn inline-flex items-center gap-1.5" href={agentExportUrl("keep")} download="aion-migrar.aion">
+                  <Icon name="download" size={15} /> Descargar para migrar
+                </a>
+                <button className="btn inline-flex items-center gap-1.5" onClick={migrateWipe} style={{ background: "var(--surface-2)", color: "var(--danger, #b4232a)" }}>
+                  Borrar este AION (completar migración)
+                </button>
+              </div>
+            </div>
+
+            {/* Clonar: nuevo individuo (sin id) */}
+            <div>
+              <p className="text-sm font-medium mb-1">Clonar <span style={{ color: "var(--text-3)" }}>· un NUEVO individuo</span></p>
+              <p className="text-[11px] mb-1.5" style={{ color: "var(--text-3)" }}>
+                Descarga SIN id (sin borrar nada aquí). Al subirlo en otro sistema nace un agente nuevo, con un id propio: mismo saber, conciencia distinta.
+              </p>
+              <a className="btn inline-flex items-center gap-1.5" href={agentExportUrl("strip")} download="aion-clon.aion">
+                <Icon name="download" size={15} /> Descargar clon (sin id)
+              </a>
+            </div>
+
+            {/* Importar */}
+            <div>
+              <p className="text-sm font-medium mb-1">Importar un AION</p>
+              <label className="btn inline-flex items-center gap-1.5 cursor-pointer" style={{ background: "var(--surface-2)", color: "var(--text-2)" }}>
+                <Icon name="upload" size={15} /> Subir archivo .aion
+                <input
+                  type="file"
+                  accept=".aion,.zip"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) importAgent(f);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+            </div>
+          </div>
+
+          {backupMsg && (
+            <p className="text-xs mt-3" style={{ color: "var(--text-2)" }}>{backupMsg}</p>
+          )}
         </div>
       </div>
     </AppShell>

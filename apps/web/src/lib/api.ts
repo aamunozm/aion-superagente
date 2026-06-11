@@ -65,10 +65,25 @@ export async function confirmDecision(id: string, approved: boolean): Promise<vo
   }).catch(() => {});
 }
 
-/** Backup COMPLETO de AION (memoria + personas + skills + bandeja + biblioteca + proyectos). */
-export const AGENT_EXPORT_URL = `${BRIDGE_URL}/api/agent/export`;
+/** Backup COMPLETO de AION (memoria + personas + skills + bandeja + biblioteca + proyectos).
+ *  mode "keep" = migrar (incluye el id: mismo agente). "strip" = clon (sin id → nuevo individuo). */
+export const agentExportUrl = (mode: "keep" | "strip") =>
+  `${BRIDGE_URL}/api/agent/export?identity=${mode}`;
 export async function agentImport(content_b64: string): Promise<{ ok: boolean; restored?: number; error?: string }> {
   return jpost("/api/agent/import", { content_b64 });
+}
+/** Borra toda la existencia local (completa una migración). Destructivo. */
+export async function agentWipe(): Promise<{ ok: boolean; removed?: number }> {
+  return jpost("/api/agent/wipe", {});
+}
+export type AionIdentity = { id: string; name: string; born_at: string };
+export async function getIdentity(): Promise<AionIdentity | null> {
+  try {
+    const r = await fetch(`${BRIDGE_URL}/api/identity`).then((x) => x.json());
+    return (r.identity as AionIdentity) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** Saludo proactivo de AION al abrir (cálido, con continuidad). Vacío si no hay. */

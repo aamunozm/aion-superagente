@@ -204,6 +204,12 @@ export default function ChatPage() {
     };
   }, []);
 
+  // El chat siempre empieza ABAJO (lo más reciente): al cargar la conversación,
+  // al cambiar de chat y cuando AION te escribe, baja al final.
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "auto" });
+  }, [convoId, turns.length, reachouts.length]);
+
   // Lee un archivo como base64 (sin el prefijo data:).
   function readAsBase64(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -405,26 +411,6 @@ export default function ChatPage() {
             chatear (te avisaré con una notificación). Puedes dejar esta ventana abierta.
           </div>
         )}
-        {reachouts.length > 0 && (
-          <div className="flex flex-col gap-2">
-            <p className="text-xs font-medium" style={{ color: "var(--accent)" }}>
-<span className="inline-flex items-center gap-1.5"><Icon name="sparkle" size={13} /> AION te escribió mientras no estabas</span>
-            </p>
-            {reachouts.map((m) => (
-              <div
-                key={m.id}
-                className="msg max-w-[85%] self-start"
-                style={{ borderColor: "var(--accent)" }}
-              >
-                <p className="text-xs mb-1" style={{ color: "var(--accent)" }}>
-                  <span className="inline-flex items-center gap-1"><Icon name={INBOX_ICON[m.kind] ?? "sparkle"} size={12} /> {m.kind}</span> ·{" "}
-                  {new Date(m.at).toLocaleString()}
-                </p>
-                <p className="whitespace-pre-wrap">{m.text}</p>
-              </div>
-            ))}
-          </div>
-        )}
         {turns.length === 0 && reachouts.length === 0 && (
           <p className="text-center text-sm mt-20" style={{ color: "var(--text-3)" }}>
             {mode === "chat"
@@ -477,6 +463,23 @@ export default function ChatPage() {
             )}
           </div>
         ))}
+        {/* Lo que AION te escribió por su cuenta va AL FINAL (lo más reciente, abajo). */}
+        {reachouts.length > 0 && (
+          <div className="flex flex-col gap-2">
+            <p className="text-xs font-medium" style={{ color: "var(--accent)" }}>
+              <span className="inline-flex items-center gap-1.5"><Icon name="sparkle" size={13} /> AION te escribió</span>
+            </p>
+            {reachouts.map((m) => (
+              <div key={m.id} className="msg max-w-[85%] self-start" style={{ borderColor: "var(--accent)" }}>
+                <p className="text-xs mb-1" style={{ color: "var(--accent)" }}>
+                  <span className="inline-flex items-center gap-1"><Icon name={INBOX_ICON[m.kind] ?? "sparkle"} size={12} /> {m.kind}</span> ·{" "}
+                  {new Date(m.at).toLocaleString()}
+                </p>
+                <p className="whitespace-pre-wrap">{m.text}</p>
+              </div>
+            ))}
+          </div>
+        )}
         <div ref={endRef} />
       </div>
 
