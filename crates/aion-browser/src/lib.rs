@@ -31,15 +31,24 @@ impl Default for WebClient {
 
 impl WebClient {
     pub fn new() -> Self {
-        let http = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             // UA de navegador real: algunos sitios bloquean clientes desconocidos.
             .user_agent(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
                  (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-            )
-            .build()
-            .unwrap_or_default();
+            );
+        // PRIVACIDAD: si Ariel configura un proxy (Tor SOCKS5 o VPN/proxy), TODO el tráfico
+        // web de AION sale por ahí → oculta la IP real. Ej.: AION_PROXY=socks5h://127.0.0.1:9050
+        // (Tor) o http://user:pass@host:port. Sin esto, sale directo.
+        if let Ok(p) = std::env::var("AION_PROXY") {
+            if !p.trim().is_empty() {
+                if let Ok(proxy) = reqwest::Proxy::all(p.trim()) {
+                    builder = builder.proxy(proxy);
+                }
+            }
+        }
+        let http = builder.build().unwrap_or_default();
         Self {
             http,
             max_chars: MAX_CHARS,
