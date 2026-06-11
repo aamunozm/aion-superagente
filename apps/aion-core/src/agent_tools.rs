@@ -762,18 +762,33 @@ impl Tool for MakeDocumentTool {
         "make_document"
     }
     fn description(&self) -> &str {
-        "Crea un DOCUMENTO de texto en el Mac y lo ABRE (en TextEdit). Úsalo para \
-         «hazme/escribe un documento sobre X». Entrada: «Título ::: contenido completo». \
-         TÚ redactas el contenido entero. No necesita permisos de pantalla ni de teclado."
+        "Crea un DOCUMENTO en el Mac y lo ABRE. Úsalo para «hazme/escribe un documento, \
+         carta, informe… sobre X», también «en PDF» o «en Word/Pages». Entrada: \
+         «Título ::: contenido completo ::: formato». Formatos: txt (def.), md, rtf, docx \
+         (Word/Pages), pdf. TÚ redactas el contenido entero. No necesita permisos de \
+         pantalla ni de teclado."
     }
     async fn run(&self, input: &str) -> Result<String, String> {
-        let (title, body) = match input.split_once(":::") {
-            Some((t, b)) => (t.trim().to_string(), b.trim().to_string()),
-            None => ("Documento".to_string(), input.trim().to_string()),
+        let parts: Vec<&str> = input.splitn(3, ":::").collect();
+        let (title, body, fmt_raw) = if parts.len() == 1 {
+            ("Documento", input.trim().to_string(), "")
+        } else {
+            (
+                parts[0].trim(),
+                parts[1].trim().to_string(),
+                parts.get(2).map(|s| s.trim()).unwrap_or(""),
+            )
         };
         if body.is_empty() {
             return Err("falta el contenido del documento (usa «Título ::: contenido»)".into());
         }
+        let fmt = match fmt_raw.to_lowercase().as_str() {
+            "md" | "markdown" => "md",
+            "rtf" => "rtf",
+            "docx" | "word" | "pages" => "docx",
+            "pdf" => "pdf",
+            _ => "txt",
+        };
         let home =
             std::env::var("HOME").map_err(|_| "no encuentro tu carpeta de usuario".to_string())?;
         let safe: String = title
@@ -787,7 +802,6 @@ impl Tool for MakeDocumentTool {
             })
             .collect();
         let name: String = {
-            // Quita guiones bajos/espacios sobrantes de los bordes (p. ej. de «¿…?»).
             let t = safe.trim().trim_matches(|c| c == '_' || c == ' ');
             if t.is_empty() {
                 "Documento".to_string()
@@ -795,27 +809,157 @@ impl Tool for MakeDocumentTool {
                 t.chars().take(60).collect()
             }
         };
-        let path = std::path::Path::new(&home)
-            .join("Desktop")
-            .join(format!("{name}.txt"));
-        std::fs::write(&path, &body).map_err(|e| format!("no pude escribir el documento: {e}"))?;
-        // Abrir en el editor de texto del sistema (best-effort, no bloquea el éxito).
+        let desktop = std::path::Path::new(&home).join("Desktop");
+        let path = desktop.join(format!("{name}.{fmt}"));
+
+        // Formatos de texto plano: escritura directa.
+        if fmt == "txt" || fmt == "md" {
+            std::fs::write(&path, &body)
+                .map_err(|e| format!("no pude escribir el documento: {e}"))?;
+            open_file(&path, fmt == "txt");
+            return Ok(format!(
+                "documento creado y abierto en el Escritorio: {}",
+                path.display()
+            ));
+        }
+
+        // Formatos enriquecidos (rtf/docx/pdf): se generan con herramientas del SO.
         #[cfg(target_os = "macos")]
         {
-            let _ = std::process::Command::new("open")
-                .arg("-a")
-                .arg("TextEdit")
-                .arg(&path)
-                .status();
+            let tmp = std::env::temp_dir().join(format!("aion_doc_{}.txt", uuid::Uuid::new_v4()));
+            std::fs::write(&tmp, &body).map_err(|e| format!("no pude preparar el texto: {e}"))?;
+            let ok = match fmt {
+                "pdf" => match std::fs::File::create(&path) {
+                    Ok(f) => std::process::Command::new("cupsfilter")
+                        .arg(&tmp)
+                        .stdout(std::process::Stdio::from(f))
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false),
+                    Err(_) => false,
+                },
+                // textutil crea RTF/DOCX REALES (abren en Word/Pages/TextEdit).
+                _ => std::process::Command::new("textutil")
+                    .args(["-convert", fmt, "-output"])
+                    .arg(&path)
+                    .arg(&tmp)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false),
+            };
+            let _ = std::fs::remove_file(&tmp);
+            if !ok {
+                return Err(format!("no pude generar el documento en {fmt}"));
+            }
+            open_file(&path, false);
+            Ok(format!(
+                "documento {fmt} creado y abierto en el Escritorio: {}",
+                path.display()
+            ))
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(not(target_os = "macos"))]
         {
-            let _ = std::process::Command::new("notepad").arg(&path).status();
+            // Otros SO: sin conversor nativo, guardamos como .txt (no se pierde el contenido).
+            let txt = desktop.join(format!("{name}.txt"));
+            std::fs::write(&txt, &body)
+                .map_err(|e| format!("no pude escribir el documento: {e}"))?;
+            open_file(&txt, true);
+            Ok(format!(
+                "guardado como .txt en el Escritorio (el formato {fmt} solo está disponible en macOS): {}",
+                txt.display()
+            ))
         }
-        Ok(format!(
-            "documento creado y abierto en el Escritorio: {}",
-            path.display()
-        ))
+    }
+}
+
+/// Abre un archivo en el Mac (TextEdit para texto plano, app por defecto para el resto).
+fn open_file(path: &std::path::Path, text_in_textedit: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("open");
+        if text_in_textedit {
+            cmd.arg("-a").arg("TextEdit");
+        }
+        let _ = cmd.arg(path).status();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = text_in_textedit;
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .status();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (path, text_in_textedit);
+    }
+}
+
+/// Crea una NOTA en la app Notas (Apple Notes) con el contenido que redacta el agente.
+/// Requiere el permiso (una vez) de Automatización para «Notes». Sin tecleo simulado.
+pub struct MakeNoteTool;
+impl MakeNoteTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for MakeNoteTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[async_trait]
+impl Tool for MakeNoteTool {
+    fn name(&self) -> &str {
+        "make_note"
+    }
+    fn description(&self) -> &str {
+        "Crea una NOTA en la app Notas del Mac. Úsalo para «créame/guarda una nota sobre X». \
+         Entrada: «Título ::: contenido». TÚ redactas el contenido. (Pide una vez permiso de \
+         Automatización para Notas.)"
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let (title, body) = match input.split_once(":::") {
+            Some((t, b)) => (t.trim().to_string(), b.trim().to_string()),
+            None => ("Nota".to_string(), input.trim().to_string()),
+        };
+        if body.is_empty() {
+            return Err("falta el contenido de la nota (usa «Título ::: contenido»)".into());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // El cuerpo de Notas es HTML: saltos de línea → <br>, y escapamos comillas.
+            let esc = |s: &str| {
+                s.replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "<br>")
+            };
+            let html = format!("<div><b>{}</b></div>{}", esc(&title), esc(&body));
+            let script = format!(
+                "tell application \"Notes\" to make new note with properties {{body:\"{html}\"}}"
+            );
+            let out = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(&script)
+                .output()
+                .map_err(|e| format!("no pude crear la nota: {e}"))?;
+            if out.status.success() {
+                Ok(format!("nota «{title}» creada en la app Notas"))
+            } else {
+                Err(format!(
+                    "no pude crear la nota (¿falta permiso de Automatización para Notas? \
+                     actívalo en Ajustes del Sistema → Privacidad y seguridad → Automatización → AION → Notas): {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ))
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (title, body);
+            Err("la app Notas solo está disponible en macOS; usa make_document".into())
+        }
     }
 }
 
