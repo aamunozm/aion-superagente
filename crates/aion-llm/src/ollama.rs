@@ -24,7 +24,10 @@ fn num_ctx() -> u32 {
 
 /// Cuánto mantener el modelo caliente en memoria tras cada uso. Configurable.
 fn keep_alive() -> String {
-    std::env::var("AION_KEEP_ALIVE").unwrap_or_else(|_| "30m".into())
+    // El modelo se queda CALIENTE toda la sesión (24h) → sin recargas de ~10s tras estar
+    // inactivo. Latencia mínima con CUALQUIER modelo. (AION_KEEP_ALIVE lo ajusta; en equipos
+    // con poca RAM puede ponerse "10m" para liberar memoria al estar ocioso.)
+    std::env::var("AION_KEEP_ALIVE").unwrap_or_else(|_| "24h".into())
 }
 
 /// **Serializa** las generaciones del LLM. El runner local (llama-server) atiende UN
