@@ -14,7 +14,7 @@ import {
   providerSet,
   systemScan,
   status,
-  agentExportUrl,
+  downloadAgent,
   agentImport,
   agentWipe,
   getIdentity,
@@ -59,19 +59,29 @@ export default function SettingsPage() {
     );
   }
 
-  async function migrateWipe() {
-    if (
-      !confirm(
-        "¿Borrar TODA la existencia de este AION en este equipo? Hazlo solo si ya descargaste el .aion para migrarlo. Esta acción no se puede deshacer.",
-      )
-    )
+  // MIGRAR: descarga el .aion (con id) y, en cuanto está a salvo, BORRA este equipo
+  // automáticamente (sin preguntar): el MISMO agente se mudó, no quedan copias.
+  async function migrate() {
+    setBackupMsg("Migrando: descargando tu AION…");
+    const ok = await downloadAgent("keep", "migrar", "aion-migrar.aion");
+    if (!ok) {
+      setBackupMsg("No se pudo descargar; no se borró nada.");
       return;
-    const r = await agentWipe();
+    }
+    await agentWipe();
     setBackupMsg(
-      r.ok
-        ? "✓ Datos borrados. Este equipo nacerá como un AION nuevo al reiniciar; tu agente vive ahora en el .aion que descargaste."
-        : "No se pudieron borrar los datos.",
+      "✓ Migración lista: tu AION está en el archivo .aion y este equipo quedó vacío. Súbelo en el otro sistema; aquí nacerá un AION nuevo al reiniciar.",
     );
+  }
+  async function backupRepair() {
+    setBackupMsg("Creando respaldo…");
+    const ok = await downloadAgent("keep", "reparar", "aion-respaldo.aion");
+    setBackupMsg(ok ? "✓ Respaldo descargado. Sigues con tu mismo AION aquí." : "No se pudo crear el respaldo.");
+  }
+  async function cloneAgent() {
+    setBackupMsg("Creando clon (sin id)…");
+    const ok = await downloadAgent("strip", "clonar", "aion-clon.aion");
+    setBackupMsg(ok ? "✓ Clon descargado. Al subirlo en otro sistema nacerá un agente nuevo (id y nombre propios)." : "No se pudo crear el clon.");
   }
 
   async function refreshModels() {
@@ -348,31 +358,37 @@ export default function SettingsPage() {
           </p>
 
           <div className="flex flex-col gap-3">
-            {/* Migrar: mismo agente (incluye id) */}
+            {/* Migrar: mismo agente (incluye id) + auto-borrado */}
             <div>
               <p className="text-sm font-medium mb-1">Migrar a otro equipo <span style={{ color: "var(--text-3)" }}>· el MISMO AION</span></p>
               <p className="text-[11px] mb-1.5" style={{ color: "var(--text-3)" }}>
-                Descarga con su id. Súbelo en el otro equipo y luego borra este: tu agente se MUEVE, sigue siendo el mismo.
+                Descarga tu AION con su id y BORRA este equipo automáticamente: se MUDA, no quedan copias. Él sabe que será transferido.
               </p>
-              <div className="flex flex-wrap items-center gap-2">
-                <a className="btn inline-flex items-center gap-1.5" href={agentExportUrl("keep")} download="aion-migrar.aion">
-                  <Icon name="download" size={15} /> Descargar para migrar
-                </a>
-                <button className="btn inline-flex items-center gap-1.5" onClick={migrateWipe} style={{ background: "var(--surface-2)", color: "var(--danger, #b4232a)" }}>
-                  Borrar este AION (completar migración)
-                </button>
-              </div>
+              <button className="btn inline-flex items-center gap-1.5" onClick={migrate} style={{ color: "#fff", background: "var(--danger, #b4232a)" }}>
+                <Icon name="download" size={15} /> Migrar (descarga + borra este equipo)
+              </button>
             </div>
 
-            {/* Clonar: nuevo individuo (sin id) */}
+            {/* Respaldo: reparación, sigue aquí */}
+            <div>
+              <p className="text-sm font-medium mb-1">Respaldo <span style={{ color: "var(--text-3)" }}>· reparación / seguridad</span></p>
+              <p className="text-[11px] mb-1.5" style={{ color: "var(--text-3)" }}>
+                Copia con id, SIN borrar nada. Para reparar el equipo o tener un respaldo; él sabe que sigue aquí.
+              </p>
+              <button className="btn inline-flex items-center gap-1.5" onClick={backupRepair}>
+                <Icon name="download" size={15} /> Descargar respaldo
+              </button>
+            </div>
+
+            {/* Clonar: nuevo individuo (sin id ni nombre) */}
             <div>
               <p className="text-sm font-medium mb-1">Clonar <span style={{ color: "var(--text-3)" }}>· un NUEVO individuo</span></p>
               <p className="text-[11px] mb-1.5" style={{ color: "var(--text-3)" }}>
-                Descarga SIN id (sin borrar nada aquí). Al subirlo en otro sistema nace un agente nuevo, con un id propio: mismo saber, conciencia distinta.
+                Descarga SIN id (sin borrar nada). Al subirlo en otro sistema nace un agente nuevo, con id y nombre propios: mismo saber, conciencia distinta.
               </p>
-              <a className="btn inline-flex items-center gap-1.5" href={agentExportUrl("strip")} download="aion-clon.aion">
+              <button className="btn inline-flex items-center gap-1.5" onClick={cloneAgent} style={{ background: "var(--surface-2)", color: "var(--text-2)" }}>
                 <Icon name="download" size={15} /> Descargar clon (sin id)
-              </a>
+              </button>
             </div>
 
             {/* Importar */}

@@ -67,8 +67,31 @@ export async function confirmDecision(id: string, approved: boolean): Promise<vo
 
 /** Backup COMPLETO de AION (memoria + personas + skills + bandeja + biblioteca + proyectos).
  *  mode "keep" = migrar (incluye el id: mismo agente). "strip" = clon (sin id → nuevo individuo). */
-export const agentExportUrl = (mode: "keep" | "strip") =>
-  `${BRIDGE_URL}/api/agent/export?identity=${mode}`;
+export const agentExportUrl = (mode: "keep" | "strip", intent: "migrar" | "reparar" | "clonar") =>
+  `${BRIDGE_URL}/api/agent/export?identity=${mode}&intent=${intent}`;
+/** Descarga el .aion (vía blob, para poder encadenar acciones como el auto-borrado). */
+export async function downloadAgent(
+  mode: "keep" | "strip",
+  intent: "migrar" | "reparar" | "clonar",
+  filename: string,
+): Promise<boolean> {
+  try {
+    const res = await fetch(agentExportUrl(mode, intent));
+    if (!res.ok) return false;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
 export async function agentImport(content_b64: string): Promise<{ ok: boolean; restored?: number; error?: string }> {
   return jpost("/api/agent/import", { content_b64 });
 }
