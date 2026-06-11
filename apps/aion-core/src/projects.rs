@@ -59,6 +59,10 @@ fn now() -> String {
 }
 
 fn base() -> PathBuf {
+    // `AION_PROJECTS_DIR` permite aislar el store en tests (y reubicarlo si hiciera falta).
+    if let Ok(dir) = std::env::var("AION_PROJECTS_DIR") {
+        return PathBuf::from(dir);
+    }
     crate::app_data_dir().join("projects")
 }
 fn index_path() -> PathBuf {
@@ -213,4 +217,78 @@ pub fn grounding(pid: &str) -> String {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // El store se aísla con una env var GLOBAL; serializamos los tests para que no
+    // compitan por ella (los tests de Rust corren en paralelo por defecto).
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    /// Aísla el store en un directorio temporal único para no tocar datos reales.
+    fn isolate() -> String {
+        let dir = std::env::temp_dir().join(format!("aion-proj-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("AION_PROJECTS_DIR", &dir);
+        dir.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn crud_proyecto_fuentes_y_studio() {
+        let _g = LOCK.lock().unwrap();
+        let dir = isolate();
+
+        // Crear → aparece en la lista y se recupera por id.
+        let p = create("Auditoría", "Auditar redes", "");
+        assert_eq!(list().len(), 1);
+        assert_eq!(get(&p.id).unwrap().name, "Auditoría");
+
+        // Fuentes: añadir, activar/desactivar, eliminar.
+        let s1 = add_source(&p.id, "Notas", "nota", "contenido importante");
+        let s2 = add_source(&p.id, "Otra", "texto", "más texto");
+        assert_eq!(sources(&p.id).len(), 2);
+        assert!(sources(&p.id).iter().all(|s| s.active));
+        toggle_source(&p.id, &s2.id, false);
+        assert!(
+            !sources(&p.id)
+                .iter()
+                .find(|s| s.id == s2.id)
+                .unwrap()
+                .active
+        );
+        remove_source(&p.id, &s1.id);
+        assert_eq!(sources(&p.id).len(), 1);
+
+        // Studio: añadir y eliminar salidas.
+        let o = add_output(&p.id, "resumen", "Resumen · Auditoría", "texto del resumen");
+        assert_eq!(outputs(&p.id).len(), 1);
+        remove_output(&p.id, &o.id);
+        assert!(outputs(&p.id).is_empty());
+
+        // Eliminar el proyecto borra también su carpeta.
+        remove(&p.id);
+        assert!(list().is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn grounding_solo_incluye_fuentes_activas() {
+        let _g = LOCK.lock().unwrap();
+        let dir = isolate();
+        let p = create("Proyecto X", "objetivo claro", "");
+        add_source(&p.id, "Activa", "nota", "DATO_ACTIVO");
+        let inactiva = add_source(&p.id, "Inactiva", "nota", "DATO_OCULTO");
+        toggle_source(&p.id, &inactiva.id, false);
+
+        let g = grounding(&p.id);
+        assert!(g.contains("Proyecto X"));
+        assert!(g.contains("objetivo claro"));
+        assert!(g.contains("DATO_ACTIVO"));
+        assert!(!g.contains("DATO_OCULTO")); // la inactiva NO se inyecta
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

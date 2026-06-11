@@ -65,8 +65,7 @@ fn main() {
                         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
                         ollama_cmd.creation_flags(CREATE_NO_WINDOW);
                     }
-                    match ollama_cmd.spawn()
-                    {
+                    match ollama_cmd.spawn() {
                         Ok(child) => {
                             *app.state::<Sidecars>().ollama.lock().unwrap() = Some(child);
                             // Bootstrap de modelos en primer arranque (segundo plano,
@@ -80,7 +79,10 @@ fn main() {
                                     let _ = cmd
                                         .args(["models-ensure"])
                                         .env("OLLAMA_HOST", OLLAMA_HOST)
-                                        .env("AION_OLLAMA_BIN", ollama_bin.to_string_lossy().as_ref())
+                                        .env(
+                                            "AION_OLLAMA_BIN",
+                                            ollama_bin.to_string_lossy().as_ref(),
+                                        )
                                         .env("AION_MODELFILE", modelfile.to_string_lossy().as_ref())
                                         .spawn();
                                 }
@@ -118,13 +120,23 @@ fn main() {
 
             *app.state::<Sidecars>().tauri.lock().unwrap() = tauri_children;
 
-            // Abrir MAXIMIZADA sin salto visible. La ventana nace OCULTA
-            // (`"visible": false` en el config): la maximizamos mientras nadie la ve
-            // y solo entonces la mostramos. Así no se ve el paso "pequeña → grande".
-            // (El `maximized: true` del config no basta: macOS lo ignora a menudo en
-            // el primer arranque cuando hay width/height + center.)
+            // Abrir A PANTALLA COMPLETA sin parpadeo en dos etapas. La ventana nace
+            // OCULTA (`"visible": false`) y con el color de fondo de la app
+            // (`backgroundColor`), así el instante previo a pintar no es un fogonazo
+            // blanco. En vez de `maximize()` —que en macOS puede ANIMAR pequeña→grande—
+            // fijamos tamaño y posición al ÁREA DE TRABAJO del monitor MIENTRAS está
+            // oculta (sin animación) y solo entonces la mostramos. Fallback a maximize().
             if let Some(win) = app.get_webview_window("main") {
-                let _ = win.maximize();
+                let sized = match win.current_monitor() {
+                    Ok(Some(m)) => {
+                        let wa = m.work_area();
+                        win.set_position(wa.position).is_ok() && win.set_size(wa.size).is_ok()
+                    }
+                    _ => false,
+                };
+                if !sized {
+                    let _ = win.maximize();
+                }
                 let _ = win.show();
                 let _ = win.set_focus();
             }

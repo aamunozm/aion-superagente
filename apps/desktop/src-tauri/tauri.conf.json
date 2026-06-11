@@ -20,6 +20,7 @@
         "maximized": true,
         "center": true,
         "visible": false,
+        "backgroundColor": "#fbfaf7",
         "theme": null
       }
     ],
