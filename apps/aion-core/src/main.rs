@@ -571,6 +571,7 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
         "comprender",
         "optimizar",
         "proponer",
+        "proyecto",
     ];
     let mut consecutive_errors = 0u32;
     const BREAKER: u32 = 3;
@@ -598,6 +599,7 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
             "comprender" => synthesize_once(&engine).await,
             "optimizar" => optimize_prompt_once(&engine).await,
             "proponer" => propose_improvement_once(&engine).await,
+            "proyecto" => work_project_once(&engine).await,
             _ => study_once(&engine).await,
         };
         println!("   {} {goal}: {detail}", if success { "✅" } else { "❌" });
@@ -767,6 +769,57 @@ async fn self_evolve_once(engine: &OllamaEngine) -> (bool, String) {
 }
 
 /// Genera un insight de auto-mejora y lo guarda en memoria; devuelve (éxito, insight).
+/// AION trabaja AUTÓNOMAMENTE un proyecto: toma el más reciente con fuentes activas,
+/// genera UN hallazgo/próximo paso desde su material, lo guarda en el Studio del
+/// proyecto (kind "insight") y te deja un aviso en la Bandeja. Es la ventaja sobre
+/// NotebookLM: el agente AVANZA el proyecto solo, en segundo plano.
+async fn work_project_once(engine: &OllamaEngine) -> (bool, String) {
+    let projects = crate::projects::list();
+    // El más recientemente actualizado que tenga al menos una fuente activa.
+    let target = projects
+        .into_iter()
+        .find(|p| crate::projects::sources(&p.id).iter().any(|s| s.active));
+    let Some(p) = target else {
+        return (false, "sin proyectos con fuentes activas".into());
+    };
+    let grounding = crate::projects::grounding(&p.id);
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(
+                "Eres AION trabajando en segundo plano sobre un proyecto del usuario. \
+                 Aporta UN hallazgo valioso o un próximo paso accionable (2-4 frases), \
+                 basado SOLO en las fuentes. Sé concreto y útil.",
+            ),
+            Message::user(grounding),
+        ],
+        think: false,
+        temperature: Some(0.6),
+        max_tokens: Some(220),
+    };
+    match engine.generate(req).await {
+        Ok(msg) => {
+            let insight = msg.content.trim().to_string();
+            if insight.is_empty() {
+                return (false, "sin hallazgo".into());
+            }
+            crate::projects::add_output(
+                &p.id,
+                "insight",
+                &format!("Hallazgo de AION · {}", p.name),
+                &insight,
+            );
+            if let Ok(ibx) = inbox::Inbox::open(inbox_path()) {
+                let _ = ibx.push(
+                    "idea",
+                    &format!("Avancé tu proyecto «{}»: {insight}", p.name),
+                );
+            }
+            (true, format!("proyecto «{}»: {insight}", p.name))
+        }
+        Err(e) => (false, e.to_string()),
+    }
+}
+
 async fn study_once(engine: &OllamaEngine) -> (bool, String) {
     let req = GenerateRequest {
         messages: vec![Message::user(

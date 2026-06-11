@@ -170,6 +170,12 @@ export const projectSourceToggle = (project_id: string, id: string, active: bool
   jpost<{ ok: boolean }>("/api/project/source/toggle", { project_id, id, active });
 export const projectSourceRemove = (project_id: string, id: string) =>
   jpost<{ ok: boolean }>("/api/project/source/remove", { project_id, id });
+export type DiscoverResult = { title: string; url: string; snippet: string };
+export const projectDiscover = (project_id: string, query: string) =>
+  jpost<{ ok: boolean; results?: DiscoverResult[]; error?: string }>("/api/project/discover", {
+    project_id,
+    query,
+  });
 export const projectStudioGenerate = (project_id: string, kind: string) =>
   jpost<{ ok: boolean; output?: ProjectOutput; error?: string }>("/api/project/studio/generate", {
     project_id,

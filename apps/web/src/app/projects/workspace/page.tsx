@@ -10,12 +10,14 @@ import {
   projectSourceUpload,
   projectSourceToggle,
   projectSourceRemove,
+  projectDiscover,
   projectStudioGenerate,
   projectStudioRemove,
   chatStream,
   type Project,
   type ProjectSource,
   type ProjectOutput,
+  type DiscoverResult,
 } from "@/lib/api";
 
 type Msg = { role: "user" | "assistant"; text: string };
@@ -24,6 +26,12 @@ const STUDIO = [
   { kind: "resumen", label: "Resumen", icon: "memory" as const },
   { kind: "informe", label: "Informe", icon: "folder" as const },
   { kind: "mapa", label: "Mapa mental", icon: "graph" as const },
+  { kind: "tabla", label: "Tabla de datos", icon: "graph" as const },
+  { kind: "cuestionario", label: "Cuestionario", icon: "chat" as const },
+  { kind: "tarjetas", label: "Tarjetas", icon: "memory" as const },
+  { kind: "guia", label: "Guía de estudio", icon: "folder" as const },
+  { kind: "timeline", label: "Línea de tiempo", icon: "graph" as const },
+  { kind: "plan", label: "Próximos pasos", icon: "brain" as const },
 ];
 
 export default function ProjectWorkspace() {
@@ -43,6 +51,14 @@ export default function ProjectWorkspace() {
   const [srcContent, setSrcContent] = useState("");
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  // Descubrir fuentes (búsqueda web)
+  const [discovering, setDiscovering] = useState(false);
+  const [discoverQuery, setDiscoverQuery] = useState("");
+  const [discoverResults, setDiscoverResults] = useState<DiscoverResult[] | null>(null);
+  const [discoverBusy, setDiscoverBusy] = useState(false);
+  // Citación: fuente resaltada al pulsar «título» en una respuesta
+  const [highlightSrc, setHighlightSrc] = useState<string | null>(null);
+  const srcRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   // Chat
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -105,6 +121,51 @@ export default function ProjectWorkspace() {
       alert(r.error);
     }
   }
+  async function runDiscover() {
+    if (!discoverQuery.trim() || discoverBusy) return;
+    setDiscoverBusy(true);
+    setDiscoverResults(null);
+    const r = await projectDiscover(id, discoverQuery.trim());
+    setDiscoverBusy(false);
+    setDiscoverResults(r.ok ? r.results ?? [] : []);
+  }
+  async function addDiscovered(d: DiscoverResult) {
+    const r = await projectSourceAdd(id, d.url, "web", "");
+    if (r.ok && r.source) {
+      setSources((s) => [r.source!, ...s]);
+      setDiscoverResults((rs) => (rs ? rs.filter((x) => x.url !== d.url) : rs));
+    }
+  }
+  /** Al pulsar una cita «título», resalta esa fuente y la trae a la vista. */
+  function jumpToSource(title: string) {
+    const s = sources.find((x) => x.title.trim() === title.trim());
+    if (!s) return;
+    setHighlightSrc(s.id);
+    srcRefs.current[s.id]?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => setHighlightSrc((h) => (h === s.id ? null : h)), 2000);
+  }
+  /** Renderiza un texto convirtiendo las citas «...» en chips clicables. */
+  function renderWithCitations(text: string) {
+    const parts = text.split(/(«[^»]+»)/g);
+    return parts.map((part, i) => {
+      const m = part.match(/^«([^»]+)»$/);
+      if (m && sources.some((s) => s.title.trim() === m[1].trim())) {
+        return (
+          <button
+            key={i}
+            onClick={() => jumpToSource(m[1])}
+            className="underline decoration-dotted underline-offset-2"
+            style={{ color: "var(--gold-deep)" }}
+            title="Ver fuente"
+          >
+            {part}
+          </button>
+        );
+      }
+      return <span key={i}>{part}</span>;
+    });
+  }
+
   async function toggleSource(s: ProjectSource) {
     setSources((arr) => arr.map((x) => (x.id === s.id ? { ...x, active: !x.active } : x)));
     await projectSourceToggle(id, s.id, !s.active);
@@ -189,14 +250,55 @@ export default function ProjectWorkspace() {
               Fuentes ({sources.length})
             </span>
             <button
-              onClick={() => setAdding((a) => !a)}
+              onClick={() => { setDiscovering((d) => !d); setAdding(false); }}
               className="ml-auto rounded-md p-1 hover:opacity-100 opacity-70"
+              style={{ background: "var(--surface-2)" }}
+              title="Descubrir fuentes en la web"
+            >
+              <Icon name="search" size={14} />
+            </button>
+            <button
+              onClick={() => { setAdding((a) => !a); setDiscovering(false); }}
+              className="rounded-md p-1 hover:opacity-100 opacity-70"
               style={{ background: "var(--surface-2)" }}
               title="Añadir fuente"
             >
               <Icon name="plus" size={14} />
             </button>
           </div>
+
+          {discovering && (
+            <div className="p-3 flex flex-col gap-2" style={{ borderBottom: "1px solid var(--border)", background: "var(--surface-1)" }}>
+              <div className="flex gap-2">
+                <input
+                  className="input text-sm flex-1"
+                  placeholder="¿Qué buscar en la web?"
+                  value={discoverQuery}
+                  onChange={(e) => setDiscoverQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && runDiscover()}
+                />
+                <button className="btn text-sm shrink-0" onClick={runDiscover} disabled={discoverBusy}>
+                  {discoverBusy ? "…" : "Buscar"}
+                </button>
+              </div>
+              {discoverResults?.length === 0 && (
+                <p className="text-[11px]" style={{ color: "var(--text-3)" }}>Sin resultados.</p>
+              )}
+              {discoverResults?.map((d) => (
+                <div key={d.url} className="rounded-lg p-2" style={{ background: "var(--surface-2)" }}>
+                  <p className="text-xs font-medium truncate" style={{ color: "var(--text-1)" }}>{d.title || d.url}</p>
+                  <p className="text-[10px] line-clamp-2 mt-0.5" style={{ color: "var(--text-3)" }}>{d.snippet}</p>
+                  <button
+                    onClick={() => addDiscovered(d)}
+                    className="text-[11px] mt-1.5 inline-flex items-center gap-1"
+                    style={{ color: "var(--gold-deep)" }}
+                  >
+                    <Icon name="plus" size={11} /> añadir al proyecto
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
 
           {adding && (
             <div className="p-3 flex flex-col gap-2" style={{ borderBottom: "1px solid var(--border)", background: "var(--surface-1)" }}>
@@ -274,8 +376,15 @@ export default function ProjectWorkspace() {
             {sources.map((s) => (
               <div
                 key={s.id}
-                className="rounded-lg p-2.5 flex items-start gap-2 group"
-                style={{ background: "var(--surface-1)", border: "1px solid var(--border)", opacity: s.active ? 1 : 0.5 }}
+                ref={(el) => {
+                  srcRefs.current[s.id] = el;
+                }}
+                className="rounded-lg p-2.5 flex items-start gap-2 group transition-all"
+                style={{
+                  background: highlightSrc === s.id ? "var(--accent-subtle)" : "var(--surface-1)",
+                  border: highlightSrc === s.id ? "1px solid var(--accent)" : "1px solid var(--border)",
+                  opacity: s.active ? 1 : 0.5,
+                }}
               >
                 <button
                   onClick={() => toggleSource(s)}
@@ -329,7 +438,9 @@ export default function ProjectWorkspace() {
                     border: m.role === "user" ? "none" : "1px solid var(--border)",
                   }}
                 >
-                  {m.text || (streaming && i === messages.length - 1 ? "…" : "")}
+                  {m.role === "assistant" && m.text
+                    ? renderWithCitations(m.text)
+                    : m.text || (streaming && i === messages.length - 1 ? "…" : "")}
                 </div>
               </div>
             ))}

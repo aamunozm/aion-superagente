@@ -200,6 +200,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/project/source/upload", post(project_source_upload))
         .route("/api/project/source/toggle", post(project_source_toggle))
         .route("/api/project/source/remove", post(project_source_remove))
+        .route("/api/project/discover", post(project_discover))
         .route(
             "/api/project/studio/generate",
             post(project_studio_generate),
@@ -1655,6 +1656,34 @@ async fn project_source_remove(Json(b): Json<SrcRemove>) -> Json<serde_json::Val
 }
 
 #[derive(Deserialize)]
+struct Discover {
+    #[serde(default)]
+    project_id: String,
+    query: String,
+}
+/// DESCUBRIR FUENTES: AION busca material en la web para el proyecto y devuelve
+/// candidatos (título, url, extracto). El usuario decide cuáles añadir.
+async fn project_discover(Json(b): Json<Discover>) -> Json<serde_json::Value> {
+    let _ = &b.project_id;
+    let q = b.query.trim();
+    if q.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "escribe qué buscar" }));
+    }
+    match WebClient::new().search(q, 6).await {
+        Ok(hits) => {
+            let results: Vec<_> = hits
+                .iter()
+                .map(
+                    |h| serde_json::json!({ "title": h.title, "url": h.url, "snippet": h.snippet }),
+                )
+                .collect();
+            Json(serde_json::json!({ "ok": true, "results": results }))
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
 struct StudioGen {
     project_id: String,
     /// "informe" | "resumen" | "mapa".
@@ -1689,6 +1718,36 @@ async fn project_studio_generate(Json(b): Json<StudioGen>) -> Json<serde_json::V
             "Mapa mental",
             "Crea un MAPA MENTAL en Markdown: el tema central como título y ramas anidadas con \
              viñetas (- y sangría) cubriendo los conceptos clave de las fuentes.",
+        ),
+        "tabla" => (
+            "Tabla de datos",
+            "Extrae los datos clave de las fuentes y preséntalos en una TABLA Markdown con \
+             columnas y filas claras. Añade una frase de contexto antes de la tabla.",
+        ),
+        "cuestionario" => (
+            "Cuestionario",
+            "Crea un CUESTIONARIO de 6-10 preguntas (con sus respuestas) que evalúe la \
+             comprensión del material de las fuentes. Formato: P / R en Markdown.",
+        ),
+        "tarjetas" => (
+            "Tarjetas didácticas",
+            "Crea 8-12 TARJETAS DIDÁCTICAS (flashcards) en Markdown: cada una con **Anverso** \
+             (concepto/pregunta) y **Reverso** (definición/respuesta) a partir de las fuentes.",
+        ),
+        "guia" => (
+            "Guía de estudio",
+            "Redacta una GUÍA DE ESTUDIO en Markdown: objetivos de aprendizaje, conceptos clave \
+             con su explicación, y un resumen final, todo basado en las fuentes.",
+        ),
+        "timeline" => (
+            "Línea de tiempo",
+            "Construye una LÍNEA DE TIEMPO en Markdown con los hitos/eventos relevantes que \
+             aparezcan en las fuentes, en orden cronológico (fecha o etapa → descripción).",
+        ),
+        "plan" => (
+            "Próximos pasos",
+            "Analiza las fuentes y el objetivo del proyecto y propón PRÓXIMOS PASOS accionables: \
+             una lista priorizada de acciones concretas, con un porqué breve en cada una.",
         ),
         _ => (
             "Resumen",
