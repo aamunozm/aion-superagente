@@ -169,6 +169,9 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
              • NO REPITAS lo que ya falló o se canceló: si una acción dio error o el usuario la \
              rechazó, NO la ejecutes otra vez idéntica. Cambia de herramienta, reformula la \
              entrada, o pregunta al usuario con 'Final Answer:'.\n\
+             • TERMINAL / COMANDOS DEL SISTEMA (listar archivos con detalle, info del Mac, git, \
+             redes, procesos, conversiones…): usa run_command con el comando tal cual (pide tu OK). \
+             NO intentes puppetear la app Terminal con pc_*.\n\
              • NAVEGAR DE VERDAD (sitios con JavaScript, paneles, o INTERACTUAR: iniciar \
              sesión, rellenar formularios, pulsar botones): usa browser_open (abre la URL en \
              un navegador real y te da el texto + una lista NUMERADA de elementos \

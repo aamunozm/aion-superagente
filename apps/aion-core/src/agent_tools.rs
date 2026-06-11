@@ -897,6 +897,72 @@ fn open_file(path: &std::path::Path, text_in_textedit: bool) {
     }
 }
 
+/// **Terminal real**: ejecuta un comando de shell y devuelve su salida. Es la forma
+/// ROBUSTA de "control del terminal" (no puppetea Terminal.app ni necesita permisos
+/// de Accesibilidad/Pantalla). Cada comando pasa por confirmación HITL (fail-closed).
+pub struct RunCommandTool;
+impl RunCommandTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for RunCommandTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[async_trait]
+impl Tool for RunCommandTool {
+    fn name(&self) -> &str {
+        "run_command"
+    }
+    fn description(&self) -> &str {
+        "Ejecuta un COMANDO de shell en el Mac y devuelve su salida (stdout+stderr). Úsalo \
+         para tareas de TERMINAL: listar archivos, info del sistema, git, redes, conversiones… \
+         Entrada: el comando tal cual (p. ej. «ls -la ~/Desktop», «sw_vers»). REQUIERE tu \
+         confirmación antes de ejecutar."
+    }
+    fn needs_confirm(&self, input: &str) -> Option<String> {
+        Some(format!("Ejecutar en la terminal: {}", input.trim()))
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let cmd = input.trim();
+        if cmd.is_empty() {
+            return Err("indica el comando a ejecutar".into());
+        }
+        #[cfg(target_os = "windows")]
+        let fut = {
+            let mut c = tokio::process::Command::new("cmd");
+            c.args(["/C", cmd]);
+            c.output()
+        };
+        #[cfg(not(target_os = "windows"))]
+        let fut = {
+            let mut c = tokio::process::Command::new("sh");
+            c.arg("-c").arg(cmd);
+            c.output()
+        };
+        let out = match tokio::time::timeout(std::time::Duration::from_secs(30), fut).await {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => return Err(format!("no se pudo ejecutar: {e}")),
+            Err(_) => return Err("el comando tardó demasiado (>30s) y se canceló".into()),
+        };
+        let code = out.status.code().unwrap_or(-1);
+        let mut s = String::from_utf8_lossy(&out.stdout).to_string();
+        let err = String::from_utf8_lossy(&out.stderr);
+        if !err.trim().is_empty() {
+            s.push_str("\n[stderr] ");
+            s.push_str(&err);
+        }
+        let body: String = s.trim().chars().take(4000).collect();
+        if body.is_empty() {
+            Ok(format!("(sin salida; código de salida {code})"))
+        } else {
+            Ok(format!("(código {code})\n{body}"))
+        }
+    }
+}
+
 /// Crea una NOTA en la app Notas (Apple Notes) con el contenido que redacta el agente.
 /// Requiere el permiso (una vez) de Automatización para «Notes». Sin tecleo simulado.
 pub struct MakeNoteTool;
