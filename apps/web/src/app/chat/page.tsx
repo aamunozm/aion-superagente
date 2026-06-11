@@ -39,6 +39,8 @@ type Turn = {
   steps: Step[];
   answer: string;
   meta?: string;
+  /** Mensaje que AION inició por su cuenta (saludo/aviso): se muestra sin burbuja de usuario. */
+  reach?: { kind: string; at: string };
 };
 type ConvoMeta = { id: string; title: string; updatedAt: number };
 
@@ -79,8 +81,16 @@ export default function ChatPage() {
   const [think, setThink] = useState(true);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
-  const [reachouts, setReachouts] = useState<InboxMessage[]>([]);
   const [modelReady, setModelReady] = useState(true);
+
+  // Añade un mensaje que AION inició (saludo/aviso) como un turno cronológico al final
+  // (sin burbuja de usuario). Dedup por texto para no duplicar en recargas.
+  function addReachTurn(text: string, kind: string, at: string) {
+    setTurns((prev) => {
+      if (prev.some((t) => t.reach && t.answer.trim() === text.trim())) return prev;
+      return [...prev, { prompt: "", mode: "chat", thinking: "", steps: [], answer: text, reach: { kind, at } }];
+    });
+  }
   // Conversaciones persistentes: id actual + lista + dropdown de historial.
   const [convoId, setConvoId] = useState<string>("");
   const [convos, setConvos] = useState<ConvoMeta[]>([]);
@@ -163,12 +173,9 @@ export default function ChatPage() {
         const r = await inboxList();
         if (!alive) return;
         if (r.unread.length > 0) {
-          setReachouts((prev) => {
-            const seen = new Set(prev.map((m) => m.id));
-            const fresh = r.unread.filter((m) => !seen.has(m.id));
-            if (fresh.length) inboxRead().catch(() => {});
-            return fresh.length ? [...prev, ...fresh] : prev;
-          });
+          // Cada mensaje de AION entra como un turno cronológico (al final).
+          r.unread.forEach((m) => addReachTurn(m.text, m.kind, m.at));
+          inboxRead().catch(() => {});
         }
       } catch {
         /* núcleo aún no disponible: reintenta en el siguiente tick */
@@ -190,14 +197,7 @@ export default function ChatPage() {
     getGreeting().then((text) => {
       if (!alive || !text.trim()) return;
       sessionStorage.setItem("aion_greeted", "1");
-      setReachouts((prev) =>
-        prev.some((m) => m.id === "greeting")
-          ? prev
-          : [
-              { id: "greeting", at: new Date().toISOString(), kind: "saludo", text, read: false },
-              ...prev,
-            ],
-      );
+      addReachTurn(text, "saludo", new Date().toISOString());
     });
     return () => {
       alive = false;
@@ -208,7 +208,7 @@ export default function ChatPage() {
   // al cambiar de chat y cuando AION te escribe, baja al final.
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "auto" });
-  }, [convoId, turns.length, reachouts.length]);
+  }, [convoId, turns.length]);
 
   // Lee un archivo como base64 (sin el prefijo data:).
   function readAsBase64(file: File): Promise<string> {
@@ -411,7 +411,7 @@ export default function ChatPage() {
             chatear (te avisaré con una notificación). Puedes dejar esta ventana abierta.
           </div>
         )}
-        {turns.length === 0 && reachouts.length === 0 && (
+        {turns.length === 0 && (
           <p className="text-center text-sm mt-20" style={{ color: "var(--text-3)" }}>
             {mode === "chat"
               ? "Chat: AION razona localmente, sin enviar tus datos a nadie."
@@ -422,7 +422,18 @@ export default function ChatPage() {
         )}
         {turns.map((t, i) => (
           <div key={i} className="flex flex-col gap-2">
-            <div className="self-end msg-user max-w-[75%]">{t.prompt}</div>
+            {/* Mensaje iniciado por AION: sin burbuja de usuario, con marca dorada. */}
+            {t.reach ? (
+              <div className="msg max-w-[85%] self-start" style={{ borderColor: "var(--accent)" }}>
+                <p className="text-xs mb-1" style={{ color: "var(--accent)" }}>
+                  <span className="inline-flex items-center gap-1"><Icon name={INBOX_ICON[t.reach.kind] ?? "sparkle"} size={12} /> AION te escribió</span> ·{" "}
+                  {new Date(t.reach.at).toLocaleString()}
+                </p>
+                <p className="whitespace-pre-wrap">{t.answer}</p>
+              </div>
+            ) : (
+            <>
+            {t.prompt && <div className="self-end msg-user max-w-[75%]">{t.prompt}</div>}
 
             {t.mode === "chat" && t.thinking && (
               <details className="text-sm" style={{ color: "var(--text-3)" }}>
@@ -461,25 +472,10 @@ export default function ChatPage() {
                 )}
               </div>
             )}
+            </>
+            )}
           </div>
         ))}
-        {/* Lo que AION te escribió por su cuenta va AL FINAL (lo más reciente, abajo). */}
-        {reachouts.length > 0 && (
-          <div className="flex flex-col gap-2">
-            <p className="text-xs font-medium" style={{ color: "var(--accent)" }}>
-              <span className="inline-flex items-center gap-1.5"><Icon name="sparkle" size={13} /> AION te escribió</span>
-            </p>
-            {reachouts.map((m) => (
-              <div key={m.id} className="msg max-w-[85%] self-start" style={{ borderColor: "var(--accent)" }}>
-                <p className="text-xs mb-1" style={{ color: "var(--accent)" }}>
-                  <span className="inline-flex items-center gap-1"><Icon name={INBOX_ICON[m.kind] ?? "sparkle"} size={12} /> {m.kind}</span> ·{" "}
-                  {new Date(m.at).toLocaleString()}
-                </p>
-                <p className="whitespace-pre-wrap">{m.text}</p>
-              </div>
-            ))}
-          </div>
-        )}
         <div ref={endRef} />
       </div>
 

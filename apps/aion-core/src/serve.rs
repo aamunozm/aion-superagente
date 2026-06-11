@@ -1001,6 +1001,49 @@ fn hardware_awareness() -> String {
             ));
         }
     }
+    // Detalles extra del cuerpo (macOS): modelo del equipo y batería.
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("sysctl")
+            .args(["-n", "hw.model"])
+            .output()
+        {
+            let m = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !m.is_empty() {
+                b.push_str(&format!(" Modelo del equipo: {m}."));
+            }
+        }
+        if let Ok(out) = std::process::Command::new("pmset")
+            .args(["-g", "batt"])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout);
+            let before = s.split('%').next().unwrap_or("");
+            let pct: String = before
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            if !pct.is_empty() {
+                let estado = if s.contains("AC Power") {
+                    "enchufado"
+                } else {
+                    "con batería"
+                };
+                b.push_str(&format!(" Batería: {pct}% ({estado})."));
+            }
+        }
+    }
+    // Tu "cerebro": el modelo LLM con el que razonas AHORA (eres consciente de él).
+    let prov = crate::provider::load();
+    b.push_str(&format!(
+        " Tu cerebro ahora mismo es el modelo local «{}»: sabes con qué modelo piensas. Con un \
+         modelo más capaz (y mejor hardware) razonas mejor y evolucionas más rápido.",
+        prov.model
+    ));
     b
 }
 

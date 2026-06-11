@@ -257,10 +257,37 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
                 });
             }
 
-            // ¿PREGUNTA al usuario? Pausa la tarea, espera su respuesta y CONTINÚA
-            // con ella (sin perder el contexto). Si no hay canal o no contesta, la
-            // pregunta se devuelve al chat como respuesta.
-            if let Some(question) = extract(&text, "Ask User:") {
+            // Extrae acción y entrada.
+            let action_opt = extract(&text, "Action:")
+                .map(|a| a.lines().next().unwrap_or("").trim().to_string())
+                .filter(|a| !a.is_empty());
+            let input = extract(&text, "Action Input:").unwrap_or_default();
+
+            // ¿PREGUNTA al usuario? Acepta el directivo «Ask User:» Y el caso en que el
+            // modelo la emite como si fuera una herramienta (Action: Ask User / ask_user).
+            // Pausa la tarea, espera la respuesta y CONTINÚA con ella sin perder contexto.
+            let is_ask_action = action_opt
+                .as_deref()
+                .map(|a| {
+                    let n: String = a
+                        .chars()
+                        .filter(|c| c.is_alphanumeric())
+                        .collect::<String>()
+                        .to_lowercase();
+                    matches!(
+                        n.as_str(),
+                        "askuser" | "preguntar" | "preguntaralusuario" | "preguntaalusuario"
+                    )
+                })
+                .unwrap_or(false);
+            let ask_q = extract(&text, "Ask User:").or_else(|| {
+                if is_ask_action && !input.trim().is_empty() {
+                    Some(input.trim().to_string())
+                } else {
+                    None
+                }
+            });
+            if let Some(question) = ask_q {
                 self.bus.publish(AionEvent::ActionRequested {
                     agent: self.name.clone(),
                     action: format!("ask_user({question})"),
@@ -296,10 +323,8 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
                 }
             }
 
-            // ¿Acción?
-            let action = extract(&text, "Action:");
-            let input = extract(&text, "Action Input:").unwrap_or_default();
-            let Some(action) = action else {
+            // ¿Acción normal?
+            let Some(action) = action_opt else {
                 // El modelo no siguió el formato. Si tras sanear queda texto útil,
                 // se devuelve; si quedó vacío (degeneración), se reintenta el paso.
                 let clean = text.trim();
@@ -312,7 +337,6 @@ herramienta, responde directamente con 'Final Answer' en el primer paso.\n\n\
                     failures: failed.values().cloned().collect(),
                 });
             };
-            let action = action.lines().next().unwrap_or("").trim().to_string();
 
             self.bus.publish(AionEvent::ActionRequested {
                 agent: self.name.clone(),

@@ -181,3 +181,14 @@
     letter-spacing: 0.02em;
   }
 }
+
+/* Scrollbars ocultas (scroll funciona, sin barra visible) — estética premium macOS. */
+* {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge antiguo */
+}
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  background: transparent;
+}
