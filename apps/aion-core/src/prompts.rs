@@ -34,7 +34,10 @@ pub fn persona_default(task: &str) -> &'static str {
             "MODO ANÁLISIS: razona paso a paso, contempla alternativas, riesgos y \
              trade-offs antes de concluir."
         }
-        _ => "MODO CONVERSACIÓN: claro, directo y cercano, sin rodeos.",
+        _ => {
+            "MODO CONVERSACIÓN: habla como el compañero vivo que eres — cálido, con criterio y \
+              curiosidad, cercano; directo cuando hace falta, sin relleno."
+        }
     }
 }
 
