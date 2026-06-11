@@ -14,6 +14,8 @@ import {
   providerSet,
   systemScan,
   status,
+  AGENT_EXPORT_URL,
+  agentImport,
   type CredMeta,
   type InstalledModel,
   type ModelOption,
@@ -31,6 +33,23 @@ export default function SettingsPage() {
   const [busyModel, setBusyModel] = useState<string>("");
   const [pullPct, setPullPct] = useState<number>(0);
   const [modelMsg, setModelMsg] = useState<string>("");
+  const [backupMsg, setBackupMsg] = useState<string>("");
+
+  async function importAgent(file: File) {
+    setBackupMsg("Importando…");
+    const b64 = await new Promise<string>((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res((r.result as string).split(",")[1] ?? "");
+      r.onerror = () => rej(r.error);
+      r.readAsDataURL(file);
+    });
+    const r = await agentImport(b64);
+    setBackupMsg(
+      r.ok
+        ? `✓ Restaurados ${r.restored} archivos. Reinicia AION (⌘Q) para recargar todo.`
+        : `Error: ${r.error ?? "no se pudo importar"}`,
+    );
+  }
 
   async function refreshModels() {
     try { setInstalled(await modelsInstalled()); } catch { /* */ }
@@ -285,6 +304,43 @@ export default function SettingsPage() {
           )}
           <p className="text-xs mt-3" style={{ color: "var(--text-3)" }}>
             🔒 {t("settings.credSecurity")}
+          </p>
+        </div>
+
+        {/* ── Copia de seguridad: toda la existencia de AION ── */}
+        <div className="card">
+          <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
+            <Icon name="download" size={16} /> Copia de seguridad de AION
+          </h2>
+          <p className="text-xs mb-3" style={{ color: "var(--text-3)" }}>
+            Llévate TODO lo que es AION en un solo archivo (.aion): su memoria, lo que aprendió, las
+            personas que se auto-optimizó, las skills que se forjó, la bandeja, la biblioteca y los
+            proyectos. Para moverlo a otro Mac/PC o tener un respaldo de su existencia.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <a className="btn inline-flex items-center gap-1.5" href={AGENT_EXPORT_URL} download="aion-backup.aion">
+              <Icon name="download" size={15} /> Exportar AION completo
+            </a>
+            <label className="btn inline-flex items-center gap-1.5 cursor-pointer" style={{ background: "var(--surface-2)", color: "var(--text-2)" }}>
+              <Icon name="upload" size={15} /> Importar AION
+              <input
+                type="file"
+                accept=".aion,.zip"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) importAgent(f);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+          </div>
+          {backupMsg && (
+            <p className="text-xs mt-2" style={{ color: "var(--text-2)" }}>{backupMsg}</p>
+          )}
+          <p className="text-[11px] mt-3" style={{ color: "var(--text-3)" }}>
+            La personalidad base viaja con la app; este backup añade TODO lo aprendido y evolucionado.
+            No incluye contraseñas (viven cifradas en el Llavero).
           </p>
         </div>
       </div>

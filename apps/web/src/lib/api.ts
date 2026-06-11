@@ -65,6 +65,12 @@ export async function confirmDecision(id: string, approved: boolean): Promise<vo
   }).catch(() => {});
 }
 
+/** Backup COMPLETO de AION (memoria + personas + skills + bandeja + biblioteca + proyectos). */
+export const AGENT_EXPORT_URL = `${BRIDGE_URL}/api/agent/export`;
+export async function agentImport(content_b64: string): Promise<{ ok: boolean; restored?: number; error?: string }> {
+  return jpost("/api/agent/import", { content_b64 });
+}
+
 /** Saludo proactivo de AION al abrir (cálido, con continuidad). Vacío si no hay. */
 export async function getGreeting(): Promise<string> {
   try {

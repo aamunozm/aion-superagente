@@ -203,6 +203,8 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/memory/sleep", post(memory_sleep))
         .route("/api/memory/export", get(memory_export))
         .route("/api/memory/import", post(memory_import))
+        .route("/api/agent/export", get(agent_export))
+        .route("/api/agent/import", post(agent_import))
         .route("/api/inbox", get(inbox_list))
         .route("/api/inbox/read", post(inbox_read))
         .route("/api/library", get(library_list))
@@ -2225,6 +2227,127 @@ async fn memory_sleep() -> Json<serde_json::Value> {
         })),
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
+}
+
+// ── Portabilidad: TODA la existencia de AION en un solo archivo (.aion) ───────
+
+/// Empaqueta en un ZIP todos los stores que SON AION: memoria, personas
+/// auto-optimizadas, skills forjadas, bandeja, biblioteca, proyectos y el modelo
+/// elegido. (No incluye credenciales: las contraseñas viven en el Llavero.)
+fn build_agent_zip() -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    let dir = crate::app_data_dir();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::<u8>::new()));
+    let opts = zip::write::SimpleFileOptions::default();
+    for f in [
+        "memory.jsonl",
+        "prompts.jsonl",
+        "skills.jsonl",
+        "inbox.jsonl",
+        "knowledge.jsonl",
+        "provider.json",
+    ] {
+        if let Ok(data) = std::fs::read(dir.join(f)) {
+            zip.start_file(f, opts).map_err(|e| e.to_string())?;
+            zip.write_all(&data).map_err(|e| e.to_string())?;
+        }
+    }
+    add_dir_to_zip(&mut zip, &dir, &dir.join("projects"), opts)?;
+    let cur = zip.finish().map_err(|e| e.to_string())?;
+    Ok(cur.into_inner())
+}
+
+fn add_dir_to_zip(
+    zip: &mut zip::ZipWriter<std::io::Cursor<Vec<u8>>>,
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    opts: zip::write::SimpleFileOptions,
+) -> Result<(), String> {
+    use std::io::Write;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            add_dir_to_zip(zip, base, &p, opts)?;
+        } else if let (Ok(rel), Ok(data)) = (p.strip_prefix(base), std::fs::read(&p)) {
+            let name = rel.to_string_lossy().replace('\\', "/");
+            zip.start_file(name, opts).map_err(|e| e.to_string())?;
+            zip.write_all(&data).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Descarga TODA la existencia de AION como un único archivo `.aion` (ZIP).
+async fn agent_export() -> axum::response::Response {
+    match build_agent_zip() {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "application/zip"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"aion-backup.aion\"",
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct AgentImport {
+    content_b64: String,
+}
+/// Restaura un backup completo (.aion): extrae todos los stores. Conviene reiniciar
+/// AION después para recargar memoria/skills.
+async fn agent_import(Json(b): Json<AgentImport>) -> Json<serde_json::Value> {
+    use base64::Engine;
+    use std::io::Read;
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(b.content_b64.as_bytes()) {
+        Ok(v) => v,
+        Err(e) => {
+            return Json(
+                serde_json::json!({ "ok": false, "error": format!("base64 inválido: {e}") }),
+            )
+        }
+    };
+    let dir = crate::app_data_dir();
+    let mut zip = match zip::ZipArchive::new(std::io::Cursor::new(bytes)) {
+        Ok(z) => z,
+        Err(e) => {
+            return Json(
+                serde_json::json!({ "ok": false, "error": format!("no es un backup .aion válido: {e}") }),
+            )
+        }
+    };
+    let mut restored = 0u32;
+    for i in 0..zip.len() {
+        let mut f = match zip.by_index(i) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        // enclosed_name() neutraliza rutas peligrosas (zip-slip: «..», absolutas).
+        let Some(rel) = f.enclosed_name() else {
+            continue;
+        };
+        let out = dir.join(rel);
+        if f.is_dir() {
+            let _ = std::fs::create_dir_all(&out);
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut buf = Vec::new();
+        if f.read_to_end(&mut buf).is_ok() && std::fs::write(&out, &buf).is_ok() {
+            restored += 1;
+        }
+    }
+    Json(serde_json::json!({ "ok": true, "restored": restored }))
 }
 
 /// **Exporta** la memoria como archivo JSONL descargable (para llevarla a otro PC/Mac).
