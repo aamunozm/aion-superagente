@@ -27,6 +27,16 @@ fn keep_alive() -> String {
     std::env::var("AION_KEEP_ALIVE").unwrap_or_else(|_| "30m".into())
 }
 
+/// **Serializa** las generaciones del LLM. El runner local (llama-server) atiende UN
+/// turno a la vez; si le llegan varias peticiones en paralelo (chat + agente + tareas
+/// de fondo + warmup) se SATURA y se cuelga. Con este semáforo (1 permiso) las
+/// peticiones esperan en cola en vez de trabar el servidor. (Los embeddings usan otro
+/// servidor y no pasan por aquí.)
+fn gen_lock() -> &'static tokio::sync::Semaphore {
+    static S: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    S.get_or_init(|| tokio::sync::Semaphore::new(1))
+}
+
 /// Motor LLM que habla con un servidor Ollama local.
 pub struct OllamaEngine {
     base_url: String,
@@ -123,6 +133,7 @@ impl OllamaEngine {
     /// Genera una respuesta a partir de un prompt + una imagen (base64) — visión
     /// multimodal. Requiere un modelo con visión (p. ej. gemma 4 abliterated).
     pub async fn generate_with_image(&self, prompt: &str, image_b64: &str) -> Result<Message> {
+        let _permit = gen_lock().acquire().await;
         let body = serde_json::json!({
             "model": self.model,
             "messages": [{ "role": "user", "content": prompt, "images": [image_b64] }],
@@ -160,6 +171,7 @@ impl LlmEngine for OllamaEngine {
     }
 
     async fn generate(&self, req: GenerateRequest) -> Result<Message> {
+        let _permit = gen_lock().acquire().await;
         let body = self.build_body(&req, false);
         let resp = self
             .http
@@ -190,6 +202,7 @@ impl LlmEngine for OllamaEngine {
         req: GenerateRequest,
         mut on_chunk: Box<dyn FnMut(StreamChunk) + Send>,
     ) -> Result<()> {
+        let _permit = gen_lock().acquire().await;
         let body = self.build_body(&req, true);
         let resp = self
             .http
