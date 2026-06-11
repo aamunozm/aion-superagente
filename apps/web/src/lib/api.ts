@@ -110,14 +110,68 @@ export async function chatStream(
   think: boolean,
   onEvent: (e: ChatEvent) => void,
   convoId?: string,
+  projectId?: string,
 ): Promise<void> {
   const res = await fetch(`${BRIDGE_URL}/api/chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt, think, lang: lang(), convo_id: convoId ?? "default" }),
+    body: JSON.stringify({
+      prompt,
+      think,
+      lang: lang(),
+      convo_id: convoId ?? "default",
+      project_id: projectId,
+    }),
   });
   await readSse(res, onEvent);
 }
+
+// ── Proyectos (workspace estilo NotebookLM) ─────────────────────────────────
+
+export type Project = { id: string; name: string; desc: string; icon: string; created: string; updated: string };
+export type ProjectSource = { id: string; title: string; kind: string; content: string; active: boolean; created: string };
+export type ProjectOutput = { id: string; kind: string; title: string; content: string; created: string };
+
+async function jpost<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BRIDGE_URL}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return (await res.json()) as T;
+}
+
+export async function projectsList(): Promise<Project[]> {
+  const r = await fetch(`${BRIDGE_URL}/api/projects`).then((x) => x.json()).catch(() => ({ projects: [] }));
+  return (r.projects ?? []) as Project[];
+}
+export const projectCreate = (name: string, desc: string, icon: string) =>
+  jpost<{ ok: boolean; project?: Project; error?: string }>("/api/projects", { name, desc, icon });
+export const projectRemove = (id: string) => jpost<{ ok: boolean }>("/api/projects/remove", { id });
+export const projectGet = (id: string) =>
+  jpost<{ ok: boolean; project?: Project; sources?: ProjectSource[]; outputs?: ProjectOutput[]; error?: string }>(
+    "/api/project/get",
+    { id },
+  );
+export const projectSourceAdd = (project_id: string, title: string, kind: string, content: string) =>
+  jpost<{ ok: boolean; source?: ProjectSource; error?: string }>("/api/project/source/add", {
+    project_id,
+    title,
+    kind,
+    content,
+  });
+export const projectSourceToggle = (project_id: string, id: string, active: boolean) =>
+  jpost<{ ok: boolean }>("/api/project/source/toggle", { project_id, id, active });
+export const projectSourceRemove = (project_id: string, id: string) =>
+  jpost<{ ok: boolean }>("/api/project/source/remove", { project_id, id });
+export const projectStudioGenerate = (project_id: string, kind: string) =>
+  jpost<{ ok: boolean; output?: ProjectOutput; error?: string }>("/api/project/studio/generate", {
+    project_id,
+    kind,
+    lang: lang(),
+  });
+export const projectStudioRemove = (project_id: string, id: string) =>
+  jpost<{ ok: boolean }>("/api/project/studio/remove", { project_id, id });
 
 /** Reinicia el hilo de una conversación en el backend (nuevo chat). */
 export async function chatReset(convoId: string): Promise<void> {

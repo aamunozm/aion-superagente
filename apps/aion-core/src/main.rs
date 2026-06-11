@@ -14,6 +14,7 @@ mod ingest_queue;
 mod library;
 mod memory_tool;
 mod onboarding;
+mod projects;
 mod prompt_store;
 mod prompts;
 mod provider;

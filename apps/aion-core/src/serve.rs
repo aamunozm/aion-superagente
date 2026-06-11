@@ -85,6 +85,9 @@ struct ChatBody {
     /// Id de la conversación (cada chat de la UI tiene el suyo). Por defecto "default".
     #[serde(default)]
     convo_id: Option<String>,
+    /// Si el chat pertenece a un PROYECTO, su id: ancla la respuesta a sus fuentes.
+    #[serde(default)]
+    project_id: Option<String>,
 }
 
 /// Directiva de idioma de RESPUESTA según el ajuste del usuario (es/it/en).
@@ -190,6 +193,17 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/credentials/remove", post(credentials_remove))
         .route("/api/confirm", post(confirm_decision))
         .route("/api/ask", post(ask_answer))
+        .route("/api/projects", get(projects_list).post(projects_create))
+        .route("/api/projects/remove", post(projects_remove))
+        .route("/api/project/get", post(project_get))
+        .route("/api/project/source/add", post(project_source_add))
+        .route("/api/project/source/toggle", post(project_source_toggle))
+        .route("/api/project/source/remove", post(project_source_remove))
+        .route(
+            "/api/project/studio/generate",
+            post(project_studio_generate),
+        )
+        .route("/api/project/studio/remove", post(project_studio_remove))
         .layer(cors)
         .layer(
             TraceLayer::new_for_http()
@@ -462,18 +476,32 @@ async fn chat(
     } else {
         format!("\n\n{lib_grounding}")
     };
+    // PROYECTO: si el chat pertenece a un proyecto, ancla la respuesta a sus
+    // fuentes activas y objetivo (foco real, estilo NotebookLM con citaciones).
+    let proj_block = match body.project_id.as_deref() {
+        Some(pid) if !pid.is_empty() => {
+            let g = crate::projects::grounding(pid);
+            if g.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n{g}")
+            }
+        }
+        _ => String::new(),
+    };
     let empathy_block = match &empathy {
         Some(d) => format!("\n\n{d}"),
         None => String::new(),
     };
     let self_ctx = format!(
-        "{}\n\n{}\n\n{}{}{}{}{}",
+        "{}\n\n{}\n\n{}{}{}{}{}{}",
         self_awareness_prompt(),
         lang_directive(&body.lang),
         crate::prompts::persona(&mode),
         empathy_block,
         think_note,
         mem_block,
+        proj_block,
         lib_block,
     );
 
@@ -1482,6 +1510,178 @@ async fn ask_answer(Json(b): Json<AskAnswer>) -> Json<serde_json::Value> {
     } else {
         Json(serde_json::json!({ "ok": false, "error": "pregunta no encontrada o expirada" }))
     }
+}
+
+// ── Proyectos (workspace estilo NotebookLM) ─────────────────────────────────
+
+async fn projects_list() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "projects": crate::projects::list() }))
+}
+
+#[derive(Deserialize)]
+struct ProjCreate {
+    name: String,
+    #[serde(default)]
+    desc: String,
+    #[serde(default)]
+    icon: String,
+}
+async fn projects_create(Json(b): Json<ProjCreate>) -> Json<serde_json::Value> {
+    if b.name.trim().is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "el nombre no puede estar vacío" }));
+    }
+    let p = crate::projects::create(&b.name, &b.desc, &b.icon);
+    Json(serde_json::json!({ "ok": true, "project": p }))
+}
+
+#[derive(Deserialize)]
+struct ProjId {
+    id: String,
+}
+async fn projects_remove(Json(b): Json<ProjId>) -> Json<serde_json::Value> {
+    crate::projects::remove(&b.id);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// Carga TODO el workspace de un proyecto en una sola llamada.
+async fn project_get(Json(b): Json<ProjId>) -> Json<serde_json::Value> {
+    match crate::projects::get(&b.id) {
+        Some(p) => Json(serde_json::json!({
+            "ok": true,
+            "project": p,
+            "sources": crate::projects::sources(&b.id),
+            "outputs": crate::projects::outputs(&b.id),
+        })),
+        None => Json(serde_json::json!({ "ok": false, "error": "proyecto no encontrado" })),
+    }
+}
+
+#[derive(Deserialize)]
+struct SrcAdd {
+    project_id: String,
+    title: String,
+    kind: String,
+    #[serde(default)]
+    content: String,
+}
+async fn project_source_add(Json(b): Json<SrcAdd>) -> Json<serde_json::Value> {
+    // Para fuentes WEB descargamos el texto de la página (grounding real). Si falla,
+    // guardamos la URL como contenido para que el agente la abra cuando la necesite.
+    let mut content = b.content.clone();
+    let mut title = b.title.clone();
+    if b.kind == "web" {
+        let url = if b.content.trim().is_empty() {
+            b.title.trim().to_string()
+        } else {
+            b.content.trim().to_string()
+        };
+        match WebClient::new().fetch_text(&url).await {
+            Ok(text) if !text.trim().is_empty() => {
+                content = text.chars().take(20000).collect();
+                if title.trim().is_empty() {
+                    title = url.clone();
+                }
+            }
+            _ => content = url.clone(),
+        }
+    }
+    let s = crate::projects::add_source(&b.project_id, &title, &b.kind, &content);
+    Json(serde_json::json!({ "ok": true, "source": s }))
+}
+
+#[derive(Deserialize)]
+struct SrcToggle {
+    project_id: String,
+    id: String,
+    active: bool,
+}
+async fn project_source_toggle(Json(b): Json<SrcToggle>) -> Json<serde_json::Value> {
+    crate::projects::toggle_source(&b.project_id, &b.id, b.active);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+struct SrcRemove {
+    project_id: String,
+    id: String,
+}
+async fn project_source_remove(Json(b): Json<SrcRemove>) -> Json<serde_json::Value> {
+    crate::projects::remove_source(&b.project_id, &b.id);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+struct StudioGen {
+    project_id: String,
+    /// "informe" | "resumen" | "mapa".
+    kind: String,
+    #[serde(default)]
+    lang: Option<String>,
+}
+/// Genera una salida de Studio (informe/resumen/mapa) a partir de las fuentes
+/// ACTIVAS del proyecto, usando el LLM local, y la persiste.
+async fn project_studio_generate(Json(b): Json<StudioGen>) -> Json<serde_json::Value> {
+    let Some(p) = crate::projects::get(&b.project_id) else {
+        return Json(serde_json::json!({ "ok": false, "error": "proyecto no encontrado" }));
+    };
+    let grounding = crate::projects::grounding(&b.project_id);
+    let active = crate::projects::sources(&b.project_id)
+        .into_iter()
+        .filter(|s| s.active)
+        .count();
+    if active == 0 {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "añade al menos una fuente activa antes de generar"
+        }));
+    }
+    let (title, instruction) = match b.kind.as_str() {
+        "informe" => (
+            "Informe",
+            "Redacta un INFORME claro y estructurado (con secciones y viñetas) que sintetice las \
+             fuentes del proyecto orientado a su objetivo. Cita las fuentes por su título.",
+        ),
+        "mapa" => (
+            "Mapa mental",
+            "Crea un MAPA MENTAL en Markdown: el tema central como título y ramas anidadas con \
+             viñetas (- y sangría) cubriendo los conceptos clave de las fuentes.",
+        ),
+        _ => (
+            "Resumen",
+            "Escribe un RESUMEN ejecutivo conciso (5-8 frases) de las fuentes del proyecto, \
+             enfocado en su objetivo.",
+        ),
+    };
+    let engine = active_engine();
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(format!(
+                "{}\nResponde SOLO con el contenido pedido, bien formateado en Markdown.",
+                lang_directive(&b.lang)
+            )),
+            Message::user(format!("{instruction}\n\n{grounding}")),
+        ],
+        think: false,
+        temperature: Some(0.4),
+        max_tokens: Some(1200),
+    };
+    let content = match engine.generate(req).await {
+        Ok(m) => m.content,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    };
+    let full_title = format!("{title} · {}", p.name);
+    let o = crate::projects::add_output(&b.project_id, &b.kind, &full_title, content.trim());
+    Json(serde_json::json!({ "ok": true, "output": o }))
+}
+
+#[derive(Deserialize)]
+struct OutRemove {
+    project_id: String,
+    id: String,
+}
+async fn project_studio_remove(Json(b): Json<OutRemove>) -> Json<serde_json::Value> {
+    crate::projects::remove_output(&b.project_id, &b.id);
+    Json(serde_json::json!({ "ok": true }))
 }
 
 // ── Bóveda de credenciales (Llavero) ────────────────────────────────────────
