@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SensorConfig {
     /// ¿Conciencia de ubicación/clima activada? (opt-in explícito de Ariel).
     #[serde(default)]
@@ -21,17 +21,6 @@ pub struct SensorConfig {
     /// Etiqueta legible del lugar (p. ej. "Roma"), para el prompt.
     #[serde(default)]
     pub place: String,
-}
-
-impl Default for SensorConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            lat: None,
-            lon: None,
-            place: String::new(),
-        }
-    }
 }
 
 fn path() -> std::path::PathBuf {
@@ -131,7 +120,7 @@ fn weather_desc(code: i64) -> &'static str {
         61 | 63 | 65 => "lluvia",
         66 | 67 => "lluvia helada",
         71 | 73 | 75 | 77 => "nieve",
-        80 | 81 | 82 => "chubascos",
+        80..=82 => "chubascos",
         85 | 86 => "chubascos de nieve",
         95 => "tormenta",
         96 | 99 => "tormenta con granizo",
