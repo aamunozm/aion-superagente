@@ -24,6 +24,16 @@ impl SelfModel {
         }
     }
 
+    /// Restaura un auto-modelo persistido (competencia + observaciones previas),
+    /// para que la auto-percepción sobreviva a los reinicios.
+    pub fn from_state(competence: f32, observations: u64) -> Self {
+        Self {
+            competence: competence.clamp(0.0, 1.0),
+            alpha: 0.2,
+            observations,
+        }
+    }
+
     /// Observa un resultado propio (éxito/fallo) y actualiza la auto-estimación.
     pub fn observe(&mut self, success: bool) {
         let target = if success { 1.0 } else { 0.0 };

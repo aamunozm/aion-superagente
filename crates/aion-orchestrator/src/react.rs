@@ -21,6 +21,14 @@ pub type ConfirmFn =
 pub type AskFn =
     Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync>;
 
+/// Negativa HONESTA cuando el agente no puede responder: o emitió un `Final Answer`
+/// vacío/plantilla (típico del 12B ante algo incontestable), o agotó los pasos sin
+/// recopilar nada útil. Jamás una respuesta en blanco ni un dato inventado: dice la
+/// verdad ("no puedo"/"no tengo"), que además es lo que un verificador confirmaría.
+const HONEST_REFUSAL: &str =
+    "No puedo responder eso con fiabilidad: no tengo la información ni una herramienta \
+     que la obtenga. Prefiero decírtelo claro antes que inventar.";
+
 /// Resultado de una ejecución del agente.
 #[derive(Debug, Clone)]
 pub struct AgentRun {
@@ -244,6 +252,18 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
 
             // ¿Respuesta final?
             if let Some(answer) = extract(&text, "Final Answer:") {
+                // El 12B a veces emite «Final Answer:» VACÍO (o regurgita la plantilla)
+                // ante una pregunta que no puede responder con lo que tiene. Eso jamás
+                // debe llegar como respuesta en blanco: damos una negativa HONESTA (sin
+                // teatro, sin inventar). Contiene «no puedo»/«no tengo» a propósito —
+                // es la verdad y además es verificable.
+                if answer.trim().is_empty() || echoes_template(&answer) {
+                    return Ok(AgentRun {
+                        answer: HONEST_REFUSAL.into(),
+                        steps: step + 1,
+                        failures: failed.values().cloned().collect(),
+                    });
+                }
                 // VERIFICACIÓN (anti-alucinación): un juez comprueba que la respuesta esté
                 // RESPALDADA por las observaciones. VELOCIDAD: solo gastamos esa llamada extra
                 // cuando hay DATOS concretos que se pueden inventar (números, conteos, IPs,
@@ -413,6 +433,22 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
         // Síntesis final: agotó los pasos, pero puede que ya tenga la info en el
         // scratchpad (p. ej. tras leer una página grande). En vez de rendirse,
         // pide una respuesta final con lo recopilado.
+        //
+        // SOLO si hay observaciones REALES que sintetizar: con el scratchpad vacío
+        // (o solo fallos) el modelo tiende a regurgitar la propia plantilla del
+        // prompt con huecos inventados («[Aquí va…]») — mejor una negativa honesta
+        // y gratis que una llamada LLM que produce basura.
+        let useful_obs = scratchpad
+            .lines()
+            .filter_map(|l| l.strip_prefix("Observation: "))
+            .any(|o| !o.trim().is_empty() && !is_failure(o));
+        if !useful_obs {
+            return Ok(AgentRun {
+                answer: HONEST_REFUSAL.into(),
+                steps: self.max_steps,
+                failures: failed.values().cloned().collect(),
+            });
+        }
         let synth = GenerateRequest {
             messages: vec![
                 Message::system(
@@ -427,18 +463,22 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
             temperature: Some(0.4),
             max_tokens: Some(400),
         };
-        match self.engine.generate(synth).await {
-            Ok(m) if !sanitize(&m.content).is_empty() => Ok(AgentRun {
-                answer: sanitize(&m.content),
-                steps: self.max_steps,
-                failures: failed.values().cloned().collect(),
-            }),
-            _ => Ok(AgentRun {
-                answer: "No pude completar la tarea en los pasos disponibles.".into(),
-                steps: self.max_steps,
-                failures: failed.values().cloned().collect(),
-            }),
-        }
+        let answer = match self.engine.generate(synth).await {
+            Ok(m) => sanitize(&m.content),
+            Err(_) => String::new(),
+        };
+        // Anti-eco: si la «respuesta» es la plantilla de síntesis devuelta tal cual,
+        // se descarta — eso jamás debe llegar al usuario.
+        let answer = if answer.is_empty() || echoes_template(&answer) {
+            HONEST_REFUSAL.into()
+        } else {
+            answer
+        };
+        Ok(AgentRun {
+            answer,
+            steps: self.max_steps,
+            failures: failed.values().cloned().collect(),
+        })
     }
 }
 
@@ -546,6 +586,18 @@ fn first_line(s: &str) -> String {
         .chars()
         .take(140)
         .collect()
+}
+
+/// ¿La «respuesta» es en realidad un eco de la plantilla de síntesis? Pasa cuando
+/// el modelo, sin datos suficientes, devuelve la estructura del prompt rellenando
+/// los huecos con placeholders («Tarea: … Información recopilada: [Aquí va…]»).
+fn echoes_template(s: &str) -> bool {
+    let l = s.to_lowercase();
+    l.contains("[aquí va")
+        || l.contains("[aqui va")
+        || l.contains("información recopilada:")
+        || l.contains("informacion recopilada:")
+        || l.trim_start().starts_with("tarea:")
 }
 
 /// Corta cualquier "Observation:" que el modelo haya alucinado.

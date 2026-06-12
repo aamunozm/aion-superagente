@@ -7,12 +7,18 @@
 
 mod a2a;
 mod agent_tools;
+mod awareness;
+mod claude_code;
+mod claude_mcp;
+mod consciousness;
 mod credentials;
 mod empathy;
 mod evals;
+mod graph;
 mod identity;
 mod inbox;
 mod ingest_queue;
+mod inner_state;
 mod library;
 mod memory_tool;
 mod onboarding;
@@ -20,10 +26,25 @@ mod projects;
 mod prompt_store;
 mod prompts;
 mod provider;
+mod sensors;
 mod serve;
 mod skill_store;
 mod skill_tool;
 mod web_tool;
+mod workspace;
+
+/// Escritura ATÓMICA (tmp + rename): un crash o un lector concurrente jamás ven un
+/// archivo a medias. Para todos los estados pequeños de AION (inner_state, self_model,
+/// curiosity, recortes de las corrientes…).
+pub fn write_atomic(path: &std::path::Path, contents: &str) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, contents).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
 
 use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, StreamChunk};
 use aion_kernel::types::Message;
@@ -565,6 +586,13 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
     let audit = aion_telemetry::AuditLog::default_local();
     let mut self_model = SelfModel::default();
     let mut curiosity = CuriosityEngine::new(8);
+    // La curiosidad SOBREVIVE entre despertares: restaura su historia de aprendizaje.
+    let curiosity_path = app_data_dir().join("curiosity.json");
+    if let Ok(txt) = std::fs::read_to_string(&curiosity_path) {
+        if let Ok(state) = serde_json::from_str::<Vec<(String, Vec<bool>)>>(&txt) {
+            curiosity.import_state(state);
+        }
+    }
     let activities = [
         "razonar",
         "estudiar",
@@ -592,6 +620,16 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
             "🎯 curiosidad elige: {goal}  (LP={:+.2})",
             curiosity.learning_progress(goal)
         );
+        // El tablón global VE la vida autónoma: este proceso escribe la corriente en
+        // disco y el servidor la recoge (corriente de conciencia compartida).
+        // PERO sin robarle el foco a Ariel: si está activo ahora mismo, la vida
+        // autónoma trabaja en silencio sin tocar el foco atencional.
+        let ariel_activo = awareness::seconds_since_user()
+            .map(|s| s < 300)
+            .unwrap_or(false);
+        if !ariel_activo {
+            inner_state::set_focus("vida", &format!("vida autónoma: {goal}"));
+        }
 
         // 🤖 EJECUTAR la actividad elegida.
         let (success, detail) = match goal {
@@ -605,6 +643,14 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
             _ => study_once(&engine).await,
         };
         println!("   {} {goal}: {detail}", if success { "✅" } else { "❌" });
+        workspace::append_to_file(&workspace::StreamEvent::now(
+            "vida",
+            "observación",
+            &format!("{goal}: {detail}"),
+        ));
+        if success {
+            inner_state::set_curiosity(&format!("{goal} — {detail}"));
+        }
 
         // 🔔 AION "quiere hablarte": convierte lo descubierto en un MENSAJE PARA TI
         // (Bandeja) y avisa. Así te busca él, no solo responde.
@@ -619,19 +665,36 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
                 _ => "insight",
             };
             let message = reach_out(&engine, goal, &detail).await;
-            if let Ok(ibx) = inbox::Inbox::open(inbox_path()) {
-                let _ = ibx.push(kind, &message);
-            }
-            // El popup de escritorio tiene COOLDOWN (por defecto 6 h): la Bandeja
-            // sigue acumulando todo, pero no te bombardea con notificaciones.
-            if notify_cooldown_elapsed() {
-                notify_user("AION 🌱 quiere contarte algo", &message);
+            workspace::append_to_file(&workspace::StreamEvent::now(
+                "vida",
+                "pensamiento",
+                &message,
+            ));
+            // GUARDIAS COMPARTIDAS (las mismas del latido): que escribirle a Ariel
+            // sea la excepción, no el subproducto de cada ciclo — máx. 1 nota sin
+            // leer, respiración mínima entre notas y nunca repetirse. Lo descubierto
+            // no se pierde: ya quedó en la corriente y en su memoria.
+            if serve::may_reach_out(&message) {
+                if let Ok(ibx) = inbox::Inbox::open(inbox_path()) {
+                    let _ = ibx.push(kind, &message);
+                }
+                // El popup de escritorio tiene COOLDOWN (por defecto 6 h): la Bandeja
+                // sigue acumulando todo, pero no te bombardea con notificaciones.
+                if notify_cooldown_elapsed() {
+                    notify_user("AION 🌱 quiere contarte algo", &message);
+                }
             }
         }
 
-        // 🔁 REALIMENTAR curiosidad + auto-modelo.
+        // 🔁 REALIMENTAR curiosidad + auto-modelo (el de este proceso Y los
+        // persistentes que comparte con el servidor: una sola vida, un solo yo).
         curiosity.record(goal, success);
+        if let Ok(txt) = serde_json::to_string(&curiosity.export_state()) {
+            write_atomic(&curiosity_path, &txt);
+        }
         self_model.observe(success);
+        awareness::record_outcome(success);
+        inner_state::record_result(success, 1);
         audit.record(
             "daemon",
             goal,
@@ -652,6 +715,16 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
             if let Ok(r) = mem.consolidate(&ConsolidationConfig::default()) {
                 println!("🌙 sueño: {} → {} recuerdos", r.before, r.after);
+                if r.before != r.after {
+                    workspace::append_to_file(&workspace::StreamEvent::now(
+                        "vida",
+                        "estado",
+                        &format!(
+                            "soñé: consolidé mi memoria ({} → {} recuerdos)",
+                            r.before, r.after
+                        ),
+                    ));
+                }
             }
         }
         println!("🪞 {}\n", self_model.introspect());
@@ -1711,7 +1784,7 @@ pub(crate) fn app_data_dir() -> std::path::PathBuf {
 }
 
 /// Ruta del archivo de memoria persistente (configurable por AION_MEMORY).
-fn memory_path() -> String {
+pub(crate) fn memory_path() -> String {
     std::env::var("AION_MEMORY").unwrap_or_else(|_| {
         app_data_dir()
             .join("memory.jsonl")
@@ -1725,6 +1798,13 @@ pub(crate) fn knowledge_path() -> std::path::PathBuf {
     std::env::var("AION_KNOWLEDGE")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| app_data_dir().join("knowledge.jsonl"))
+}
+
+/// Ruta del grafo de conocimiento (conceptos sobre Biblioteca + memoria).
+pub(crate) fn graph_path() -> std::path::PathBuf {
+    std::env::var("AION_GRAPH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| app_data_dir().join("graph.jsonl"))
 }
 
 /// Ruta de la Bandeja de AION (mensajes proactivos para el usuario).

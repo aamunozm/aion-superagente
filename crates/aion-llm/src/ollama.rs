@@ -216,6 +216,8 @@ impl LlmEngine for OllamaEngine {
         }
 
         // Ollama emite NDJSON: una línea JSON por fragmento.
+        let started = std::time::Instant::now();
+        let mut ttft_ms: Option<u128> = None; // tiempo hasta el PRIMER token (prefill real)
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
         while let Some(item) = stream.next().await {
@@ -235,10 +237,12 @@ impl LlmEngine for OllamaEngine {
 
                 if let Some(t) = chunk.message.thinking {
                     if !t.is_empty() {
+                        ttft_ms.get_or_insert_with(|| started.elapsed().as_millis());
                         on_chunk(StreamChunk::Thinking { text: t });
                     }
                 }
                 if !chunk.message.content.is_empty() {
+                    ttft_ms.get_or_insert_with(|| started.elapsed().as_millis());
                     on_chunk(StreamChunk::Answer {
                         text: chunk.message.content,
                     });
@@ -248,6 +252,22 @@ impl LlmEngine for OllamaEngine {
                         (Some(c), Some(d)) if d > 0 => c as f32 / (d as f32 / 1e9),
                         _ => 0.0,
                     };
+                    // OBSERVABILIDAD del KV-cache: `prefill_tokens` cae cuando Ollama
+                    // reutiliza el prefijo estable del prompt (layout estático→volátil).
+                    // Compara turnos consecutivos: si el prefill baja, la caché ayuda.
+                    let prefill_tokens = chunk.prompt_eval_count.unwrap_or(0);
+                    let prefill_ms = chunk
+                        .prompt_eval_duration
+                        .map(|d| d / 1_000_000)
+                        .unwrap_or(0);
+                    tracing::info!(
+                        ttft_ms = ttft_ms.unwrap_or(0) as u64,
+                        prefill_tokens,
+                        prefill_ms,
+                        gen_tokens = chunk.eval_count.unwrap_or(0),
+                        gen_tps = tps,
+                        "métricas LLM (prefill = coste del prompt; cae si el KV-cache se reutiliza)"
+                    );
                     on_chunk(StreamChunk::Done {
                         tokens: chunk.eval_count.unwrap_or(0),
                         tokens_per_sec: tps,
@@ -308,6 +328,12 @@ struct OllamaChatResponse {
     eval_count: Option<u32>,
     #[serde(default)]
     eval_duration: Option<u64>,
+    /// Tokens del prompt EVALUADOS (prefill). Con KV-cache reutilizado, Ollama solo
+    /// procesa los tokens nuevos del prefijo → este número CAE entre turnos.
+    #[serde(default)]
+    prompt_eval_count: Option<u32>,
+    #[serde(default)]
+    prompt_eval_duration: Option<u64>,
 }
 
 #[derive(Deserialize)]

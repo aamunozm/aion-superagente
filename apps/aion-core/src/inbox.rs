@@ -69,10 +69,6 @@ impl Inbox {
         Ok(self.all()?.into_iter().filter(|m| !m.read).collect())
     }
 
-    pub fn unread_count(&self) -> usize {
-        self.unread().map(|v| v.len()).unwrap_or(0)
-    }
-
     /// Marca como leídos todos los mensajes (o solo uno si se da `id`).
     pub fn mark_read(&self, id: Option<&str>) -> std::io::Result<()> {
         let mut all = self.all()?;
@@ -106,9 +102,9 @@ mod tests {
         inbox
             .push("pregunta", "¿Quieres que organice tus documentos?")
             .unwrap();
-        assert_eq!(inbox.unread_count(), 2);
+        assert_eq!(inbox.unread().unwrap().len(), 2);
         inbox.mark_read(None).unwrap();
-        assert_eq!(inbox.unread_count(), 0);
+        assert_eq!(inbox.unread().unwrap().len(), 0);
         assert_eq!(inbox.all().unwrap().len(), 2);
         std::fs::remove_file(&path).ok();
     }

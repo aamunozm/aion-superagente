@@ -34,6 +34,42 @@ fn epoch() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_default()
 }
 
+/// Estima la **importancia** de un recuerdo (0..1) por señales deterministas —cero
+/// latencia, sin LLM—: lo etiquetado como aprendizaje/reflexión, las preferencias y
+/// decisiones del usuario, y los datos de identidad pesan más que un comentario de
+/// paso. Inspirado en la puntuación de importancia de Generative Agents, pero barata.
+pub fn estimate_importance(content: &str) -> f32 {
+    let t = content.to_lowercase();
+    let mut score: f32 = 0.4; // base
+                              // Conocimiento que AION se forjó a sí mismo: vale más que charla.
+    if t.starts_with("[aprendizaje]") || t.starts_with("[reflexión]") {
+        score += 0.3;
+    }
+    // Preferencias, decisiones e identidad del usuario: lo más valioso de recordar.
+    const HEAVY: [&str; 14] = [
+        "prefiero",
+        "me gusta",
+        "odio",
+        "no me gusta",
+        "siempre",
+        "nunca",
+        "importante",
+        "recuerda que",
+        "decidimos",
+        "mi objetivo",
+        "mi nombre",
+        "vivo en",
+        "trabajo en",
+        "no quiero",
+    ];
+    if HEAVY.iter().any(|k| t.contains(k)) {
+        score += 0.25;
+    }
+    // Algo de sustancia (no un «ok»): premia el contenido con cuerpo, satura pronto.
+    score += (content.chars().count() as f32 / 600.0).min(0.15);
+    score.clamp(0.0, 1.0)
+}
+
 /// Un registro de memoria con metadatos (evolución darwiniana + temporalidad).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRecord {
@@ -51,10 +87,27 @@ pub struct MemoryRecord {
     /// pero se excluye de la recuperación). Resuelve contradicción/staleness.
     #[serde(default)]
     pub superseded: bool,
+    /// CUÁNDO dejó de ser válido (bi-temporal): junto a `created_at` permite responder
+    /// «esto lo creías hasta el martes». `None` mientras sigue vigente.
+    #[serde(default)]
+    pub superseded_at: Option<DateTime<Utc>>,
+    /// Importancia del recuerdo (0..1): cuánto MERECE recordarse, estimada al guardar.
+    /// Las decisiones, preferencias e identidad pesan más que un comentario de paso.
+    #[serde(default = "default_importance")]
+    pub importance: f32,
     /// ARISTAS asociativas: ids de recuerdos relacionados (grafo de memoria). Permite
     /// recordar por asociación entre chats distintos (GAAMA).
     #[serde(default)]
     pub links: Vec<String>,
+    /// PROCEDENCIA: quién escribió el recuerdo. `""` = el propio AION;
+    /// `"claude-code"` = un agente externo conectado. Permite cuarentena suave
+    /// (marcar lo externo al inyectarlo en prompts) sin separar almacenes.
+    #[serde(default)]
+    pub origin: String,
+}
+
+fn default_importance() -> f32 {
+    0.5
 }
 
 /// Memoria vectorial: embeddings + recuperación por coseno, con persistencia opcional.
@@ -112,6 +165,52 @@ impl VectorMemory {
             .filter(|r| !r.superseded) // solo conocimiento vigente
             .map(|r| r.content.clone())
             .collect()
+    }
+
+    /// Últimos `n` recuerdos vigentes con su fecha de creación (del más antiguo al
+    /// más reciente), para que el agente sitúe en el tiempo lo que ha vivido
+    /// («hace 2 horas estudié…») en vez de un pasado plano.
+    pub fn recent_with_time(&self, n: usize) -> Vec<(String, DateTime<Utc>)> {
+        let recs = self.records.lock().unwrap();
+        let mut v: Vec<(String, DateTime<Utc>)> = recs
+            .iter()
+            .filter(|r| !r.superseded)
+            .rev()
+            .take(n)
+            .map(|r| (r.content.clone(), r.created_at))
+            .collect();
+        v.reverse();
+        v
+    }
+
+    /// Últimos `n` recuerdos vigentes como (id, contenido), para capas que puentean
+    /// la memoria con otras estructuras (p. ej. el grafo de conocimiento).
+    pub fn recent_with_ids(&self, n: usize) -> Vec<(String, String)> {
+        let recs = self.records.lock().unwrap();
+        recs.iter()
+            .filter(|r| !r.superseded)
+            .rev()
+            .take(n)
+            .map(|r| (r.id.clone(), r.content.clone()))
+            .collect()
+    }
+
+    /// **Qué cambió** desde `since` (bi-temporal): lo que AION aprendió de nuevo y lo
+    /// que dejó de ser válido en esa ventana. Permite responder «¿qué ha cambiado desde
+    /// la semana pasada?» sin un grafo completo.
+    pub fn changes_since(&self, since: DateTime<Utc>) -> (Vec<String>, Vec<String>) {
+        let recs = self.records.lock().unwrap();
+        let nuevos: Vec<String> = recs
+            .iter()
+            .filter(|r| !r.superseded && r.created_at >= since)
+            .map(|r| r.content.clone())
+            .collect();
+        let obsoletos: Vec<String> = recs
+            .iter()
+            .filter(|r| r.superseded && r.superseded_at.map(|t| t >= since).unwrap_or(false))
+            .map(|r| r.content.clone())
+            .collect();
+        (nuevos, obsoletos)
     }
 
     /// Agrupa recuerdos vigentes en CLÚSTERES de casi-duplicados (cosine ≥ umbral).
@@ -245,11 +344,17 @@ impl VectorMemory {
         }
         Ok(added)
     }
-}
 
-#[async_trait]
-impl MemoryStore for VectorMemory {
-    async fn store(&self, content: &str) -> Result<String> {
+    /// Guarda un recuerdo declarando su PROCEDENCIA y un techo de importancia.
+    /// Para escrituras de agentes externos (p. ej. Claude Code): el `origin` queda
+    /// en el registro y `max_importance` impide que contenido externo supersedee
+    /// preferencias/decisiones del usuario (ver lógica de supersede más abajo).
+    pub async fn store_with_origin(
+        &self,
+        content: &str,
+        origin: &str,
+        max_importance: f32,
+    ) -> Result<String> {
         let embedding = self.embedder.embed(content).await?;
         let id = Uuid::new_v4().to_string();
         let mut record = MemoryRecord {
@@ -260,8 +365,12 @@ impl MemoryStore for VectorMemory {
             access_count: 0,
             created_at: Utc::now(),
             superseded: false,
+            superseded_at: None,
+            importance: estimate_importance(content).min(max_importance),
             links: Vec::new(),
+            origin: origin.to_string(),
         };
+        let now = Utc::now();
         let mut recs = self.records.lock().unwrap();
         // MEMORIA TEMPORAL: si actualiza a otro casi idéntico, marca el viejo obsoleto.
         // GRAFO ASOCIATIVO: si está RELACIONADO (sin ser idéntico), crea una arista
@@ -273,8 +382,14 @@ impl MemoryStore for VectorMemory {
                 continue;
             }
             let sim = cosine(&embedding, &r.embedding);
-            if sim > SUPERSEDE_SIM {
+            // Supersede CONSCIENTE DE IMPORTANCIA: un comentario de paso no puede
+            // invalidar una preferencia/decisión del usuario sobre el mismo tema
+            // (con BGE-M3, paráfrasis del mismo tópico superan 0.88 con facilidad).
+            // Solo actualiza si el recuerdo nuevo pesa al menos tanto como el viejo
+            // (tolerancia 0.1); si no, quedan ENLAZADOS como relacionados.
+            if sim > SUPERSEDE_SIM && record.importance + 0.1 >= r.importance {
                 r.superseded = true;
+                r.superseded_at = Some(now); // bi-temporal: cuándo dejó de ser válido
                 dirty = true;
             } else if sim >= LINK_SIM_MIN {
                 sims.push((i, sim));
@@ -302,14 +417,21 @@ impl MemoryStore for VectorMemory {
         }
         Ok(id)
     }
+}
+
+#[async_trait]
+impl MemoryStore for VectorMemory {
+    async fn store(&self, content: &str) -> Result<String> {
+        self.store_with_origin(content, "", 1.0).await
+    }
 
     async fn retrieve(&self, query: &str, k: usize) -> Result<Vec<MemoryHit>> {
         let q = self.embedder.embed(query).await?;
         let q_ents = entities(query);
 
         let mut recs = self.records.lock().unwrap();
-        let n = recs.len().max(1) as f32;
         let max_access = recs.iter().map(|r| r.access_count).max().unwrap_or(0) as f32;
+        let now = Utc::now();
 
         // 1) Puntuación MULTI-SEÑAL por recuerdo: semántica + léxica + ENTIDADES +
         //    recencia + importancia (estado del arte mem0 / Generative Agents).
@@ -321,13 +443,20 @@ impl MemoryStore for VectorMemory {
                 let sem = cosine(&q, &r.embedding).clamp(0.0, 1.0);
                 let lex = lexical_overlap(query, &r.content);
                 let ent = entity_overlap(&q_ents, &entities(&r.content));
-                let rec = if n > 1.0 { i as f32 / (n - 1.0) } else { 1.0 };
+                // Recencia REAL (Generative Agents): decay exponencial por edad con
+                // semivida de 7 días — antes era el índice ordinal, que premiaba la
+                // posición en el archivo y no el tiempo.
+                let age_days = (now - r.created_at).num_seconds().max(0) as f32 / 86_400.0;
+                let rec = 0.5_f32.powf(age_days / 7.0);
                 let usage = if max_access > 0.0 {
                     r.access_count as f32 / max_access
                 } else {
                     0.0
                 };
-                let importance = (r.fitness * 0.7 + usage * 0.3).clamp(0.0, 1.0);
+                // Importancia: lo estimado al guardar (preferencias/decisiones/identidad)
+                // reforzado por el uso real y la aptitud acumulada.
+                let importance =
+                    (r.importance * 0.6 + r.fitness * 0.25 + usage * 0.15).clamp(0.0, 1.0);
                 let composite =
                     0.45 * sem + 0.18 * lex + 0.12 * ent + 0.13 * rec + 0.12 * importance;
                 ScoredIdx { idx: i, composite }
@@ -665,7 +794,10 @@ mod tests {
             access_count: access,
             created_at: epoch(),
             superseded: false,
+            superseded_at: None,
+            importance: 0.5,
             links: Vec::new(),
+            origin: String::new(),
         }
     }
 
@@ -696,5 +828,36 @@ mod tests {
         let report = mem.consolidate(&ConsolidationConfig::default()).unwrap();
         assert_eq!(report.pruned, 0); // no se poda lo que se usa
         assert_eq!(mem.len(), 1);
+    }
+
+    #[test]
+    fn importance_weights_preferences_and_learnings() {
+        let casual = estimate_importance("hoy hizo sol");
+        let pref = estimate_importance("prefiero que me hables en español, siempre");
+        let learn = estimate_importance("[aprendizaje] usar la herramienta files para contar");
+        assert!(pref > casual, "una preferencia pesa más que un comentario");
+        assert!(learn > casual, "una lección pesa más que un comentario");
+        assert!((0.0..=1.0).contains(&pref));
+    }
+
+    #[test]
+    fn changes_since_separates_new_and_obsolete() {
+        let mem = VectorMemory::default_local();
+        let t0 = epoch();
+        {
+            let mut r = mem.records.lock().unwrap();
+            let mut viejo = rec(vec![1.0, 0.0], 0.5, 0);
+            viejo.content = "creo X".into();
+            viejo.superseded = true;
+            viejo.superseded_at = Some(Utc::now());
+            r.push(viejo);
+            let mut nuevo = rec(vec![0.0, 1.0], 0.5, 0);
+            nuevo.content = "ahora creo Y".into();
+            nuevo.created_at = Utc::now();
+            r.push(nuevo);
+        }
+        let (nuevos, obsoletos) = mem.changes_since(t0);
+        assert!(nuevos.iter().any(|c| c.contains("Y")));
+        assert!(obsoletos.iter().any(|c| c.contains("X")));
     }
 }

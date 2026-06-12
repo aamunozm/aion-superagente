@@ -21,11 +21,20 @@ import {
   a2aGet,
   a2aSet,
   a2aSend,
+  sensorsGet,
+  sensorsSet,
+  claudeCodeGet,
+  claudeCodeConnect,
+  claudeCodeDisconnect,
+  claudeCodeTest,
+  claudeCodeSet,
+  type ClaudeCodeStatus,
   type AionIdentity,
   type A2aConfig,
   type CredMeta,
   type InstalledModel,
   type ModelOption,
+  type SensorConfig,
   type SystemScan,
 } from "@/lib/api";
 
@@ -45,11 +54,83 @@ export default function SettingsPage() {
   const [a2a, setA2a] = useState<A2aConfig>({ enabled: false, token: "", peers: [] });
   const [a2aMsg, setA2aMsg] = useState<string>("");
   const [newPeer, setNewPeer] = useState({ name: "", url: "" });
+  const [sensors, setSensors] = useState<SensorConfig>({ enabled: false, lat: null, lon: null, place: "" });
+  const [sensorMsg, setSensorMsg] = useState<string>("");
+  const [cc, setCc] = useState<ClaudeCodeStatus>({ enabled: false, auto_brief: false, registered: false, cli_found: true });
+  const [ccBusy, setCcBusy] = useState(false);
+  const [ccMsg, setCcMsg] = useState<string>("");
 
   useEffect(() => {
     getIdentity().then(setIdent);
     a2aGet().then((r) => setA2a(r.config));
+    sensorsGet().then(setSensors).catch(() => {});
+    claudeCodeGet().then(setCc).catch(() => {});
   }, []);
+
+  const ccConnected = cc.enabled && cc.registered;
+  async function connectCc() {
+    if (ccBusy) return;
+    setCcBusy(true);
+    setCcMsg(t("cc.connecting"));
+    const r = await claudeCodeConnect(cc.auto_brief).catch(() => ({ ok: false, error: "sin respuesta" }));
+    if (r.ok) {
+      setCcMsg(`✓ ${t("cc.connected")}`);
+    } else {
+      setCcMsg(r.error === "cli_not_found" ? t("cc.installHint") : `⚠️ ${r.error ?? "error"}`);
+    }
+    setCc(await claudeCodeGet());
+    setCcBusy(false);
+  }
+  async function disconnectCc() {
+    if (ccBusy) return;
+    setCcBusy(true);
+    await claudeCodeDisconnect().catch(() => {});
+    setCc(await claudeCodeGet());
+    setCcMsg(t("cc.notConnected"));
+    setCcBusy(false);
+  }
+  async function testCc() {
+    setCcMsg("…");
+    const r = await claudeCodeTest().catch(() => null);
+    if (!r) {
+      setCcMsg("⚠️ AION no responde");
+      return;
+    }
+    if (!r.cli_found) setCcMsg(t("cc.installHint"));
+    else if (r.ok)
+      setCcMsg(
+        `✓ ${t("cc.connected")} · ${t("cc.lastSeen")}: ${r.last_seen_at ? new Date(r.last_seen_at).toLocaleString() : t("cc.never")}`,
+      );
+    else setCcMsg(t("cc.notConnected"));
+  }
+  async function toggleBrief(next: boolean) {
+    setCc({ ...cc, auto_brief: next });
+    await claudeCodeSet({ auto_brief: next }).catch(() => {});
+  }
+
+  async function saveSensors(next: SensorConfig) {
+    setSensors(next);
+    await sensorsSet(next).catch(() => {});
+    setSensorMsg(next.enabled ? "Conciencia de entorno activada." : "Desactivada.");
+    setTimeout(() => setSensorMsg(""), 2500);
+  }
+  function useMyLocation() {
+    if (!navigator.geolocation) {
+      setSensorMsg("Tu navegador no permite ubicación.");
+      return;
+    }
+    setSensorMsg("Obteniendo ubicación…");
+    navigator.geolocation.getCurrentPosition(
+      (pos) =>
+        saveSensors({
+          ...sensors,
+          enabled: true,
+          lat: Number(pos.coords.latitude.toFixed(3)),
+          lon: Number(pos.coords.longitude.toFixed(3)),
+        }),
+      () => setSensorMsg("No se pudo obtener la ubicación."),
+    );
+  }
 
   function saveA2a(next: A2aConfig) {
     setA2a(next);
@@ -326,6 +407,53 @@ export default function SettingsPage() {
           </p>
         </div>
 
+        {/* ── Conciencia de entorno (clima/ubicación, opt-in) ── */}
+        <div className="card">
+          <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
+            <Icon name="globe" size={16} /> Conciencia de entorno
+          </h2>
+          <p className="text-sm mb-3" style={{ color: "var(--text-3)" }}>
+            Deja que AION sepa dónde estás y qué tiempo hace —contexto que un compañero
+            real tiene—. Desactivado por defecto. La consulta de clima sale por tu proxy
+            (Tor/VPN) si lo tienes; nada se guarda en su memoria de largo plazo.
+          </p>
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-sm" style={{ color: "var(--text-2)" }}>
+              {sensors.enabled ? "Activada" : "Desactivada"}
+              {sensors.place && sensors.enabled ? ` · ${sensors.place}` : ""}
+            </span>
+            <button
+              className="btn"
+              onClick={() => saveSensors({ ...sensors, enabled: !sensors.enabled })}
+            >
+              {sensors.enabled ? "Desactivar" : "Activar"}
+            </button>
+          </div>
+          <div className="flex gap-2 items-center flex-wrap">
+            <input
+              className="input"
+              style={{ maxWidth: 200 }}
+              value={sensors.place}
+              onChange={(e) => setSensors({ ...sensors, place: e.target.value })}
+              onBlur={() => saveSensors(sensors)}
+              placeholder="Ciudad (p. ej. Roma)"
+            />
+            <button className="btn" onClick={useMyLocation}>
+              Usar mi ubicación
+            </button>
+            {(sensors.lat != null && sensors.lon != null) && (
+              <span className="text-xs" style={{ color: "var(--text-3)" }}>
+                {sensors.lat}, {sensors.lon}
+              </span>
+            )}
+            {sensorMsg && (
+              <span className="text-xs" style={{ color: "var(--accent)" }}>
+                {sensorMsg}
+              </span>
+            )}
+          </div>
+        </div>
+
         {/* ── Credenciales (bóveda en el Llavero) ── */}
         <div className="card">
           <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
@@ -485,6 +613,66 @@ export default function SettingsPage() {
           </div>
           {a2aMsg && (
             <p className="text-xs mt-3 whitespace-pre-wrap" style={{ color: "var(--text-2)" }}>{a2aMsg}</p>
+          )}
+        </div>
+
+        {/* ── Claude Code: memoria compartida vía MCP ── */}
+        <div className="card">
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="t-section flex items-center gap-2" style={{ color: "var(--text-2)" }}>
+              <Icon name="code" size={16} /> {t("cc.title")}
+            </h2>
+            <span
+              className="flex items-center gap-1.5 text-xs"
+              style={{ color: ccConnected ? "var(--accent)" : "var(--text-3)" }}
+            >
+              <span
+                className="inline-block w-2 h-2 rounded-full"
+                style={{ background: ccConnected ? "var(--accent)" : "var(--text-3)" }}
+              />
+              {ccConnected ? t("cc.connected") : t("cc.notConnected")}
+            </span>
+          </div>
+          <p className="text-xs mb-3" style={{ color: "var(--text-3)" }}>
+            {t("cc.note")}
+          </p>
+          {!cc.cli_found && (
+            <p className="text-xs mb-3 px-3 py-2 rounded-lg" style={{ background: "var(--surface-2)", color: "var(--text-2)" }}>
+              ⚠️ {t("cc.installHint")}
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2 mb-3">
+            {ccConnected ? (
+              <button className="btn" disabled={ccBusy} onClick={disconnectCc}>
+                {t("cc.disconnect")}
+              </button>
+            ) : (
+              <button
+                className="btn"
+                disabled={ccBusy || !cc.cli_found}
+                onClick={connectCc}
+                style={{ background: "var(--ink)", color: "#fff", opacity: ccBusy || !cc.cli_found ? 0.5 : 1 }}
+              >
+                {ccBusy ? t("cc.connecting") : t("cc.connect")}
+              </button>
+            )}
+            <button className="btn" disabled={ccBusy} onClick={testCc}>
+              {t("cc.test")}
+            </button>
+            <a className="btn" href="/claude-code" style={{ background: "var(--surface-2)", color: "var(--text-2)" }}>
+              {t("cc.openPage")}
+            </a>
+          </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={cc.auto_brief}
+              onChange={(e) => toggleBrief(e.target.checked)}
+            />
+            {t("cc.autoBrief")}
+          </label>
+          {ccMsg && (
+            <p className="text-xs mt-3 whitespace-pre-wrap" style={{ color: "var(--text-2)" }}>{ccMsg}</p>
           )}
         </div>
       </div>

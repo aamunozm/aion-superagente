@@ -270,6 +270,25 @@ impl WebClient {
         }
         Ok(text)
     }
+
+    /// Cuerpo CRUDO (sin pasar por el extractor de texto): para APIs JSON. Mantiene
+    /// el guard anti-SSRF y el proxy (`AION_PROXY`) como el resto del cliente.
+    pub async fn fetch_raw(&self, url: &str) -> Result<String> {
+        let url = url.trim();
+        guard_url(url)?;
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| AionError::Internal(format!("fetch falló: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(AionError::Internal(format!("HTTP {}", resp.status())));
+        }
+        resp.text()
+            .await
+            .map_err(|e| AionError::Internal(format!("cuerpo inválido: {e}")))
+    }
 }
 
 /// Guarda anti-SSRF: solo http(s) y rechaza hosts internos/privados.

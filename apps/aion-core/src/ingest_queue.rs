@@ -128,6 +128,58 @@ pub fn snapshot() -> serde_json::Value {
     })
 }
 
+// ── Cache de ingesta incremental (SHA-256 por documento) ───────────────────
+//
+// Re-encolar un libro que no cambió es habitual (re-subidas masivas, sincronías).
+// Guardamos el hash del archivo por "dominio::fuente": si coincide, el worker salta
+// la ingesta entera (ni embeddings ni grafo). Archivo aparte de la cola, atómico.
+
+fn cache_path() -> PathBuf {
+    crate::app_data_dir().join("ingest_cache.json")
+}
+
+fn read_cache() -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(cache_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_cache(map: &std::collections::HashMap<String, String>) {
+    if let Ok(s) = serde_json::to_string(map) {
+        crate::write_atomic(&cache_path(), &s);
+    }
+}
+
+pub fn cached_sha(domain: &str, source: &str) -> Option<String> {
+    let _g = QLOCK.lock().unwrap();
+    read_cache().get(&format!("{domain}::{source}")).cloned()
+}
+
+pub fn set_cached_sha(domain: &str, source: &str, sha: &str) {
+    let _g = QLOCK.lock().unwrap();
+    let mut map = read_cache();
+    map.insert(format!("{domain}::{source}"), sha.to_string());
+    write_cache(&map);
+}
+
+pub fn clear_cached_sha(domain: &str, source: &str) {
+    let _g = QLOCK.lock().unwrap();
+    let mut map = read_cache();
+    if map.remove(&format!("{domain}::{source}")).is_some() {
+        write_cache(&map);
+    }
+}
+
+/// SHA-256 de un archivo (streaming, no carga el archivo entero en RAM).
+pub fn sha256_file(path: &std::path::Path) -> Option<String> {
+    use sha2::Digest;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut hasher = sha2::Sha256::new();
+    std::io::copy(&mut f, &mut hasher).ok()?;
+    Some(format!("{:x}", hasher.finalize()))
+}
+
 /// Limpia de la cola los trabajos terminados (done/error) y devuelve cuántos.
 pub fn clear_finished() -> usize {
     let _g = QLOCK.lock().unwrap();

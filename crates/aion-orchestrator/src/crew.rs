@@ -63,6 +63,9 @@ pub struct Step {
 pub struct CrewRun {
     pub answer: String,
     pub steps: usize,
+    /// Acciones fallidas de TODOS los especialistas (honestidad del self-model:
+    /// un equipo que tropezó no debe puntuar como éxito limpio).
+    pub failures: Vec<String>,
 }
 
 /// Orquestador del equipo: planifica, delega en especialistas y sintetiza.
@@ -106,6 +109,7 @@ impl<'a> Orchestrator<'a> {
         // DELEGACIÓN secuencial con COLABORACIÓN: cada especialista ve lo que han
         // hecho los anteriores (memoria compartida del equipo).
         let mut shared = String::new();
+        let mut failures: Vec<String> = Vec::new();
         for (i, step) in plan.iter().enumerate() {
             self.say(format!("→ Delego en «{}»: {}", step.role, step.subtask));
             let persona = persona_for(&step.role);
@@ -120,6 +124,7 @@ impl<'a> Orchestrator<'a> {
                 .with_max_steps(6);
             let run = agent.run(&step.subtask).await?;
             shared.push_str(&format!("[{}] {}\n\n", step.role, run.answer));
+            failures.extend(run.failures.iter().map(|f| format!("[{}] {f}", step.role)));
             let _ = i;
         }
 
@@ -129,6 +134,7 @@ impl<'a> Orchestrator<'a> {
         Ok(CrewRun {
             answer,
             steps: plan.len(),
+            failures,
         })
     }
 

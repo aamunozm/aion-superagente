@@ -63,6 +63,28 @@ impl CuriosityEngine {
         mean(&v[half..]) - mean(&v[..half])
     }
 
+    /// Exporta la historia (para persistir la curiosidad entre despertares).
+    pub fn export_state(&self) -> Vec<(String, Vec<bool>)> {
+        self.history
+            .iter()
+            .map(|(k, v)| (k.clone(), v.iter().copied().collect()))
+            .collect()
+    }
+
+    /// Restaura una historia exportada (respetando la ventana actual).
+    pub fn import_state(&mut self, state: Vec<(String, Vec<bool>)>) {
+        for (goal, results) in state {
+            let dq = self.history.entry(goal).or_default();
+            dq.clear();
+            for r in results {
+                dq.push_back(r);
+            }
+            while dq.len() > self.window {
+                dq.pop_front();
+            }
+        }
+    }
+
     /// Elige el siguiente objetivo a perseguir (curiosidad). Los no explorados
     /// tienen prioridad (explorar); entre los explorados, el de mayor LP.
     pub fn next_goal<'a>(&self, candidates: &[&'a str]) -> Option<&'a str> {

@@ -58,6 +58,16 @@ impl Library {
         self.chunks.len()
     }
 
+    /// Pasajes (id, contenido) de un documento concreto. Para construir capas
+    /// encima de la biblioteca (p. ej. el grafo de conocimiento) sin duplicar texto.
+    pub fn chunks_of(&self, domain: &str, source: &str) -> Vec<(String, String)> {
+        self.chunks
+            .iter()
+            .filter(|c| c.domain == domain && c.source == source)
+            .map(|c| (c.id.clone(), c.content.clone()))
+            .collect()
+    }
+
     /// Lista de documentos: (dominio, fuente, nº de pasajes).
     pub fn documents(&self) -> Vec<(String, String, usize)> {
         use std::collections::BTreeMap;
@@ -154,12 +164,19 @@ impl Library {
             .embed(query)
             .await
             .map_err(|e| format!("fallo de embedding: {e}"))?;
+        Ok(self.search_with_embedding(&q, k, domain))
+    }
+
+    /// Como `search`, pero con el embedding de la consulta YA calculado: permite que
+    /// una capa superior (p. ej. el grounding dual con grafo) embeba la query UNA sola
+    /// vez y la comparta entre la búsqueda clásica y la del grafo.
+    pub fn search_with_embedding(&self, q: &[f32], k: usize, domain: Option<&str>) -> Vec<Passage> {
         let mut scored: Vec<Passage> = self
             .chunks
             .iter()
             .filter(|c| domain.is_none_or(|d| c.domain == d))
             .map(|c| Passage {
-                score: cosine(&q, &c.embedding),
+                score: cosine(q, &c.embedding),
                 domain: c.domain.clone(),
                 source: c.source.clone(),
                 idx: c.idx,
@@ -172,7 +189,12 @@ impl Library {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         scored.truncate(k.max(1));
-        Ok(scored)
+        scored
+    }
+
+    /// Pasaje por id "{dominio}::{fuente}#{idx}" (los puentes del grafo apuntan aquí).
+    pub fn chunk_by_id(&self, id: &str) -> Option<&Chunk> {
+        self.chunks.iter().find(|c| c.id == id)
     }
 
     fn persist(&self) -> Result<(), String> {

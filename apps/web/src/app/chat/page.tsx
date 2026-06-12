@@ -19,16 +19,7 @@ import {
   status,
   type AgentEvent,
   type ChatEvent,
-  type InboxMessage,
 } from "@/lib/api";
-
-const INBOX_ICON: Record<string, React.ComponentProps<typeof Icon>["name"]> = {
-  insight: "bulb",
-  idea: "sparkle",
-  pregunta: "help",
-  saludo: "wave",
-  alerta: "warn",
-};
 
 type Step = { kind: "thought" | "action" | "observation"; text: string; agent?: string };
 type Mode = "chat" | "agent" | "crew";
@@ -103,6 +94,9 @@ export default function ChatPage() {
   const [pendingImage, setPendingImage] = useState<{ name: string; b64: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  // ¿Ariel ya habló en esta sesión? Si saludó él primero, el saludo automático
+  // de apertura se descarta — saludar dos veces rompe la sensación de vida.
+  const userSpokeRef = useRef(false);
 
   // Al montar: restaura la última conversación (o crea una). Arregla la pérdida del
   // chat al navegar entre menús.
@@ -195,7 +189,9 @@ export default function ChatPage() {
     if (sessionStorage.getItem("aion_greeted")) return;
     let alive = true;
     getGreeting().then((text) => {
-      if (!alive || !text.trim()) return;
+      // Si Ariel saludó primero mientras se generaba, AION ya respondió por el
+      // chat: este saludo llegaría tarde y duplicado — se descarta en silencio.
+      if (!alive || !text.trim() || userSpokeRef.current) return;
       sessionStorage.setItem("aion_greeted", "1");
       addReachTurn(text, "saludo", new Date().toISOString());
     });
@@ -249,6 +245,7 @@ export default function ChatPage() {
     e.preventDefault();
     const prompt = input.trim();
     if (busy) return;
+    userSpokeRef.current = true;
 
     // Si hay una imagen adjunta, se analiza con visión (la pregunta es opcional).
     if (pendingImage) {
@@ -422,13 +419,10 @@ export default function ChatPage() {
         )}
         {turns.map((t, i) => (
           <div key={i} className="flex flex-col gap-2">
-            {/* Mensaje iniciado por AION: sin burbuja de usuario, con marca dorada. */}
+            {/* Mensaje iniciado por AION: mismo agente, misma voz — se muestra como
+                cualquier otra respuesta suya (solo que sin burbuja de usuario). */}
             {t.reach ? (
-              <div className="msg max-w-[85%] self-start" style={{ borderColor: "var(--accent)" }}>
-                <p className="text-xs mb-1" style={{ color: "var(--accent)" }}>
-                  <span className="inline-flex items-center gap-1"><Icon name={INBOX_ICON[t.reach.kind] ?? "sparkle"} size={12} /> AION te escribió</span> ·{" "}
-                  {new Date(t.reach.at).toLocaleString()}
-                </p>
+              <div className="msg max-w-[85%] self-start">
                 <p className="whitespace-pre-wrap">{t.answer}</p>
               </div>
             ) : (

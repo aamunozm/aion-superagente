@@ -411,6 +411,129 @@ impl Tool for LibrarySearchTool {
     }
 }
 
+/// Busca en el GRAFO de conocimiento: conceptos conectados entre documentos (y
+/// memoria) con expansión multi-salto. Encuentra lo que la búsqueda directa no ve:
+/// relaciones que cruzan documentos. Cero LLM: embedding de la consulta + grafo en RAM.
+pub struct GraphSearchTool;
+
+impl GraphSearchTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for GraphSearchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for GraphSearchTool {
+    fn name(&self) -> &str {
+        "graph_search"
+    }
+    fn description(&self) -> &str {
+        "Busca en TU grafo de conocimiento (conceptos conectados entre documentos y \
+         memoria) y devuelve conceptos relacionados + pasajes con fuente, siguiendo \
+         conexiones multi-salto que la búsqueda directa no ve. Entrada: la consulta, \
+         opcionalmente seguida de ' :: saltos' (1 o 2), p. ej. «relación entre \
+         mitocondrias y envejecimiento :: 2». Úsala cuando la pregunta CONECTE temas \
+         de varios documentos; para un pasaje literal de un solo libro usa library_search."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        // Entrada: "consulta [:: saltos]".
+        let (query, hops) = match input.rsplit_once("::") {
+            Some((q, h)) if h.trim().parse::<usize>().is_ok() => {
+                (q.trim(), h.trim().parse::<usize>().unwrap_or(1).clamp(1, 2))
+            }
+            _ => (input.trim(), 1),
+        };
+        if query.is_empty() {
+            return Err("dame una consulta, p. ej. «qué conecta X con Y :: 2»".into());
+        }
+        let g = crate::graph::KnowledgeGraph::open(crate::graph_path());
+        if g.node_count() == 0 {
+            return Ok(
+                "el grafo de conocimiento está vacío (se construye al ingerir documentos \
+                 en la biblioteca, o con POST /api/graph/rebuild)"
+                    .into(),
+            );
+        }
+        let embedder = aion_memory::OllamaEmbedder::default_local();
+        let q = embedder
+            .embed(query)
+            .await
+            .map_err(|e| format!("fallo de embedding: {e}"))?;
+
+        let hits = g.local_candidates(&q, query, 6, hops);
+        if hits.is_empty() {
+            return Ok("(el grafo no tiene conceptos relevantes para esa consulta)".into());
+        }
+
+        // Conceptos y conexiones del vecindario alcanzado (con su tipo de relación).
+        // Solo de los hits MÁS relevantes (los primeros, ya ordenados por score): así
+        // las conexiones mostradas pertenecen a la consulta y no a documentos vecinos
+        // que apenas rozaron el umbral. Las aristas se ordenan por peso, no por orden
+        // de almacenamiento (si no, el primer documento ingerido dominaría siempre).
+        let mut out = String::from("Conexiones del grafo:\n");
+        let labels: std::collections::HashSet<&str> = hits
+            .iter()
+            .take(5)
+            .flat_map(|h| h.via.iter().map(|v| v.as_str()))
+            .collect();
+        let mut conns: Vec<(&str, &str, &str, f32)> = g
+            .edges()
+            .iter()
+            .filter_map(|e| {
+                let na = g.nodes().iter().find(|n| n.id == e.a)?;
+                let nb = g.nodes().iter().find(|n| n.id == e.b)?;
+                (labels.contains(na.label.as_str()) && labels.contains(nb.label.as_str()))
+                    .then_some((
+                        na.label.as_str(),
+                        nb.label.as_str(),
+                        e.rel.as_str(),
+                        e.weight,
+                    ))
+            })
+            .collect();
+        conns.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+        for (a, b, rel, _) in conns.into_iter().take(6) {
+            out.push_str(&format!("- {a} ⟷ {b} ({rel})\n"));
+        }
+
+        // Pasajes puenteados, con la cadena de conceptos que llevó a cada uno.
+        let lib = crate::library::Library::open(crate::knowledge_path());
+        out.push_str("Pasajes:\n");
+        let mut listed = 0usize;
+        for h in hits.iter().take(8) {
+            let Some(c) = lib.chunk_by_id(&h.chunk_id) else {
+                continue;
+            };
+            let score = aion_memory::cosine(&q, &c.embedding);
+            if score < 0.30 {
+                continue;
+            }
+            out.push_str(&format!(
+                "• [{} · {} · frag.{} · vía {}] {}\n",
+                c.domain,
+                c.source,
+                c.idx,
+                h.via.join(" → "),
+                c.content.chars().take(350).collect::<String>()
+            ));
+            listed += 1;
+            if listed >= 4 {
+                break;
+            }
+        }
+        if listed == 0 {
+            out.push_str("(conceptos conectados, pero sin pasajes que superen el umbral)\n");
+        }
+        Ok(out)
+    }
+}
+
 // ── Computer-use: ver la PANTALLA y controlar ratón/teclado (gobernado + HITL) ─
 
 /// Directorio de gobernanza del control (Governor/audit).

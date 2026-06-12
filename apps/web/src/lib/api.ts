@@ -112,6 +112,65 @@ export const a2aSet = (config: A2aConfig) => jpost<{ ok: boolean }>("/api/a2a", 
 export const a2aSend = (url: string, message: string) =>
   jpost<{ ok?: boolean; reply?: string; name?: string; error?: string }>("/api/a2a/send", { url, message });
 
+// ── Claude Code (memoria compartida vía MCP) ─────────────────────────────────
+export type ClaudeCodeStatus = {
+  enabled: boolean;
+  auto_brief: boolean;
+  created_at?: string | null;
+  last_seen_at?: string | null;
+  registered: boolean;
+  cli_found: boolean;
+};
+export type ClaudeCodeAuditEntry = {
+  ts: string;
+  tool: string;
+  query: string;
+  result_chars: number;
+  est_tokens: number;
+  ok: boolean;
+};
+export type ClaudeCodeStats = {
+  total_calls: number;
+  by_tool: Record<string, number>;
+  tokens_served: number;
+  writes: number;
+  full_dump_tokens: number;
+  last_activity?: string | null;
+};
+export async function claudeCodeGet(): Promise<ClaudeCodeStatus> {
+  try {
+    return await fetch(`${BRIDGE_URL}/api/claude-code`).then((x) => x.json());
+  } catch {
+    return { enabled: false, auto_brief: false, registered: false, cli_found: false };
+  }
+}
+export const claudeCodeConnect = (auto_brief?: boolean) =>
+  jpost<{ ok: boolean; error?: string }>("/api/claude-code/connect", { auto_brief });
+export const claudeCodeSet = (cfg: { auto_brief?: boolean }) =>
+  jpost<{ ok: boolean }>("/api/claude-code", cfg);
+export const claudeCodeDisconnect = () =>
+  jpost<{ ok: boolean }>("/api/claude-code/disconnect", {});
+export const claudeCodeTest = () =>
+  jpost<{ ok: boolean; enabled: boolean; registered: boolean; cli_found: boolean; last_seen_at?: string | null }>(
+    "/api/claude-code/test",
+    {},
+  );
+export async function claudeCodeAudit(limit = 200): Promise<ClaudeCodeAuditEntry[]> {
+  try {
+    const r = await fetch(`${BRIDGE_URL}/api/claude-code/audit?limit=${limit}`).then((x) => x.json());
+    return (r.entries as ClaudeCodeAuditEntry[]) ?? [];
+  } catch {
+    return [];
+  }
+}
+export async function claudeCodeStats(): Promise<ClaudeCodeStats | null> {
+  try {
+    return await fetch(`${BRIDGE_URL}/api/claude-code/stats`).then((x) => x.json());
+  } catch {
+    return null;
+  }
+}
+
 export type AionIdentity = { id: string; name: string; born_at: string };
 export async function getIdentity(): Promise<AionIdentity | null> {
   try {
@@ -541,4 +600,61 @@ export const inboxRead = (id?: string) =>
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(id ? { id } : {}),
+  });
+
+/* ── Mente: corriente de conciencia (GWT), estado interno e índice Φ ──────── */
+
+export type MindEvent = { at: number; source: string; kind: string; text: string };
+
+export type InnerStateInfo = {
+  focus: string;
+  focus_since: number;
+  curiosity: string;
+  certainty: number;
+  mood: string;
+  recent_outcomes: boolean[];
+  last_task_steps: number;
+  competence: number;
+  observations: number;
+  updated_at: number;
+};
+
+export type ConsciousnessInfo = {
+  index: number;
+  components: {
+    integration: number;
+    recurrence: number;
+    metacognition: number;
+    coherence: number;
+  };
+  measurements: number;
+  history: { at: number; score: number }[];
+};
+
+/** Corriente de conciencia en vivo (SSE). Cancelable vía `signal`. */
+export async function mindStream(
+  onEvent: (e: MindEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`${BRIDGE_URL}/api/stream`, { signal });
+  await readSse(res, onEvent);
+}
+
+export const innerState = () => jsonCall<InnerStateInfo>("/api/inner");
+export const consciousness = () => jsonCall<ConsciousnessInfo>("/api/consciousness");
+
+export type SensorConfig = {
+  enabled: boolean;
+  lat: number | null;
+  lon: number | null;
+  place: string;
+};
+
+export const sensorsGet = () => jsonCall<SensorConfig>("/api/sensors");
+
+export const sensorsSet = (cfg: SensorConfig) =>
+  jsonCall<{ ok: boolean }>("/api/sensors", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(cfg),
   });
