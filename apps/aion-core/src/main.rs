@@ -24,6 +24,7 @@ mod inner_state;
 mod journal;
 mod language_detector;
 mod library;
+mod mcp_compact;
 mod memory_tool;
 mod onboarding;
 mod pending;
@@ -106,31 +107,13 @@ pub fn shared_memory() -> aion_kernel::Result<std::sync::Arc<aion_memory::Vector
     Ok(MEM.get().expect("memoria compartida inicializada").clone())
 }
 
-/// Memoria multilingüe con optimización de tokens. Wrapper sobre VectorMemory que
-/// aplica code-switching según idioma objetivo (Spanish/English/Italian).
-pub fn shared_multilingual_memory() -> aion_kernel::Result<Arc<MultilingualMemory>> {
-    static MEM_ML: std::sync::OnceLock<Arc<MultilingualMemory>> = std::sync::OnceLock::new();
-    if let Some(m) = MEM_ML.get() {
-        return Ok(m.clone());
-    }
-    let vector_mem = shared_memory()?;
-    let compressor = Arc::new(TfidfCompressor::new(0.25)); // ~4x compresión
-    let multilingual = Arc::new(MultilingualMemory::new(vector_mem, Some(compressor)));
-    let _ = MEM_ML.set(multilingual);
-    Ok(MEM_ML
-        .get()
-        .expect("memoria multilingüe inicializada")
-        .clone())
-}
-
 use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, StreamChunk};
 use aion_kernel::types::Message;
 use aion_kernel::{kernel_info, AionEvent, EventBus};
 use aion_llm::OllamaEngine;
-use aion_memory::{MultilingualMemory, TfidfCompressor, VectorMemory};
+use aion_memory::VectorMemory;
 use chrono::Utc;
 use std::io::Write;
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

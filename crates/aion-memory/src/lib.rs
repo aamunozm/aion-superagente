@@ -8,19 +8,12 @@
 //! - F4: campos de fitness/salience/access para la **memoria darwiniana** y la
 //!   consolidación tipo "sueño".
 
-pub mod compressor;
 mod embedder;
 pub mod multilingual;
-pub mod tfidf_compressor;
 mod vector;
 
-pub use compressor::KeywordCompressor;
 pub use embedder::OllamaEmbedder;
-pub use multilingual::{
-    CompressorService, DocumentMetadata, Language, MultilingualDocument, MultilingualMemory,
-    RetrievalResult,
-};
-pub use tfidf_compressor::TfidfCompressor;
+pub use multilingual::Language;
 pub use vector::{
     is_unknown_time, ConsolidationConfig, ConsolidationReport, MemoryRecord, VectorMemory,
 };

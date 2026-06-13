@@ -2189,14 +2189,6 @@ async fn relevant_knowledge(prompt: &str) -> (String, usize, usize) {
     if is_trivial_query(prompt) {
         return (String::new(), 0, 0);
     }
-    // DETECCIÓN DE IDIOMA: si el usuario pregunta en español, aplicar code-switching
-    // (devolver memoria en inglés comprimido para ahorrar tokens).
-    let user_language = crate::language_detector::detect_language(prompt);
-    let target_language = match user_language {
-        aion_memory::Language::Spanish => aion_memory::Language::English,
-        _ => aion_memory::Language::English, // Default a inglés para token-saving
-    };
-
     let Ok(mem) = crate::shared_memory() else {
         return (String::new(), 0, 0);
     };
@@ -2232,26 +2224,12 @@ async fn relevant_knowledge(prompt: &str) -> (String, usize, usize) {
     let origins = mem.origins_for(&ids);
     let mut propios = String::new();
     let mut externos = String::new();
-
-    // OPTIMIZACIÓN MULTILINGÜE: si el usuario es español, aplicar code-switching
-    // (contenido comprimido en inglés). Esto es Phase 3 de ADR-0004.
-    let compressor: Option<std::sync::Arc<dyn aion_memory::CompressorService>> = if target_language
-        == aion_memory::Language::English
-        && user_language == aion_memory::Language::Spanish
-    {
-        Some(std::sync::Arc::new(aion_memory::TfidfCompressor::new(0.25))) // ~4x compresión
-    } else {
-        None
-    };
-
+    // RUTA LOCAL (Gemma): la memoria se inyecta ÍNTEGRA en español. Aquí los tokens son
+    // gratis (inferencia local) y comprimir/traducir solo degradaría la calidad. La
+    // optimización ES→EN vive únicamente en el puente MCP hacia Claude Code, donde los
+    // tokens cuestan (ver crate::mcp_compact).
     for h in &useful {
-        let mut c: String = h.content.chars().take(220).collect();
-        // Aplicar compresión si aplica (usuario español → contenido comprimido)
-        if let Some(ref comp) = compressor {
-            if let Ok(compressed) = comp.compress_to_english(&c) {
-                c = compressed;
-            }
-        }
+        let c: String = h.content.chars().take(220).collect();
         if origins.get(&h.id).map(|o| !o.is_empty()).unwrap_or(false) {
             externos.push_str(&format!("- {c}\n"));
         } else {

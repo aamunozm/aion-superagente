@@ -1,200 +1,99 @@
-# Estado de Implementación: Multilingual Memory Optimization
+# Optimización de tokens multilingüe — Estado
 
-**Rama**: `feature/multilingual-memory`  
-**Commits**: 3 (68cf382, 96033a7, b5785c8)  
-**Status**: Phase 1-2 COMPLETE ✅
-
----
-
-## Resumen Ejecutivo
-
-Implementación de optimización de tokens multilingüe para usuarios españoles. Capa superior a `VectorMemory` que almacena fragmentos en idioma original + versión comprimida en inglés (4-5x compresión sin LLM).
-
-**Beneficio esperado**: ~47-50% ahorro de tokens en entrada cuando usuarios españoles reciben respuestas en inglés comprimido.
+**Rama**: `feature/multilingual-memory`
+**Objetivo real**: reducir los tokens que la memoria de AION consume en el **puente MCP
+hacia Claude Code** (Anthropic API, de pago). En el chat local con Gemma los tokens son
+gratis: ahí no se optimiza nada.
 
 ---
 
-## Fases Completadas
+## El giro (por qué cambió el diseño)
 
-### ✅ Phase 1A: MultilingualMemory Base (68cf382)
+La primera implementación (commits 68cf382…73bbe3d) apuntó mal:
 
-**Componentes**:
-- `Language` enum: Spanish/English/Italian/Other con conversiones
-- `MultilingualDocument` struct: id, original_text, original_language, compressed_en, embedding, metadata, compression_ratio
-- `CompressorService` trait: interfaz para compresores pluggables
-- `MultilingualMemory` struct: wrapper sobre `VectorMemory` con code-switching
-  - `index_document(text, language, metadata)`: embeda (BGE-M3) + comprime si no es English
-  - `retrieve(query, k, target_language)`: devuelve comprimido si target=English
+- Atacaba la **ruta local de Gemma**, donde los tokens **no cuestan**.
+- "Comprimía" con `TfidfCompressor::compress_to_english()`, que **no traduce**: quitaba
+  *stopwords inglesas* de texto **español**. Medido sobre un recuerdo real: 16 de 33
+  palabras eran stopwords españolas que el filtro inglés no reconocía → conservaba el
+  25% de tokens "raros" → **word-salad español** inyectado en el prompt de Gemma.
+- El 80% del código (`MultilingualMemory`, `index_document`, `compressed_en`) era
+  **código muerto**: nunca se llamaba en producción.
 
-**Arquitectura**:
-```
-Usuario español pregunta en español
-  ↓
-VectorMemory.retrieve(query) → embeda con BGE-M3, busca por similitud
-  ↓
-MultilingualMemory.retrieve() → deserializa hits, aplica code-switching
-  ↓
-Si target_language=English Y existe compressed_en → devuelve comprimido
-Si no → devuelve original (fallback seguro)
-```
-
-**Estado**: ✅ Compila, tests pasan (Language enum conversions)
+Se revirtió la ruta Gemma (vuelve a recibir español íntegro) y se borraron los
+compresores. Lo que sobrevive: el enum `Language` y el detector heurístico.
 
 ---
 
-### ✅ Phase 1B: KeywordCompressor (96033a7)
+## Diseño correcto: el idioma se ata al CONSUMIDOR
 
-**Concepto**: Extracción de palabras clave (50-60% compresión simple)
+| Consumidor | Idioma servido | Por qué |
+|---|---|---|
+| **Gemma (chat local)** | Español íntegro | Tokens gratis; traducir solo degradaría |
+| **Claude Code (puente MCP)** | Inglés equivalente | Tokens de pago; inglés ≈ **40% menos** (medido con tiktoken sobre recuerdos reales) |
 
-**Implementación**:
-- 50+ stopwords en inglés (the, a, is, are, etc.)
-- Filtra stopwords, mantiene palabras con contenido semántico
-- Compression ratio: `original_words / compressed_words`
+**Cómo se genera el inglés** (`apps/aion-core/src/mcp_compact.rs`):
 
-**Tests** ✅:
-```
-test keyword_compressor_removes_stopwords ... ok
-test keyword_compressor_calculates_ratio ... ok
-```
+1. Lo traduce **Gemma local** (gratis), fiel y literal (`temp 0.1`), preservando
+   hechos/nombres/números/rutas. NO resume agresivo: el 40% ya viene de la tokenización.
+2. **Precomputado y cacheado** por SHA-256 del contenido en
+   `~/Library/Application Support/AION/mcp_compact_en.json`. Nunca se traduce en caliente
+   dentro de la llamada MCP (eso metería latencia de Gemma a cada búsqueda).
+3. **Fail-open absoluto**: en *cache miss* sirve el español original ESTA vez y dispara
+   la traducción en segundo plano (`tokio::spawn`) para la próxima. Si Ollama está
+   cerrado o la traducción falla, simplemente se sirve español. Nunca bloquea ni corrompe.
+4. Preserva la etiqueta de procedencia (`[hecho]`, `[aprendizaje]`…) sin traducirla.
 
-**Limitación**: Compresión naïve, pierde contexto. Placeholder para Phase 2.
-
----
-
-### ✅ Phase 2: TfidfCompressor (b5785c8)
-
-**Concepto**: Compresión inteligente sin necesidad de modelo LLM
-
-**Algoritmo**:
-1. Tokenizar y calcular TF (frecuencia relativa en documento)
-2. Calcular IDF (rareza + longitud palabra)
-3. Score = TF × IDF
-4. Seleccionar top-K% tokens por score (configurable: 0.2=~5x, 0.25=~4x, 0.3=~3.3x)
-5. Reconstruir preservando orden original
-6. Penalizar stopwords (0.3x score para mantener coherencia)
-
-**Tests** ✅:
-```
-test tfidf_compressor_basic ... ok (mantiene palabras clave)
-test tfidf_compressor_ratio ... ok (~3-4x compresión medida)
-test tfidf_compressor_empty ... ok (edge case)
-```
-
-**Mediciones reales** (test output):
-```
-Original: 13 words
-Compressed: 4 words
-Ratio: 3.25x
-```
-
-**Ventaja sobre KeywordCompressor**:
-- Mantiene palabras relevantes (artificial, intelligence, machine, learning)
-- Filtra genéricas (the, and, are)
-- Ratio ajustable según presupuesto de tokens
+**Conectado**: `aion_memory_search` (el coste repetido por consulta). El `aion_brief`
+(~450 tok, una vez por sesión) queda como siguiente incremento.
 
 ---
 
-## Fases Pendientes
+## Estado del código
 
-### ⏳ Phase 3: Integración /api/chat (SIGUIENTE)
+| Archivo | Qué hace | Estado |
+|---|---|---|
+| `crates/aion-memory/src/multilingual.rs` | Solo el enum `Language` | ✅ |
+| `apps/aion-core/src/language_detector.rs` | Detección heurística ES/IT/EN (sin LLM) | ✅ 6 tests |
+| `apps/aion-core/src/mcp_compact.rs` | Traducción Gemma + caché + fail-open | ✅ 4 tests |
+| `apps/aion-core/src/claude_mcp.rs` | `aion_memory_search` usa `compact_for_bridge()` | ✅ |
+| `apps/aion-core/src/serve.rs` | Ruta Gemma revertida a español íntegro | ✅ |
 
-**Qué falta**:
-1. Detectar idioma usuario (heurística: primer mensaje)
-2. Pasar `target_language` a handlers
-3. Serializar MultilingualMemory en AionContext
-4. En retrieval: pasar target_language a `multilingual_memory.retrieve()`
-
-**Archivos a modificar**:
-- `apps/aion-core/src/handlers/chat.rs` — agregar `target_language` detection
-- `apps/aion-core/src/comprehension.rs` — pasar `target_language` a retrieval
-- `aion-kernel/src/context.rs` — `pub target_language: Language`
-
-**Estimación**: 1-2 horas
+Compresores borrados: `compressor.rs`, `tfidf_compressor.rs`. Código muerto eliminado:
+`MultilingualMemory`, `shared_multilingual_memory`, `index_document`.
 
 ---
 
-### ⏳ Phase 4: Fallback Translation (mBART local)
+## Verificación
 
-**Opción recomendada**: Hybrid (del ADR-0004-translation-alternatives.md)
-- Default: Sin traducción (Opción 1) — 0ms overhead, respuesta en inglés técnico
-- Fallback: mBART local (Opción 3) — 500-1000ms, traducción a español
-
-**Flag de config**: `translation_mode: "none" | "mbart" | "google"`
-
-**Estado**: Requiere investigación (encontrar GGUF de mBART, integrar con Ollama)
-
-**Estimación**: 2-3 días si se implementa
-
----
-
-### ⏳ Phase 5: Setup Wizard
-
-**Funcionalidad**: Detectar idioma usuario en instalación y auto-configurar MultilingualMemory
-
-**Archivo**: `setup.rs` wizard
-
-**Estimación**: 1 hora
-
----
-
-## Estadísticas de Código
-
-| Archivo | Líneas | Propósito |
-|---------|--------|----------|
-| `multilingual.rs` | ~220 | Capa principal + enums + traits |
-| `compressor.rs` | ~100 | KeywordCompressor |
-| `tfidf_compressor.rs` | ~280 | TfidfCompressor |
-| **Total** | **~600** | **Sprint 1-2** |
-
-## Próximos Pasos
-
-### Inmediato (2-3 horas)
-1. ✅ Hacer PR con Phase 1-2
-2. Esperar validación/revisión
-3. Iniciar Phase 3 (integración /api/chat)
-
-### En paralelo
-- Validar UX: ¿usuarios españoles aceptan respuestas en inglés comprimido? (user test DAY1-USER-TEST-TEMPLATE.md)
-- Evaluar mBART vs otros traductores locales (refinement-adr-0004-translation-alternatives.md)
-
-### Decisión crítica (Phase 4)
-Si user test valida que "comprensión ≥4.0 AND prefiere_español <50%":
-- ✅ Opción 1 viable → mBART es **fallback opcional**
-Si no:
-- ❌ Opción 3 obligatoria → mBART es **requerido**
-
----
-
-## Tests Disponibles
-
-Ejecutar pruebas:
 ```bash
-cargo test -p aion-memory multilingual
-cargo test -p aion-memory compressor
-cargo test -p aion-memory tfidf
-cargo test -p aion-memory  # todos
+# Unit tests (sin Ollama)
+cargo test -p aion-core mcp_compact language_detector
+cargo test -p aion-memory
+
+# End-to-end con Gemma local (requiere Ollama arriba) — mide ahorro real ES→EN
+python3 scripts/verify_mcp_compact.py
 ```
 
----
-
-## Referencias
-
-- **ADR principal**: `docs/adr/adr-0004-multilingual-memory-optimization.md`
-- **Alternativas traducción**: `docs/refinement-adr-0004-translation-alternatives.md`
-- **Validación user test**: `docs/DAY1-USER-TEST-TEMPLATE.md`
-- **Memoria AION**: `/mcp__aion__aion_memory_search` con `project: "aion"`
+**Medición previa (tiktoken, traducción fiel manual)**: 244 tok ES → 138 tok EN = **43%**.
+Pendiente: confirmar con Gemma real vía `verify_mcp_compact.py` (Ollama estaba cerrado
+al implementar).
 
 ---
 
-## Decisiones Arquitectónicas
+## Economía honesta
 
-1. **TF-IDF en lugar de LLMLingua**: Sin dependencias complejas, latencia predecible, suficiente para ~4x compresión
-2. **Fail-open**: Si compressor no disponible, devuelve texto original (sin pérdida)
-3. **VectorMemory agnóstico**: BGE-M3 mapea todos idiomas en espacio unificado (no requiere entrenar)
-4. **Code-switching**: Aplicado solo en retrieval, usuario controla `target_language` (futura config)
+~43% sobre la memoria que entra por MCP. Por sesión: si llamo `aion_memory_search` unas
+pocas veces (~600 tok/llamada de memoria), el ahorro son cientos de tokens/sesión —
+modesto en €, pero **se acumula en cada sesión, gratis tras calentar la caché**, y no
+añade latencia (precomputado) ni riesgo (fail-open a español). Es la optimización
+correcta y de bajo riesgo para este puente.
 
 ---
 
-**Última actualización**: 2026-06-13  
-**Rama base**: main  
-**Próxima revisión**: Después Phase 3 completada
+## Siguientes incrementos (opcionales)
+
+1. **`aion_brief` y `aion_library_search`** por el mismo `compact_for_bridge`.
+2. **Warmer idle acotado**: pre-traducir los N recuerdos más recientes al arrancar
+   (con límite de concurrencia) para que la caché no dependa solo del *lazy-on-miss*.
+3. **Invalidación**: si un recuerdo se edita, su hash cambia → nueva entrada; las viejas
+   se pueden podar por tamaño/LRU si la caché crece.
