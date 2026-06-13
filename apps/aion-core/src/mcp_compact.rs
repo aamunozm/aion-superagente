@@ -85,14 +85,14 @@ pub fn compact_for_bridge(content: &str) -> String {
     content.to_string()
 }
 
-/// Motor LOCAL para traducir. Usa el MODELO que el usuario tenga configurado como local
-/// (`provider.local_model`) — un componente INTERCAMBIABLE, nunca uno fijo: cambia el
-/// modelo (más potente o más ligero según el equipo) y la traducción lo sigue. Siempre
+/// Motor LOCAL para traducir. Usa el modelo de FONDO configurado (`utility_model` ligero
+/// si existe, si no `local_model`) — un componente INTERCAMBIABLE, nunca uno fijo: en un
+/// equipo modesto puedes traducir con un modelo de 1-3B aunque chatees con otro. Siempre
 /// local (gratis) aunque el motor de chat sea una API externa de pago. Si no hay modelo
 /// local configurado, devuelve `None` → la compactación se salta (fail-open a español):
 /// el modelo NO es una pieza obligatoria de AION.
 fn local_engine() -> Option<Arc<dyn LlmEngine>> {
-    let model = crate::provider::load().local_model.trim().to_string();
+    let model = crate::provider::load().background_model();
     if model.is_empty() {
         return None;
     }
