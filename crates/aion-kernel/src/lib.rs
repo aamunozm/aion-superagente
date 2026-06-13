@@ -15,7 +15,7 @@ pub mod types;
 
 pub use errors::{AionError, Result};
 pub use events::{AionEvent, EventBus};
-pub use traits::{LlmEngine, MemoryStore, SkillHost};
+pub use traits::{Embedder, LlmEngine, MemoryStore, SkillHost};
 pub use types::{KernelInfo, Message, Role};
 
 /// Versión del contrato del kernel. Cambiarla es un evento mayor: implica que

@@ -63,6 +63,20 @@ impl OllamaEmbedder {
     }
 }
 
+/// OllamaEmbedder es UNA implementación del trait [`aion_kernel::Embedder`]. Así la
+/// memoria depende del trait, no de Ollama: un embedder MLX/Candle u otro puede sustituirlo
+/// sin tocar `VectorMemory`. Delega en los métodos inherentes (que siguen disponibles para
+/// los llamadores directos).
+#[async_trait::async_trait]
+impl aion_kernel::Embedder for OllamaEmbedder {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        OllamaEmbedder::embed(self, text).await
+    }
+    fn model(&self) -> &str {
+        OllamaEmbedder::model(self)
+    }
+}
+
 #[derive(Deserialize)]
 struct EmbeddingResponse {
     embedding: Vec<f32>,

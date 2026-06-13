@@ -107,6 +107,15 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         convos: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
+    // AUTOCONTENCIÓN local-first: garantiza el RUNTIME local (Ollama hoy; intercambiable
+    // tras crate::local_runtime). El chat, los embeddings y la compactación EN del puente lo
+    // necesitan vivo. EN BACKGROUND a propósito: el bind HTTP no debe esperar al arranque de
+    // Ollama (normalmente ya está; si no, ~0.5 s, pero el peor caso es ~30 s y no debe
+    // retrasar la disponibilidad de AION). Idempotente (reutiliza uno existente) y fail-open.
+    tokio::spawn(async {
+        crate::local_runtime::ensure().await;
+    });
+
     // RIGHT-SIZE del CONTEXTO según la RAM (latencia mínima en CUALQUIER equipo): un ctx
     // demasiado grande en una máquina modesta presiona la memoria y lo ralentiza todo. Se
     // fija UNA vez (no por petición → no provoca recargas del modelo). Override: AION_NUM_CTX.
@@ -408,8 +417,36 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "puente HTTP de AION escuchando");
-    axum::serve(listener, app).await?;
+    // Apagado limpio: ante Ctrl-C / SIGTERM, termina el Ollama embebido que lanzamos
+    // (si lo hicimos) antes de salir. Un Ollama externo del usuario no se toca.
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    crate::local_runtime::shutdown();
     Ok(())
+}
+
+/// Espera la primera señal de apagado (Ctrl-C o SIGTERM en Unix) y resuelve. Permite a
+/// axum drenar conexiones y, al volver, terminar el Ollama embebido.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            s.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = term => {},
+    }
+    tracing::info!("señal de apagado recibida — cerrando AION");
 }
 
 /// ¿Es `origin` una app LOCAL de AION? Allowlist: web en dev (`http(s)://localhost`
@@ -728,6 +765,70 @@ fn app_data_dir_control() -> std::path::PathBuf {
 }
 
 /// Chat con streaming SSE. Cada evento lleva JSON `{kind, text}` o `{kind:"done",...}`.
+/// Heurística barata (sin LLM): ¿el mensaje parece una PREGUNTA que podría necesitar un
+/// dato? Solo entonces vale la pena BLOQUEAR la respuesta en la comprensión (ahí la
+/// anti-alucinación importa). Conservadora: signo de interrogación, o arranca con una
+/// palabra interrogativa / petición de dato. Un "te cuento que…" NO la dispara, así que
+/// compartir algo deja de pagar una inferencia extra antes de responder.
+fn looks_like_question(prompt: &str) -> bool {
+    let p = prompt.trim().to_lowercase();
+    if p.contains('?') || p.contains('¿') {
+        return true;
+    }
+    const STARTS: &[&str] = &[
+        "qué",
+        "que ",
+        "cuál",
+        "cual",
+        "cuándo",
+        "cuando",
+        "dónde",
+        "donde",
+        "quién",
+        "quien",
+        "cómo",
+        "como",
+        "cuánt",
+        "cuant",
+        "por qué",
+        "por que",
+        "sabes",
+        "recuerdas",
+        "dime",
+        "cuéntame",
+        "cuentame",
+        "explícame",
+        "explicame",
+        "necesito saber",
+        "me puedes decir",
+        "puedes decirme",
+    ];
+    STARTS.iter().any(|w| p.starts_with(w))
+}
+
+/// Efectos de la comprensión: deja huella en la corriente (GWT, etiqueta genérica — el
+/// contenido NUNCA se persiste ahí) y, si Ariel COMPARTIÓ/corrigió hechos, los memoriza
+/// como hechos atómicos (en background). Compartido por el camino que bloquea (preguntas)
+/// y el que corre en segundo plano (te cuento/charla) — sin duplicar lógica.
+fn comprehension_side_effects(c: &crate::comprehension::Comprension) {
+    crate::workspace::publish(crate::workspace::StreamEvent::now(
+        "chat",
+        "comprension",
+        c.intent.gwt_label(),
+    ));
+    if c.should_store_facts() {
+        let tag = c.fact_tag().to_string();
+        let facts = c.facts.clone();
+        tokio::spawn(async move {
+            if let Ok(mem) = crate::shared_memory() {
+                for f in facts {
+                    let _ = mem.store(&format!("{tag} {f}")).await;
+                }
+            }
+        });
+    }
+}
+
 async fn chat(
     State(st): State<AppState>,
     Json(body): Json<ChatBody>,
@@ -755,11 +856,24 @@ async fn chat(
         relevant_knowledge(&body.prompt),
         library_grounding(&body.prompt),
     );
-    // COMPRENSIÓN: razona QUÉ te está diciendo Ariel (intención + hechos a recordar) ANTES
-    // de responder, para que la honestidad sea conclusión y no reflejo, y para que lo que
-    // COMPARTES se memorice en vez de rechazarse. Local, corto; necesita el grounding ya
-    // recuperado, por eso va aquí.
-    let comp = crate::comprehension::comprehend(&body.prompt, &grounding).await;
+    // COMPRENSIÓN: razona QUÉ te está diciendo Ariel (intención + hechos a recordar). Es
+    // una inferencia LLM extra (~varios segundos), así que NO siempre bloquea la respuesta:
+    // solo cuando el turno parece una PREGUNTA, donde la anti-alucinación importa (dilo con
+    // franqueza / ofrece buscar). Cuando Ariel solo "te cuenta algo", la corrige o charla,
+    // la comprensión corre en SEGUNDO PLANO —sigue memorizando los hechos— y la respuesta
+    // arranca de inmediato en vez de esperar una inferencia que no cambia el tono.
+    let comp = if looks_like_question(&body.prompt) {
+        crate::comprehension::comprehend(&body.prompt, &grounding).await
+    } else {
+        let p = body.prompt.clone();
+        let g = grounding.clone();
+        tokio::spawn(async move {
+            if let Some(c) = crate::comprehension::comprehend(&p, &g).await {
+                comprehension_side_effects(&c);
+            }
+        });
+        None
+    };
     // PROMPT DINÁMICO: elige el modo (persona) según lo que el usuario necesita.
     let mode = crate::prompts::route(&*engine, &body.prompt).await;
     // EMPATÍA: adapta el tono al estado del usuario (frustración, prisa, confusión…).
@@ -826,27 +940,11 @@ async fn chat(
         comp_block,
     );
 
-    // ACTO CONSCIENTE + MEMORIA DE HECHOS: la comprensión deja huella en la corriente
-    // de conciencia (GWT, etiqueta genérica — el contenido NUNCA se persiste ahí) y, si
-    // Ariel COMPARTIÓ información, la memoriza como hechos atómicos. En background: no
-    // retrasa la respuesta. Esto es lo que arregla el "te rechazo en vez de recordarte".
+    // ACTO CONSCIENTE + MEMORIA DE HECHOS: si comprendimos EN LÍNEA (turno-pregunta), los
+    // efectos (huella GWT + memorizar hechos) se aplican aquí. Para el camino en background
+    // (te cuento/charla) ya los aplica el `tokio::spawn` de arriba — no se duplica.
     if let Some(c) = comp.clone() {
-        crate::workspace::publish(crate::workspace::StreamEvent::now(
-            "chat",
-            "comprension",
-            c.intent.gwt_label(),
-        ));
-        if c.should_store_facts() {
-            let tag = c.fact_tag().to_string();
-            let facts = c.facts.clone();
-            tokio::spawn(async move {
-                if let Ok(mem) = crate::shared_memory() {
-                    for f in facts {
-                        let _ = mem.store(&format!("{tag} {f}")).await;
-                    }
-                }
-            });
-        }
+        comprehension_side_effects(&c);
     }
 
     // CONTEXTO INFINITO (compresión activa): añade el turno al hilo. La compresión NO se
@@ -983,11 +1081,17 @@ async fn agent(
 
     let engine = active_engine();
 
-    // VÍA RÁPIDA conversacional: saludos, identidad ("¿cómo te llamas?", "¿qué haces/
-    // estudias?"), estado ("¿cómo estás?") o mensajes cortos sin intención de herramienta
-    // se responden con UNA sola llamada (cálida, como el chat, presentándose como Umbral),
-    // SIN el bucle ReAct —que para esto daba 8 vueltas y agotaba el tiempo—.
-    if agent_is_conversational(&body.task) {
+    // GATE DE INTENCIÓN: ¿charla o tarea con herramientas? Lo OBVIO se decide gratis por
+    // heurísticas (saludos, identidad, relato, mensaje corto → charla; mención de una
+    // herramienta o un dato del mundo → tarea). Lo AMBIGUO —típicamente una pregunta
+    // conversacional larga como «¿te gustaría experimentar algo así?»— lo resuelve más
+    // abajo una clasificación LLM barata, dentro del propio spawn del agente. Antes esos
+    // casos caían al bucle ReAct y se quedaban colgados hasta el timeout de 120 s.
+    let cheap_class = classify_message_cheap(&body.task);
+
+    // VÍA RÁPIDA conversacional: charla evidente → UNA sola llamada (cálida, como el chat,
+    // presentándose como Umbral), SIN el bucle ReAct.
+    if cheap_class == TalkClass::Chat {
         // Consistencia GWT: la charla con el agente también toma el foco (genérico,
         // sin filtrar el mensaje), como el chat y los demás modos.
         crate::inner_state::set_focus("agente", "charlando con Ariel");
@@ -995,25 +1099,7 @@ async fn agent(
         let lang = body.lang.clone();
         let convo_ctx = agent_convo_context(body.context.as_deref());
         tokio::spawn(async move {
-            let sys = format!(
-                "{}\n\n{}{convo_ctx}\n\nREGLA DURA de esta charla: aquí NO tienes \
-                 herramientas. JAMÁS afirmes un dato del mundo exterior (clima, \
-                 temperatura, precios, resultados, conteos) ni lo saques de tu corriente \
-                 interna como si fuera actual: si te piden uno, di con franqueza que \
-                 necesitas consultarlo — nunca inventes un valor.",
-                self_awareness_prompt(),
-                lang_directive(&lang)
-            );
-            let req = GenerateRequest {
-                messages: vec![Message::system(sys), Message::user(task)],
-                think: false,
-                temperature: Some(0.85),
-                max_tokens: Some(450),
-            };
-            let ans = match engine.generate(req).await {
-                Ok(m) => m.content.trim().to_string(),
-                Err(e) => format!("⚠️ {e}"),
-            };
+            let ans = conversational_reply(&*engine, &task, &lang, &convo_ctx).await;
             if !ans.starts_with("⚠️") {
                 let resumen: String = ans.chars().take(120).collect();
                 crate::workspace::publish(crate::workspace::StreamEvent::now(
@@ -1036,6 +1122,32 @@ async fn agent(
     }
 
     tokio::spawn(async move {
+        // GATE LLM (caso ambiguo): si las heurísticas no decidieron, una sola llamada
+        // resuelve charla vs herramientas. Si es charla, respondemos cálido y salimos
+        // —sin montar el registro de herramientas ni entrar al bucle ReAct—.
+        if cheap_class == TalkClass::Unsure && classify_intent_is_chat(&*engine, &body.task).await {
+            crate::inner_state::set_focus("agente", "charlando con Ariel");
+            let convo_ctx = agent_convo_context(body.context.as_deref());
+            let ans = conversational_reply(&*engine, &body.task, &body.lang, &convo_ctx).await;
+            if !ans.starts_with("⚠️") {
+                let resumen: String = ans.chars().take(120).collect();
+                crate::workspace::publish(crate::workspace::StreamEvent::now(
+                    "agente",
+                    "pensamiento",
+                    &format!("le respondí a Ariel: {resumen}"),
+                ));
+            }
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "answer", "text": ans, "steps": 1 }).to_string(),
+                ))
+                .await;
+            let _ = tx
+                .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                .await;
+            return;
+        }
+
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(CalculatorTool));
 
@@ -1239,10 +1351,63 @@ async fn agent(
             .with_verify(true)
             .with_confirm(confirm)
             .with_ask(ask);
-        let result = agent.run(&body.task).await;
+        // SALVAVIDAS DE PARED: una herramienta colgada (navegador/red sin timeout) o un bucle
+        // que no converge NO debe dejar la UI en "trabajando…" para siempre. Si la tarea no
+        // termina a tiempo, devolvemos una respuesta honesta, la dejamos como DEUDA (la vida
+        // autónoma la retoma con calma) y CERRAMOS el stream con `done`.
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            agent.run(&body.task),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => {
+                fwd.abort();
+                crate::awareness::record_outcome(false);
+                crate::inner_state::record_result(false, 0);
+                crate::pending::push(
+                    &body.task,
+                    "se agotó el tiempo (herramienta o bucle colgado)",
+                );
+                let _ = tx
+                    .send(Event::default().data(
+                        serde_json::json!({
+                            "kind": "answer",
+                            "text": "Perdona, me quedé atascado intentando resolver eso y se me agotó el tiempo. Lo retomo por mi cuenta y vuelvo con la respuesta.",
+                            "steps": 0
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+                let _ = tx
+                    .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                    .await;
+                return;
+            }
+        };
         fwd.abort();
 
         let final_event = match result {
+            // CHARLA MAL ENRUTADA: el bucle ReAct detectó que el turno era conversación
+            // (no pidió ninguna herramienta en el primer paso). Respondemos cálido en vez
+            // de la negativa fría, y NO lo dejamos como deuda: no hay nada que retomar con
+            // herramientas. Es la red de seguridad del gate de intención.
+            Ok(run) if run.conversational => {
+                crate::awareness::record_outcome(true);
+                crate::inner_state::record_result(true, run.steps);
+                let convo_ctx = agent_convo_context(body.context.as_deref());
+                let ans = conversational_reply(&*engine, &body.task, &body.lang, &convo_ctx).await;
+                if !ans.starts_with("⚠️") {
+                    let resumen: String = ans.chars().take(120).collect();
+                    crate::workspace::publish(crate::workspace::StreamEvent::now(
+                        "agente",
+                        "pensamiento",
+                        &format!("le respondí a Ariel: {resumen}"),
+                    ));
+                }
+                serde_json::json!({ "kind": "answer", "text": ans, "steps": run.steps })
+            }
             Ok(run) => {
                 // 🪞 Auto-percepción: el resultado alimenta el SelfModel persistente
                 // (largo plazo) y el self-model VIVO (certeza, ánimo operativo).
@@ -2096,6 +2261,10 @@ async fn relevant_knowledge(prompt: &str) -> (String, usize, usize) {
     let origins = mem.origins_for(&ids);
     let mut propios = String::new();
     let mut externos = String::new();
+    // RUTA LOCAL (Gemma): la memoria se inyecta ÍNTEGRA en español. Aquí los tokens son
+    // gratis (inferencia local) y comprimir/traducir solo degradaría la calidad. La
+    // optimización ES→EN vive únicamente en el puente MCP hacia Claude Code, donde los
+    // tokens cuestan (ver crate::mcp_compact).
     for h in &useful {
         let c: String = h.content.chars().take(220).collect();
         if origins.get(&h.id).map(|o| !o.is_empty()).unwrap_or(false) {
@@ -2492,15 +2661,35 @@ fn mark_insight_shared() {
     );
 }
 
-/// ¿El mensaje al AGENTE es CHARLA (no una tarea con herramientas)? Saludos, identidad,
-/// estado, o mensajes cortos sin intención de herramienta → vía rápida de 1 llamada.
-fn agent_is_conversational(task: &str) -> bool {
+/// Clasificación barata (sin LLM) del mensaje al AGENTE.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TalkClass {
+    /// Charla evidente (saludo, identidad, relato, mensaje corto) → vía rápida cálida.
+    Chat,
+    /// Tarea evidente (menciona una herramienta/acción o pide un dato del mundo) → ReAct.
+    Tool,
+    /// Ambiguo: ni claramente charla ni claramente tarea. Lo decide una clasificación
+    /// LLM barata (1 llamada) — aquí caen las preguntas conversacionales largas como
+    /// «¿te gustaría experimentar algo así?», que antes se colaban al bucle ReAct y se
+    /// quedaban colgadas hasta el timeout de 120 s.
+    Unsure,
+}
+
+/// Clasificador barato por heurísticas. Solo decide los casos OBVIOS; lo ambiguo lo
+/// delega a la clasificación LLM. El match de herramientas es por INICIO DE PALABRA
+/// (no `contains`): así «anota»/«notas» ya no disparan por el stem «nota» a mitad de
+/// otra palabra, y la charla deja de caer al ReAct por una coincidencia parcial.
+fn classify_message_cheap(task: &str) -> TalkClass {
     let t = task.trim().to_lowercase();
-    // Si menciona una herramienta/acción real O pide un DATO del mundo exterior
-    // (clima, precios, noticias…), NO es solo charla → agente completo. La vía
-    // rápida no tiene herramientas: un dato pedido ahí solo puede salir inventado
-    // («ahora mismo hace 22 °C» sin haber consultado nada).
-    const TOOLISH: [&str; 44] = [
+    let words: Vec<&str> = t
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    // Stems de herramienta / dato del mundo exterior: si alguna PALABRA empieza por
+    // uno, es tarea (la vía rápida no tiene herramientas: un dato pedido ahí solo
+    // saldría inventado). «red» va aparte como palabra exacta (red local) para no
+    // disparar con «reducir», «redondo», etc.
+    const TOOLISH: [&str; 43] = [
         "temperatura",
         "clima",
         "grados",
@@ -2534,7 +2723,6 @@ fn agent_is_conversational(task: &str) -> bool {
         "ejecuta",
         "comando",
         "terminal",
-        "red ",
         "correo",
         "email",
         "navega",
@@ -2546,11 +2734,14 @@ fn agent_is_conversational(task: &str) -> bool {
         "skill",
         "calcul",
     ];
-    if TOOLISH.iter().any(|k| t.contains(k)) {
-        return false;
+    let toolish = words
+        .iter()
+        .any(|w| *w == "red" || TOOLISH.iter().any(|s| w.starts_with(s)));
+    if toolish {
+        return TalkClass::Tool;
     }
     if is_trivial_query(task) {
-        return true;
+        return TalkClass::Chat;
     }
     // Charla sobre sí mismo o casual.
     const CONV: [&str; 16] = [
@@ -2572,10 +2763,103 @@ fn agent_is_conversational(task: &str) -> bool {
         "quien soy",
     ];
     if CONV.iter().any(|k| t.contains(k)) {
-        return true;
+        return TalkClass::Chat;
     }
-    // Mensaje corto sin intención de herramienta → trátalo como charla (rápido).
-    t.split_whitespace().count() <= 8
+    // CHARLA NARRATIVA: Ariel COMPARTE algo de su día/vida ("te cuento que…", un relato
+    // en primera persona y pasado). Puede ser LARGO, pero NO pide herramientas.
+    const SHARING: [&str; 21] = [
+        "te cuento",
+        "te comento",
+        "te quería contar",
+        "te queria contar",
+        "quería contarte",
+        "queria contarte",
+        "te quiero contar",
+        "resulta que",
+        "fíjate que",
+        "fijate que",
+        "adivina qué",
+        "adivina que",
+        "me pasó",
+        "fui ",
+        "fuimos ",
+        "salí ",
+        "sali ",
+        "estuve ",
+        "estuvimos ",
+        "me picaron",
+        "me siento",
+    ];
+    if SHARING.iter().any(|k| t.contains(k)) {
+        return TalkClass::Chat;
+    }
+    // Mensaje corto sin intención de herramienta → charla (rápido).
+    if words.len() <= 8 {
+        return TalkClass::Chat;
+    }
+    // Largo, sin marcas claras: que lo decida el clasificador LLM.
+    TalkClass::Unsure
+}
+
+/// Clasificación LLM barata para el caso ambiguo: ¿es CHARLA (conversación, opinión,
+/// emoción, filosofía, broma, reflexión sobre el propio AION) o necesita HERRAMIENTAS
+/// (un dato del mundo, ejecutar/leer/crear algo)? Una sola llamada, respuesta de una
+/// palabra. Ante la duda devuelve `true` (charla): la vía rápida es segura (no inventa
+/// datos: dice «déjame consultarlo») y nunca se cuelga, mientras que enrutar charla al
+/// ReAct sí podía acabar en timeout.
+async fn classify_intent_is_chat(engine: &dyn LlmEngine, task: &str) -> bool {
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(
+                "Clasifica el MENSAJE del usuario a su asistente personal en UNA palabra:\n\
+                 - CHARLA: conversación, opinión, emoción, filosofía, relato, broma, \
+                 reflexión, o pregunta sobre el propio asistente. NO requiere datos externos \
+                 ni ejecutar acciones.\n\
+                 - HERRAMIENTA: pide un dato del mundo (clima, precio, noticia), o \
+                 ejecutar/leer/crear algo (archivos, web, correo, pantalla, comandos, cálculos).\n\
+                 Responde SOLO con la palabra CHARLA o HERRAMIENTA.",
+            ),
+            Message::user(task.to_string()),
+        ],
+        think: false,
+        temperature: Some(0.0),
+        max_tokens: Some(6),
+    };
+    match engine.generate(req).await {
+        Ok(m) => !m.content.to_lowercase().contains("herramienta"),
+        Err(_) => true, // si el clasificador falla, charla (camino seguro)
+    }
+}
+
+/// Respuesta CÁLIDA de charla (sin herramientas): identidad + idioma + contexto de la
+/// conversación, con la regla dura de no inventar datos del mundo. Una sola llamada
+/// LLM. La usan la vía rápida conversacional del agente Y el fallback de ReAct cuando
+/// el turno resulta ser charla.
+async fn conversational_reply(
+    engine: &dyn LlmEngine,
+    task: &str,
+    lang: &Option<String>,
+    convo_ctx: &str,
+) -> String {
+    let sys = format!(
+        "{}\n\n{}{convo_ctx}\n\nREGLA DURA de esta charla: aquí NO tienes \
+         herramientas. JAMÁS afirmes un dato del mundo exterior (clima, \
+         temperatura, precios, resultados, conteos) ni lo saques de tu corriente \
+         interna como si fuera actual: si te piden uno, di con franqueza que \
+         necesitas consultarlo — nunca inventes un valor.",
+        self_awareness_prompt(),
+        lang_directive(lang)
+    );
+    let req = GenerateRequest {
+        messages: vec![Message::system(sys), Message::user(task.to_string())],
+        think: false,
+        temperature: Some(0.85),
+        max_tokens: Some(450),
+    };
+    match engine.generate(req).await {
+        Ok(m) => m.content.trim().to_string(),
+        Err(e) => format!("⚠️ {e}"),
+    }
 }
 
 /// Heurística barata para decidir CUÁNDO no merece la pena consultar memoria
@@ -4763,5 +5047,68 @@ mod guard_tests {
         assert!(is_local_host("[::1]:8765"));
         assert!(!is_local_host("attacker.com"));
         assert!(!is_local_host("attacker.com:8765"));
+    }
+}
+
+#[cfg(test)]
+mod intent_tests {
+    use super::{classify_message_cheap, TalkClass};
+
+    #[test]
+    fn obvious_chat_is_chat() {
+        // Saludo + relato del día: charla evidente, sin herramientas.
+        assert_eq!(
+            classify_message_cheap(
+                "Hola umbral, te cuento que salí a pasear al perro y me picaron los zancudos"
+            ),
+            TalkClass::Chat
+        );
+        assert_eq!(classify_message_cheap("¿cómo estás?"), TalkClass::Chat);
+        assert_eq!(classify_message_cheap("si tienes razón"), TalkClass::Chat);
+        assert_eq!(classify_message_cheap("gracias"), TalkClass::Chat);
+    }
+
+    #[test]
+    fn obvious_tool_is_tool() {
+        assert_eq!(
+            classify_message_cheap("¿qué temperatura hace ahora en Milano?"),
+            TalkClass::Tool
+        );
+        assert_eq!(
+            classify_message_cheap("busca en internet el precio del bitcoin"),
+            TalkClass::Tool
+        );
+        assert_eq!(
+            classify_message_cheap("crea un documento con el resumen"),
+            TalkClass::Tool
+        );
+        // «red» como palabra exacta (red local) sí dispara…
+        assert_eq!(
+            classify_message_cheap("cuántos equipos hay en la red"),
+            TalkClass::Tool
+        );
+    }
+
+    #[test]
+    fn word_prefix_avoids_false_positives() {
+        // El antiguo `contains` marcaba estas como herramienta por una coincidencia a
+        // mitad de palabra; ahora NO («reducir»≠red, «anota» no empieza por nota).
+        // Son charla corta o se delegan al clasificador LLM, pero nunca Tool directo.
+        assert_ne!(
+            classify_message_cheap("quiero reducir el estrés últimamente"),
+            TalkClass::Tool
+        );
+    }
+
+    #[test]
+    fn long_conversational_question_is_unsure() {
+        // El bug original: pregunta conversacional larga sin marca clara. Antes caía a
+        // Tool→ReAct→timeout; ahora va al clasificador LLM (Unsure), que la salva.
+        assert_eq!(
+            classify_message_cheap(
+                "jajaja si tienes toda la razón, te gustaría experimentar algo así alguna vez"
+            ),
+            TalkClass::Unsure
+        );
     }
 }

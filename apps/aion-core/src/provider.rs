@@ -28,6 +28,16 @@ pub struct ProviderConfig {
     /// Último modelo EXTERNO usado (recordado para alternar de vuelta a la API).
     #[serde(default)]
     pub ext_model: String,
+    /// Modelo LOCAL ligero, OPCIONAL, para tareas de FONDO (traducción del puente MCP,
+    /// resúmenes, extracción de lecciones). Independiente del modelo de chat: en un equipo
+    /// potente puedes chatear con uno grande y hacer el trabajo de fondo con uno de 1-3B;
+    /// en uno modesto, todo ligero. Vacío → las tareas de fondo usan `local_model`.
+    #[serde(default)]
+    pub utility_model: String,
+    /// Runtime de inferencia LOCAL: "ollama" (por defecto). Costura para futuros motores
+    /// (MLX, mistral.rs…). Vacío se trata como "ollama". Ver crate::local_runtime.
+    #[serde(default)]
+    pub runtime: String,
 }
 
 impl Default for ProviderConfig {
@@ -39,6 +49,8 @@ impl Default for ProviderConfig {
             api_key: String::new(),
             local_model: "gemma4-reason".into(),
             ext_model: String::new(),
+            utility_model: String::new(),
+            runtime: "ollama".into(),
         }
     }
 }
@@ -51,6 +63,15 @@ impl ProviderConfig {
     /// ¿Hay un modelo local recordado al que volver?
     pub fn has_local(&self) -> bool {
         !self.local_model.is_empty()
+    }
+    /// Modelo LOCAL para tareas de fondo: el utilitario ligero si está configurado, si no
+    /// el local normal. Cadena vacía si no hay ninguno (las tareas de fondo se saltan).
+    pub fn background_model(&self) -> String {
+        let util = self.utility_model.trim();
+        if !util.is_empty() {
+            return util.to_string();
+        }
+        self.local_model.trim().to_string()
     }
 }
 
@@ -104,6 +125,15 @@ pub fn merge(incoming: ProviderConfig) -> ProviderConfig {
         } else {
             prev.ext_model.clone()
         };
+    }
+    // El modelo utilitario es independiente del motor activo: si la UI no lo reenvía,
+    // se conserva el previo (no se pierde al alternar local↔API).
+    if out.utility_model.trim().is_empty() {
+        out.utility_model = prev.utility_model.clone();
+    }
+    // Igual con el runtime local elegido.
+    if out.runtime.trim().is_empty() {
+        out.runtime = prev.runtime.clone();
     }
     out
 }

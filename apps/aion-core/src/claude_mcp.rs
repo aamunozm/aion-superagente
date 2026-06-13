@@ -409,11 +409,16 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             if hits.is_empty() {
                 return Ok("Sin recuerdos relevantes para esa consulta.".into());
             }
+            // OPTIMIZACIÓN DE TOKENS DEL PUENTE: Claude Code paga por token, así que se
+            // sirve la versión inglesa cacheada (≈40% menos tokens que el español, medido)
+            // cuando existe; en miss se sirve el español original y se calienta la caché
+            // en segundo plano para la próxima. Fail-open: nunca bloquea ni corrompe.
             let body = hits
                 .iter()
                 .map(|h| {
                     let c: String = h.content.chars().take(300).collect();
-                    format!("[{:.2}] {}", h.score, c)
+                    let served = crate::mcp_compact::compact_for_bridge(&c);
+                    format!("[{:.2}] {}", h.score, served)
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
