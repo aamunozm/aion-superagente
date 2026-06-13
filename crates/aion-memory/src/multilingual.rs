@@ -101,13 +101,13 @@ pub trait CompressorService: Send + Sync {
 
 /// Memoria multilingüe: wrapper sobre VectorMemory con optimización de tokens.
 pub struct MultilingualMemory {
-    inner: VectorMemory,
+    inner: Arc<VectorMemory>,
     compressor: Option<Arc<dyn CompressorService>>,
 }
 
 impl MultilingualMemory {
     /// Crear instancia sobre VectorMemory con compressor opcional.
-    pub fn new(inner: VectorMemory, compressor: Option<Arc<dyn CompressorService>>) -> Self {
+    pub fn new(inner: Arc<VectorMemory>, compressor: Option<Arc<dyn CompressorService>>) -> Self {
         Self { inner, compressor }
     }
 

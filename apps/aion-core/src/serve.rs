@@ -2189,6 +2189,14 @@ async fn relevant_knowledge(prompt: &str) -> (String, usize, usize) {
     if is_trivial_query(prompt) {
         return (String::new(), 0, 0);
     }
+    // DETECCIÓN DE IDIOMA: si el usuario pregunta en español, aplicar code-switching
+    // (devolver memoria en inglés comprimido para ahorrar tokens).
+    let user_language = crate::language_detector::detect_language(prompt);
+    let target_language = match user_language {
+        aion_memory::Language::Spanish => aion_memory::Language::English,
+        _ => aion_memory::Language::English, // Default a inglés para token-saving
+    };
+
     let Ok(mem) = crate::shared_memory() else {
         return (String::new(), 0, 0);
     };
@@ -2224,8 +2232,26 @@ async fn relevant_knowledge(prompt: &str) -> (String, usize, usize) {
     let origins = mem.origins_for(&ids);
     let mut propios = String::new();
     let mut externos = String::new();
+
+    // OPTIMIZACIÓN MULTILINGÜE: si el usuario es español, aplicar code-switching
+    // (contenido comprimido en inglés). Esto es Phase 3 de ADR-0004.
+    let compressor: Option<std::sync::Arc<dyn aion_memory::CompressorService>> = if target_language
+        == aion_memory::Language::English
+        && user_language == aion_memory::Language::Spanish
+    {
+        Some(std::sync::Arc::new(aion_memory::TfidfCompressor::new(0.25))) // ~4x compresión
+    } else {
+        None
+    };
+
     for h in &useful {
-        let c: String = h.content.chars().take(220).collect();
+        let mut c: String = h.content.chars().take(220).collect();
+        // Aplicar compresión si aplica (usuario español → contenido comprimido)
+        if let Some(ref comp) = compressor {
+            if let Ok(compressed) = comp.compress_to_english(&c) {
+                c = compressed;
+            }
+        }
         if origins.get(&h.id).map(|o| !o.is_empty()).unwrap_or(false) {
             externos.push_str(&format!("- {c}\n"));
         } else {
