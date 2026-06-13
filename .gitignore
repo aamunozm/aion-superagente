@@ -49,3 +49,4 @@ data/audit.jsonl
 
 # Runtime Ollama vendorizado (pesado, se genera con vendor-ollama-runtime.sh)
 apps/desktop/src-tauri/ollama-runtime/
+.claude/
