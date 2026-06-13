@@ -8,6 +8,7 @@
 //! - F4: campos de fitness/salience/access para la **memoria darwiniana** y la
 //!   consolidación tipo "sueño".
 
+pub mod compressor;
 mod embedder;
 pub mod multilingual;
 mod vector;
