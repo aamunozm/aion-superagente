@@ -50,6 +50,22 @@ pub trait LlmEngine: Send + Sync {
     async fn health(&self) -> Result<()>;
 }
 
+/// Generador de embeddings. Abstracción que desacopla la memoria del *runtime* que los
+/// produce: hoy Ollama+BGE-M3 (F1), mañana un embebido MLX/Candle u otro modelo, sin que
+/// la memoria sepa cuál. El modelo de embeddings deja de ser una pieza fija.
+///
+/// IMPORTANTE: cambiar de embedder (o de modelo) cambia el espacio vectorial y/o la
+/// dimensión → los embeddings ya guardados dejan de ser comparables. Por eso [`model`]
+/// existe: la memoria marca con qué modelo indexó y reindexa si cambia.
+#[async_trait]
+pub trait Embedder: Send + Sync {
+    /// Devuelve el vector de embedding de un texto.
+    async fn embed(&self, text: &str) -> Result<Vec<f32>>;
+
+    /// Nombre del modelo en uso (marca de procedencia para detectar reindexados).
+    fn model(&self) -> &str;
+}
+
 /// Un recuerdo recuperado de la memoria, con su relevancia.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryHit {

@@ -131,33 +131,39 @@ fn may_supersede(new_imp: f32, new_origin: &str, old_imp: f32, old_origin: &str)
 }
 
 /// Memoria vectorial: embeddings + recuperación por coseno, con persistencia opcional.
+///
+/// El embedder es un [`aion_kernel::Embedder`] cualquiera (no Ollama fijo): cambia el
+/// backend de embeddings y la memoria lo usa sin cambios. Por defecto OllamaEmbedder+BGE-M3.
 pub struct VectorMemory {
-    embedder: OllamaEmbedder,
+    embedder: Box<dyn aion_kernel::Embedder>,
     records: Mutex<Vec<MemoryRecord>>,
     path: Option<PathBuf>,
 }
 
 impl VectorMemory {
-    /// Memoria efímera (solo RAM).
-    pub fn new(embedder: OllamaEmbedder) -> Self {
+    /// Memoria efímera (solo RAM). Acepta CUALQUIER embedder (no solo Ollama).
+    pub fn new(embedder: impl aion_kernel::Embedder + 'static) -> Self {
         Self {
-            embedder,
+            embedder: Box::new(embedder),
             records: Mutex::new(Vec::new()),
             path: None,
         }
     }
 
-    /// Memoria efímera con valores por defecto (localhost + nomic).
+    /// Memoria efímera con valores por defecto (localhost + BGE-M3 vía Ollama).
     pub fn default_local() -> Self {
         Self::new(OllamaEmbedder::default_local())
     }
 
     /// Memoria persistente: carga los recuerdos previos del archivo JSONL si existe.
-    pub fn persistent(embedder: OllamaEmbedder, path: impl Into<PathBuf>) -> Result<Self> {
+    pub fn persistent(
+        embedder: impl aion_kernel::Embedder + 'static,
+        path: impl Into<PathBuf>,
+    ) -> Result<Self> {
         let path = path.into();
         let records = load_jsonl(&path)?;
         Ok(Self {
-            embedder,
+            embedder: Box::new(embedder),
             records: Mutex::new(records),
             path: Some(path),
         })
