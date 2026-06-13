@@ -107,6 +107,12 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         convos: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
+    // AUTOCONTENCIÓN local-first: garantiza el Ollama EMBEBIDO de AION antes que nada. El
+    // chat, los embeddings (BGE-M3) y la compactación EN del puente MCP lo necesitan vivo.
+    // Idempotente (reutiliza uno existente) y fail-open (si no arranca, AION sigue sirviendo
+    // y lo dependiente degrada con elegancia). Ver crate::ollama_runtime.
+    crate::ollama_runtime::ensure_running().await;
+
     // RIGHT-SIZE del CONTEXTO según la RAM (latencia mínima en CUALQUIER equipo): un ctx
     // demasiado grande en una máquina modesta presiona la memoria y lo ralentiza todo. Se
     // fija UNA vez (no por petición → no provoca recargas del modelo). Override: AION_NUM_CTX.
@@ -408,8 +414,36 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "puente HTTP de AION escuchando");
-    axum::serve(listener, app).await?;
+    // Apagado limpio: ante Ctrl-C / SIGTERM, termina el Ollama embebido que lanzamos
+    // (si lo hicimos) antes de salir. Un Ollama externo del usuario no se toca.
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    crate::ollama_runtime::shutdown();
     Ok(())
+}
+
+/// Espera la primera señal de apagado (Ctrl-C o SIGTERM en Unix) y resuelve. Permite a
+/// axum drenar conexiones y, al volver, terminar el Ollama embebido.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            s.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = term => {},
+    }
+    tracing::info!("señal de apagado recibida — cerrando AION");
 }
 
 /// ¿Es `origin` una app LOCAL de AION? Allowlist: web en dev (`http(s)://localhost`

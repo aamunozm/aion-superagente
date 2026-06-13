@@ -137,6 +137,26 @@ score del puente, devolver 3 hits en vez de 8) — eso sí recorta tokens de gol
 
 ---
 
+## Autocontención del runtime (Ollama embebido)
+
+`apps/aion-core/src/ollama_runtime.rs` — al arrancar `serve`, AION garantiza que haya un
+Ollama escuchando usando su binario EMBEBIDO (`…/Contents/Resources/ollama-runtime/ollama`),
+sin depender de instalaciones externas:
+
+- **Idempotente**: si `:11434` ya responde (Ollama del usuario u otro), lo reutiliza —
+  NO lanza un segundo. Verificado: *"Ollama ya responde — reutilizo"*.
+- **Auto-arranque**: si está caído, lanza el embebido y hace health-check (~0.5 s en la
+  prueba). Verificado de punta a punta.
+- **Apagado limpio**: ante SIGTERM/Ctrl-C, termina SOLO el Ollama que lanzó él; uno
+  externo del usuario no se toca. Verificado.
+- **Fail-open**: si no encuentra el binario o no arranca, AION sigue sirviendo.
+- Usa health real (`/api/tags`), no "¿hay proceso?": detecta el caso "proceso vivo pero
+  puerto sin servir" que observamos con el Ollama que lanza el desktop.
+
+Nota honesta: el wrapper `aion-desktop` YA lanza el Ollama embebido, así que en uso normal
+esto es **defensa en profundidad** + hace que `aion-core serve` sea **autosuficiente en
+modo CLI/headless**. No corrige un agujero crítico del flujo de escritorio.
+
 ## Siguientes incrementos (opcionales)
 
 1. **`aion_brief` y `aion_library_search`** por el mismo `compact_for_bridge`.

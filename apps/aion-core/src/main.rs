@@ -26,6 +26,7 @@ mod language_detector;
 mod library;
 mod mcp_compact;
 mod memory_tool;
+mod ollama_runtime;
 mod onboarding;
 mod pending;
 mod projects;
