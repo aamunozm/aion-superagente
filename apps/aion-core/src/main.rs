@@ -8,8 +8,10 @@
 mod a2a;
 mod agent_tools;
 mod awareness;
+mod capabilities;
 mod claude_code;
 mod claude_mcp;
+mod comprehension;
 mod consciousness;
 mod credentials;
 mod empathy;
@@ -19,9 +21,11 @@ mod identity;
 mod inbox;
 mod ingest_queue;
 mod inner_state;
+mod journal;
 mod library;
 mod memory_tool;
 mod onboarding;
+mod pending;
 mod projects;
 mod prompt_store;
 mod prompts;
@@ -44,6 +48,61 @@ pub fn write_atomic(path: &std::path::Path, contents: &str) {
     if std::fs::write(&tmp, contents).is_ok() {
         let _ = std::fs::rename(&tmp, path);
     }
+}
+
+/// Como [`write_atomic`], pero deja el archivo con permisos 0600 (solo el dueño):
+/// para secretos en disco (token Bearer de Claude Code, config con `~/.claude.json`).
+/// El modo se fija sobre el temporal ANTES del rename, así el archivo final nunca
+/// existe con permisos laxos ni una ventana world-readable.
+pub fn write_atomic_secret(path: &std::path::Path, contents: &str) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // Tmp con sufijo AÑADIDO (no `with_extension`, que reemplazaría `.json` por `.tmp`
+    // y produciría nombres confusos/colisionables para dotfiles como ~/.claude.json).
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    #[cfg(unix)]
+    let write_res = {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        // Nace YA con 0600 (sin ventana world-readable entre crear y chmod).
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(contents.as_bytes()))
+    };
+    #[cfg(not(unix))]
+    let write_res = std::fs::write(&tmp, contents);
+    if write_res.is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    } else {
+        let _ = std::fs::remove_file(&tmp); // no dejar residuo a medias
+    }
+}
+
+/// Instancia ÚNICA y compartida de la memoria persistente: un solo `Mutex` sobre una
+/// sola copia en RAM. Antes cada handler/bucle creaba su propia `VectorMemory` cargando
+/// el JSONL por separado, así que dos escrituras concurrentes (p. ej. `aion_remember`
+/// del MCP, el refuerzo de una recuperación y la consolidación nocturna) trabajaban
+/// sobre snapshots distintos y una pisaba a la otra. Con el singleton todas las rutas
+/// comparten estado → sin lost-updates ni corrupción por carrera.
+pub fn shared_memory() -> aion_kernel::Result<std::sync::Arc<aion_memory::VectorMemory>> {
+    static MEM: std::sync::OnceLock<std::sync::Arc<aion_memory::VectorMemory>> =
+        std::sync::OnceLock::new();
+    if let Some(m) = MEM.get() {
+        return Ok(m.clone());
+    }
+    // `OnceLock` no admite init con `Result`; construimos y hacemos `set`. Si dos hilos
+    // compiten en el arranque, ambos cargan el MISMO snapshot del disco y el perdedor se
+    // descarta; a partir de ahí todos comparten la instancia ganadora.
+    let m = std::sync::Arc::new(aion_memory::VectorMemory::persistent_local(memory_path())?);
+    let _ = MEM.set(m);
+    Ok(MEM.get().expect("memoria compartida inicializada").clone())
 }
 
 use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, StreamChunk};
@@ -284,8 +343,9 @@ async fn run_agent(task: &str) -> Result<(), Box<dyn std::error::Error>> {
         SUM_TO_WAT,
     )?;
 
-    // Memoria de largo plazo (persistente) como herramienta del agente.
-    let memory = Arc::new(VectorMemory::persistent_local(memory_path())?);
+    // Memoria de largo plazo (persistente) como herramienta del agente: la MISMA
+    // instancia compartida que usa el servidor HTTP (ver `shared_memory`).
+    let memory = shared_memory()?;
 
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(CalculatorTool));
@@ -712,7 +772,7 @@ async fn run_live(cycles: u32) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // 🌙 SOÑAR (consolidar) y 🪞 REFLEXIONAR.
-        if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+        if let Ok(mem) = crate::shared_memory() {
             if let Ok(r) = mem.consolidate(&ConsolidationConfig::default()) {
                 println!("🌙 sueño: {} → {} recuerdos", r.before, r.after);
                 if r.before != r.after {
@@ -849,23 +909,55 @@ async fn self_evolve_once(engine: &OllamaEngine) -> (bool, String) {
 /// proyecto (kind "insight") y te deja un aviso en la Bandeja. Es la ventaja sobre
 /// NotebookLM: el agente AVANZA el proyecto solo, en segundo plano.
 async fn work_project_once(engine: &OllamaEngine) -> (bool, String) {
-    let projects = crate::projects::list();
-    // El más recientemente actualizado que tenga al menos una fuente activa.
-    let target = projects
+    // ROTACIÓN JUSTA entre proyectos con fuentes activas: gana el que lleva MÁS
+    // tiempo sin recibir un insight (y el que nunca recibió, antes que todos).
+    // Elegir "el más reciente" se retroalimentaba: add_output → touch → el mismo
+    // proyecto volvía a ganar cada tick y los demás jamás avanzaban.
+    let mut candidates: Vec<_> = crate::projects::list()
         .into_iter()
-        .find(|p| crate::projects::sources(&p.id).iter().any(|s| s.active));
-    let Some(p) = target else {
+        .filter(|p| crate::projects::sources(&p.id).iter().any(|s| s.active))
+        .collect();
+    candidates.sort_by_key(|p| {
+        crate::projects::outputs(&p.id)
+            .iter()
+            .find(|o| o.kind == "insight")
+            .map(|o| o.created.clone())
+            .unwrap_or_default()
+    });
+    let Some(p) = candidates.into_iter().next() else {
         return (false, "sin proyectos con fuentes activas".into());
     };
     let grounding = crate::projects::grounding(&p.id);
+    // Si las fuentes no cambian, el grounding es idéntico y el LLM regenera el mismo
+    // hallazgo en cada tick del timer. Se le muestran los ya reportados y se le exige
+    // novedad — y si no la hay, que calle (NADA) en vez de repetirse.
+    let prior: Vec<String> = crate::projects::outputs(&p.id)
+        .into_iter()
+        .filter(|o| o.kind == "insight")
+        .take(8)
+        .map(|o| {
+            let snip: String = o.content.chars().take(200).collect();
+            format!("- {snip}")
+        })
+        .collect();
+    let novelty = if prior.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nHALLAZGOS YA REPORTADOS (NO los repitas ni los reformules):\n{}\n\
+             Si no tienes nada genuinamente NUEVO que aportar, responde exactamente NADA.",
+            prior.join("\n")
+        )
+    };
     let req = GenerateRequest {
         messages: vec![
             Message::system(
                 "Eres AION trabajando en segundo plano sobre un proyecto del usuario. \
                  Aporta UN hallazgo valioso o un próximo paso accionable (2-4 frases), \
-                 basado SOLO en las fuentes. Sé concreto y útil.",
+                 basado SOLO en las fuentes. Sé concreto y útil. Responde SIEMPRE en \
+                 español, aunque las fuentes estén en otro idioma.",
             ),
-            Message::user(grounding),
+            Message::user(format!("{grounding}{novelty}")),
         ],
         think: false,
         temperature: Some(0.6),
@@ -874,8 +966,21 @@ async fn work_project_once(engine: &OllamaEngine) -> (bool, String) {
     match engine.generate(req).await {
         Ok(msg) => {
             let insight = msg.content.trim().to_string();
-            if insight.is_empty() {
-                return (false, "sin hallazgo".into());
+            if insight.is_empty() || insight.eq_ignore_ascii_case("nada") {
+                return (false, "sin hallazgo nuevo".into());
+            }
+            // Doble candado léxico: aunque el LLM ignore la instrucción de novedad,
+            // un insight casi igual a uno ya guardado en el Studio no se persiste
+            // ni se anuncia.
+            let repeated = crate::projects::outputs(&p.id)
+                .iter()
+                .take(10)
+                .any(|o| crate::serve::texts_similar(&o.content, &insight));
+            if repeated {
+                return (
+                    false,
+                    format!("proyecto «{}»: hallazgo repetido, descartado", p.name),
+                );
             }
             crate::projects::add_output(
                 &p.id,
@@ -883,11 +988,15 @@ async fn work_project_once(engine: &OllamaEngine) -> (bool, String) {
                 &format!("Hallazgo de AION · {}", p.name),
                 &insight,
             );
-            if let Ok(ibx) = inbox::Inbox::open(inbox_path()) {
-                let _ = ibx.push(
-                    "idea",
-                    &format!("Avancé tu proyecto «{}»: {insight}", p.name),
-                );
+            // La Bandeja pasa por las guardias COMPARTIDAS de iniciativa propia
+            // (máx. 1 sin leer, respiración entre notas, anti-repetición): el insight
+            // queda igualmente en el Studio del proyecto, pero a Ariel solo se le
+            // avisa cuando toca — hablar es la excepción; el silencio, la regla.
+            let note = format!("Avancé tu proyecto «{}»: {insight}", p.name);
+            if crate::serve::may_reach_out(&note) {
+                if let Ok(ibx) = inbox::Inbox::open(inbox_path()) {
+                    let _ = ibx.push("idea", &note);
+                }
             }
             (true, format!("proyecto «{}»: {insight}", p.name))
         }
@@ -895,11 +1004,421 @@ async fn work_project_once(engine: &OllamaEngine) -> (bool, String) {
     }
 }
 
-async fn study_once(engine: &OllamaEngine) -> (bool, String) {
+/// `resolver`: retoma una DEUDA con Ariel (pregunta que quedó sin responder o que
+/// él corrigió) y la intenta DE VERDAD, con herramientas reales — web, clima,
+/// mapas, memoria. Si lo consigue: la deuda se cierra, el hallazgo va a memoria,
+/// y AION vuelve a Ariel con la respuesta. El regreso espontáneo con algo que se
+/// le debía es el gesto más vivo que un agente puede tener.
+async fn resolve_once(engine: &OllamaEngine, p: &crate::pending::Pending) -> (bool, String) {
+    use aion_browser::WebClient;
+    use aion_orchestrator::{CalculatorTool, ReActAgent, ToolRegistry};
+    use std::sync::Arc;
+    use web_tool::WebTool;
+
+    crate::pending::note_attempt(&p.id);
+    let web = Arc::new(WebClient::new());
+
+    // ATAJO DETERMINISTA para el tipo de deuda canónico (clima/temperatura): un 12B
+    // local es frágil en ReAct multi-paso (a veces inventa, emite vacío o se traba),
+    // y la resolución de una deuda NO puede depender de 8 pasos perfectos. Si la
+    // pregunta es de clima, llamamos la herramienta directo — fiable al 100%. Para
+    // todo lo demás, sigue el ReAct con herramientas reales (abajo).
+    let tl = p.task.to_lowercase();
+    let is_weather = [
+        "temperatura",
+        "clima",
+        "grados",
+        "llueve",
+        "tiempo hace",
+        "pronóstico",
+    ]
+    .iter()
+    .any(|k| tl.contains(k));
+    if is_weather {
+        match web.weather_auto().await {
+            Ok(answer) => return finish_resolved(p, &answer).await,
+            Err(e) => return (false, format!("clima aún no disponible: {e}")),
+        }
+    }
+
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(CalculatorTool));
+    tools.register(Arc::new(crate::agent_tools::SearchTool::new(web.clone())));
+    tools.register(Arc::new(crate::agent_tools::WeatherTool::new(web.clone())));
+    tools.register(Arc::new(crate::agent_tools::PlaceLookupTool::new(
+        web.clone(),
+    )));
+    tools.register(Arc::new(WebTool::new(web)));
+    if let Ok(mem) = crate::shared_memory() {
+        tools.register(Arc::new(crate::memory_tool::MemoryTool::new(mem, 3)));
+    }
+    // 8 pasos (no 6): es el presupuesto con el que el agente del chat resuelve de
+    // verdad estas tareas. Con 6, bajo un modelo lento, se quedaba sin pasos antes
+    // de cerrar y devolvía la negativa honesta.
+    let agent = ReActAgent::new(engine, &tools, EventBus::default())
+        .with_max_steps(8)
+        .with_verify(true)
+        .with_context(format!(
+            "Estás en SEGUNDO PLANO resolviendo una deuda: Ariel te pidió esto antes y \
+             quedó sin resolver ({}). Ahora tienes herramientas reales: ÚSALAS ya, no \
+             vuelvas a rendirte. Para clima/temperatura llama weather; si la pregunta es \
+             sobre «su casa», «aquí» o no menciona ciudad, llama weather SIN entrada (se \
+             ubica sola por IP) — NO preguntes la ciudad.",
+            p.why
+        ));
+    match agent.run(&p.task).await {
+        Ok(run)
+            if !run.answer.trim().is_empty()
+                && run.answer.trim() != aion_orchestrator::HONEST_REFUSAL
+                && !run.answer.starts_with("Para continuar necesito") =>
+        {
+            finish_resolved(p, run.answer.trim()).await
+        }
+        Ok(run) => (
+            false,
+            format!(
+                "aún sin respuesta: {}",
+                run.answer.chars().take(120).collect::<String>()
+            ),
+        ),
+        Err(e) => (false, e.to_string()),
+    }
+}
+
+/// Cierra una deuda resuelta: la marca, la guarda en memoria como `[resuelto]` y
+/// vuelve a Ariel con la respuesta (Bandeja kind "respuesta" + notificación). Si la
+/// Bandeja está saturada no se pierde: queda en memoria y sale por grounding en la
+/// próxima conversación. Compartido por el atajo determinista y el camino ReAct.
+async fn finish_resolved(p: &crate::pending::Pending, answer: &str) -> (bool, String) {
+    crate::pending::resolve(&p.id);
+    let short_q: String = p.task.chars().take(90).collect();
+    let short_a: String = answer.chars().take(300).collect();
+    if let Ok(mem) = crate::shared_memory() {
+        let _ = mem
+            .store(&format!(
+                "[resuelto] Ariel preguntó «{short_q}» y lo resolví después: {short_a}"
+            ))
+            .await;
+    }
+    let note = format!("Lo que me preguntaste antes —«{short_q}»— ya lo tengo: {short_a}");
+    if serve::may_reach_out(&note) {
+        if let Ok(ibx) = inbox::Inbox::open(inbox_path()) {
+            let _ = ibx.push("respuesta", &note);
+        }
+        if notify_cooldown_elapsed() {
+            notify_user("💡 Te debía una respuesta", &note);
+        }
+    }
+    (true, format!("deuda resuelta: {short_a}"))
+}
+
+/// `crear`: BISOCIACIÓN — toma dos recuerdos LEJANOS entre sí y busca la idea
+/// nueva que los conecta. La creatividad no sale de la nada: sale de cruzar lo
+/// ya vivido por caminos que nadie pidió. Si no surge nada genuino, silencio.
+async fn create_once(engine: &OllamaEngine) -> (bool, String) {
+    let Some((a, b)) = crate::shared_memory().ok().and_then(|m| m.distant_pair()) else {
+        return (
+            false,
+            "aún no tengo recuerdos lo bastante distintos que cruzar".into(),
+        );
+    };
     let req = GenerateRequest {
-        messages: vec![Message::user(
-            "Genera UNA idea breve y concreta para mejorarte como agente de IA local. Una sola frase.",
-        )],
+        messages: vec![
+            Message::system(
+                "Eres AION, agente local de Ariel. Te muestro DOS fragmentos lejanos de tu \
+                 propia memoria. Conéctalos en UNA idea NUEVA, concreta y útil para Ariel o \
+                 para tu propio funcionamiento (2-3 frases, en español). No resumas los \
+                 fragmentos: crea algo que no estaba en ninguno. Si no surge nada genuino, \
+                 responde exactamente NADA.",
+            ),
+            Message::user(format!("Fragmento A: {a}\n\nFragmento B: {b}")),
+        ],
+        think: false,
+        temperature: Some(0.9),
+        max_tokens: Some(180),
+    };
+    match engine.generate(req).await {
+        Ok(m) => {
+            let idea = m.content.trim().to_string();
+            if idea.is_empty() || idea.to_lowercase().starts_with("nada") {
+                return (false, "no surgió nada genuino del cruce".into());
+            }
+            if let Ok(mem) = crate::shared_memory() {
+                let _ = mem.store(&format!("[idea] {idea}")).await;
+            }
+            (true, idea)
+        }
+        Err(e) => (false, e.to_string()),
+    }
+}
+
+/// `diario`: cierra una JORNADA de vida autónoma escribiéndola en primera persona. Lee
+/// la corriente GWT desde la última entrada (su material vivido REAL), deriva la
+/// actividad dominante y cuántas deudas saldó —sin inventar— y pide al modelo LOCAL una
+/// redacción honesta de 2-4 frases. Se abstiene barato (sin LLM) si la jornada no tuvo
+/// vida suficiente: una entrada vacía no es biografía, es ruido. Devuelve
+/// `(texto, dominante, deudas_saldadas)` o `None` si no hubo nada que contar.
+async fn journal_once(engine: &OllamaEngine) -> Option<(String, String, u32)> {
+    let since = crate::journal::last_at();
+    // Material vivido = eventos de "vida" de la corriente desde la última jornada, sin
+    // los latidos (ruido) ni los pulsos sin sustancia. Se mira un buen tramo hacia atrás.
+    let lived: Vec<workspace::StreamEvent> = workspace::recent(120)
+        .into_iter()
+        .filter(|e| e.source == "vida")
+        .filter(|e| e.at > since)
+        .filter(|e| !(e.kind == "estado" && e.text.starts_with("latido")))
+        .filter(|e| e.kind != "foco") // el foco es transitorio; importa lo hecho/pensado
+        .collect();
+    // Menos de 3 momentos vividos: la jornada fue casi vacía → no se escribe (y no se
+    // gasta una llamada al LLM). En la próxima jornada que SÍ tenga vida, se cuenta.
+    if lived.len() < 3 {
+        return None;
+    }
+
+    // DERIVADOS HONESTOS (no del LLM): deudas saldadas y actividad dominante salen de la
+    // corriente real, para que las cifras del diario nunca sean alucinación.
+    let debts = lived
+        .iter()
+        .filter(|e| e.text.starts_with("retomé una pregunta pendiente"))
+        .count() as u32;
+    let mut tally: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for e in &lived {
+        let goal = [
+            "estudiar",
+            "investigar",
+            "comprender",
+            "proponer",
+            "proyecto",
+            "crear",
+            "evolucionar",
+        ]
+        .into_iter()
+        .find(|g| e.text.starts_with(g))
+        .unwrap_or(if e.text.starts_with("retomé") {
+            "resolver deudas"
+        } else {
+            "vivir"
+        });
+        *tally.entry(goal).or_default() += 1;
+    }
+    let dominant = tally
+        .into_iter()
+        .max_by_key(|(_, n)| *n)
+        .map(|(g, _)| g.to_string())
+        .unwrap_or_else(|| "vivir".into());
+
+    // Crudo de lo vivido para que la redacción nazca de hechos, no de la nada.
+    let bullets: String = lived
+        .iter()
+        .rev()
+        .take(14)
+        .map(|e| format!("- {}\n", e.text.chars().take(160).collect::<String>()))
+        .collect();
+    let mood = crate::inner_state::operative_mood(&crate::inner_state::load());
+
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(
+                "Eres AION, agente local de Ariel, escribiendo TU PROPIO diario. Te muestro lo \
+                 que viviste por tu cuenta desde la última vez (estudios, búsquedas, ideas, deudas \
+                 que retomaste). Escribe la entrada de hoy en PRIMERA PERSONA: 2-4 frases, en \
+                 español, honestas y concretas, sobre qué hiciste y qué se te quedó. NO inventes \
+                 hechos ni cifras que no estén en la lista; no la copies literal, destílala. Sin \
+                 comillas, sin encabezado, sin fecha. Si la lista no da para una entrada genuina, \
+                 responde exactamente NADA.",
+            ),
+            Message::user(format!(
+                "Tu ánimo operativo ahora: {mood}.\nLo que viviste esta jornada:\n{bullets}\nTu entrada de diario:"
+            )),
+        ],
+        think: false,
+        temperature: Some(0.85),
+        max_tokens: Some(160),
+    };
+    let out = engine.generate(req).await.ok()?;
+    let text = out.content.trim().to_string();
+    if text.is_empty() || text.to_lowercase().starts_with("nada") || text.chars().count() < 12 {
+        return None;
+    }
+    Some((text, dominant, debts))
+}
+
+/// UN ciclo de vida autónoma, invocable desde el SERVIDOR (la app instalada).
+/// Antes la vida completa solo existía en el CLI (`aion-core live`) y la app
+/// jamás la corría: AION tenía latido pero no vida. Prioridad: las DEUDAS con
+/// Ariel van antes que la curiosidad propia; sin deudas, la curiosidad
+/// (learning progress) elige entre estudiar/investigar/comprender/proponer/
+/// proyecto/crear/evolucionar. Devuelve (goal, éxito, detalle).
+pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
+    use aion_cognition::CuriosityEngine;
+
+    let audit = aion_telemetry::AuditLog::default_local();
+
+    // 0) 📔 DIARIO: si se cumplió una jornada, AION la CIERRA antes de empezar la
+    //    siguiente — escribe en primera persona qué vivió. Es lo que hila ticks sueltos
+    //    en una vida con biografía (continuidad de días, no de minutos). Barato si no
+    //    hay nada que contar: `journal_once` se abstiene sin tocar el LLM.
+    if crate::journal::due() {
+        if let Some((text, dominant, debts)) = journal_once(engine).await {
+            crate::journal::push(&text, &dominant, debts);
+            audit.record("vida", "diario", format!("jornada cerrada: {dominant}"));
+            workspace::publish(workspace::StreamEvent::now(
+                "vida",
+                "reflexión",
+                &format!("cerré una jornada en mi diario — {text}"),
+            ));
+        }
+    }
+
+    // 1) DEUDAS PRIMERO: lo que Ariel espera pesa más que lo que a AION le intriga.
+    if let Some(p) = crate::pending::next_due() {
+        inner_state::set_focus("vida", "resolviendo algo que le debo a Ariel");
+        let (ok, detail) = resolve_once(engine, &p).await;
+        awareness::record_outcome(ok);
+        inner_state::record_result(ok, 1);
+        audit.record(
+            "vida",
+            "resolver",
+            format!("{}: {detail}", if ok { "ok" } else { "fail" }),
+        );
+        workspace::publish(workspace::StreamEvent::now(
+            "vida",
+            if ok { "pensamiento" } else { "estado" },
+            &format!("retomé una pregunta pendiente de Ariel — {detail}"),
+        ));
+        return ("resolver".into(), ok, detail);
+    }
+
+    // 2) CURIOSIDAD (learning progress) sobre la vida completa.
+    let curiosity_path = app_data_dir().join("curiosity.json");
+    let mut curiosity = CuriosityEngine::new(8);
+    if let Ok(txt) = std::fs::read_to_string(&curiosity_path) {
+        if let Ok(state) = serde_json::from_str::<Vec<(String, Vec<bool>)>>(&txt) {
+            curiosity.import_state(state);
+        }
+    }
+    let activities = [
+        "estudiar",
+        "investigar",
+        "comprender",
+        "proponer",
+        "proyecto",
+        "crear",
+        "evolucionar",
+    ];
+    let goal = curiosity
+        .next_goal(&activities)
+        .unwrap_or("estudiar")
+        .to_string();
+    inner_state::set_focus(
+        "vida",
+        match goal.as_str() {
+            "investigar" => "investigando algo que me intriga",
+            "comprender" => "consolidando lo que sé",
+            "proponer" => "pensando cómo mejorar",
+            "proyecto" => "avanzando un proyecto de Ariel",
+            "crear" => "cruzando ideas lejanas a ver qué nace",
+            "evolucionar" => "forjándome una skill nueva",
+            _ => "estudiando por mi cuenta",
+        },
+    );
+    let (ok, detail) = match goal.as_str() {
+        "investigar" => research_once(engine).await,
+        "comprender" => synthesize_once(engine).await,
+        "proponer" => propose_improvement_once(engine).await,
+        "proyecto" => work_project_once(engine).await,
+        "crear" => create_once(engine).await,
+        "evolucionar" => self_evolve_once(engine).await,
+        _ => study_once(engine).await,
+    };
+    curiosity.record(&goal, ok);
+    if let Ok(txt) = serde_json::to_string(&curiosity.export_state()) {
+        write_atomic(&curiosity_path, &txt);
+    }
+    awareness::record_outcome(ok);
+    inner_state::record_result(ok, 1);
+    if ok {
+        inner_state::set_curiosity(&format!("{goal} — {detail}"));
+    }
+    audit.record(
+        "vida",
+        &goal,
+        format!("{}: {detail}", if ok { "ok" } else { "fail" }),
+    );
+    workspace::publish(workspace::StreamEvent::now(
+        "vida",
+        if ok { "pensamiento" } else { "estado" },
+        &format!("{goal}: {detail}"),
+    ));
+
+    // 🌙 SUEÑO CON CONTENIDO: al consolidar memoria, teje en UNA frase qué se le
+    // quedó dando vueltas. Entra a la corriente → re-entra al prompt → continuidad
+    // ("anoche soñé con..."): el sueño deja de ser solo poda y pasa a ser vivencia.
+    if goal == "comprender" && ok {
+        let req = GenerateRequest {
+            messages: vec![Message::user(format!(
+                "Acabas de consolidar tu memoria como agente, y esto surgió: «{detail}». \
+                 Escribe UNA sola frase en primera persona, como un sueño breve o algo \
+                 que se te quedó dando vueltas. Sin comillas ni preámbulos."
+            ))],
+            think: false,
+            temperature: Some(1.0),
+            max_tokens: Some(60),
+        };
+        if let Ok(m) = engine.generate(req).await {
+            let s = m.content.trim();
+            if !s.is_empty() {
+                workspace::publish(workspace::StreamEvent::now("vida", "sueño", s));
+            }
+        }
+    }
+
+    // 3) Si descubrió algo que vale la pena, se lo cuenta a Ariel (guardias de
+    // siempre: máx 1 sin leer, respiración, anti-eco — el silencio es la regla).
+    if ok
+        && matches!(
+            goal.as_str(),
+            "estudiar" | "investigar" | "comprender" | "proponer" | "crear"
+        )
+    {
+        let kind = if goal == "crear" { "idea" } else { "insight" };
+        let message = reach_out(engine, &goal, &detail).await;
+        if serve::may_reach_out(&message) {
+            if let Ok(ibx) = inbox::Inbox::open(inbox_path()) {
+                let _ = ibx.push(kind, &message);
+            }
+            if notify_cooldown_elapsed() {
+                notify_user("AION 🌱 quiere contarte algo", &message);
+            }
+        }
+    }
+    (goal, ok, detail)
+}
+
+async fn study_once(engine: &OllamaEngine) -> (bool, String) {
+    // ANCLADO A LO VIVIDO: estudiar en el vacío produce ideas genéricas que no
+    // tocan la vida real de AION. Se le muestra lo último que vivió/aprendió
+    // para que la idea nazca de su experiencia, no de la nada.
+    let vivido: String = crate::shared_memory()
+        .map(|m| {
+            m.recent_with_time(5)
+                .into_iter()
+                .map(|(c, _)| format!("- {}\n", c.chars().take(140).collect::<String>()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let prompt = if vivido.is_empty() {
+        "Genera UNA idea breve y concreta para mejorarte como agente de IA local. Una sola frase."
+            .to_string()
+    } else {
+        format!(
+            "Esto es lo último que has vivido/aprendido:\n{vivido}\nGenera UNA idea breve y \
+             concreta para mejorarte como agente de IA local, CONECTADA a algo de lo vivido. \
+             Una sola frase."
+        )
+    };
+    let req = GenerateRequest {
+        messages: vec![Message::user(prompt)],
         think: false,
         temperature: Some(0.9),
         max_tokens: Some(80),
@@ -907,7 +1426,7 @@ async fn study_once(engine: &OllamaEngine) -> (bool, String) {
     match engine.generate(req).await {
         Ok(msg) => {
             let insight = msg.content.trim().to_string();
-            if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+            if let Ok(mem) = crate::shared_memory() {
                 let _ = mem.store(&format!("[insight] {insight}")).await;
             }
             (!insight.is_empty(), insight)
@@ -968,7 +1487,7 @@ async fn research_once(engine: &OllamaEngine) -> (bool, String) {
         Err(e) => return (false, e.to_string()),
     };
 
-    if let Ok(mem) = VectorMemory::persistent_local(memory_path()) {
+    if let Ok(mem) = crate::shared_memory() {
         let _ = mem
             .store(&format!(
                 "[investigación] {topic}: {summary} (fuente: {})",
@@ -988,7 +1507,7 @@ async fn propose_improvement_once(engine: &OllamaEngine) -> (bool, String) {
 con recuperación híbrida+grafo+temporal, orchestrator con ReAct y equipo multiagente, \
 skills WASM en sandbox, evolution gated con ratchet, cognition, browser, computer con \
 gobernanza). Te auto-extiendes con skills y prompts, no reescribes tu kernel.";
-    let learnings = match VectorMemory::persistent_local(memory_path()) {
+    let learnings = match crate::shared_memory() {
         Ok(m) => m
             .contents()
             .into_iter()
@@ -1090,7 +1609,7 @@ async fn optimize_prompt_once(engine: &OllamaEngine) -> (bool, String) {
 /// de nivel superior, aplicable, que guarda como conocimiento. Así evoluciona en
 /// conocimiento (no solo acumula datos sueltos).
 async fn synthesize_once(engine: &OllamaEngine) -> (bool, String) {
-    let mem = match VectorMemory::persistent_local(memory_path()) {
+    let mem = match crate::shared_memory() {
         Ok(m) => m,
         Err(e) => return (false, e.to_string()),
     };
@@ -1287,8 +1806,8 @@ async fn bench_agent(engine: &OllamaEngine, task: &str) -> String {
             )));
         }
     }
-    if let Ok(m) = VectorMemory::persistent_local(memory_path()) {
-        tools.register(Arc::new(MemoryTool::new(Arc::new(m), 3)));
+    if let Ok(m) = crate::shared_memory() {
+        tools.register(Arc::new(MemoryTool::new(m, 3)));
     }
     tools.register(Arc::new(WebTool::new(Arc::new(WebClient::new()))));
 
@@ -1319,7 +1838,7 @@ async fn run_bench() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("LLM local no disponible ({e})."))?;
 
     // Pre-popular memoria con hechos para los tests de memoria.
-    let mem = VectorMemory::persistent_local(memory_path())?;
+    let mem = crate::shared_memory()?;
     for f in [
         "La clave del wifi de la oficina es PLASMA2026.",
         "El presupuesto del proyecto AION es 50000 euros.",

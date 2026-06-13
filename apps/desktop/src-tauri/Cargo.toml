@@ -11,7 +11,9 @@ description = "AION desktop shell (Tauri) — carga la UI web y conecta con el n
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `tray-icon`: icono en la barra de menú (la app queda "arriba" en background al
+# cerrar la ventana, sin matar el núcleo → Claude Code sigue sirviendo).
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

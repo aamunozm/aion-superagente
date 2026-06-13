@@ -34,6 +34,13 @@ fn epoch() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_default()
 }
 
+/// Fecha DESCONOCIDA: epoch (1970) es el valor por defecto de los recuerdos previos
+/// al campo `created_at`. No es una fecha real → la tratamos como «sin fecha» para
+/// no sesgar la recencia ni mostrar «1970-01-01» en resúmenes.
+pub fn is_unknown_time(t: DateTime<Utc>) -> bool {
+    t.timestamp() <= 0
+}
+
 /// Estima la **importancia** de un recuerdo (0..1) por señales deterministas —cero
 /// latencia, sin LLM—: lo etiquetado como aprendizaje/reflexión, las preferencias y
 /// decisiones del usuario, y los datos de identidad pesan más que un comentario de
@@ -108,6 +115,19 @@ pub struct MemoryRecord {
 
 fn default_importance() -> f32 {
     0.5
+}
+
+/// ¿Puede un recuerdo nuevo dejar OBSOLETO a uno casi idéntico? Mismo origen: basta
+/// con pesar casi tanto (tolerancia 0.1, permite refrescar valores). CRUZADO (nuevo
+/// EXTERNO sobre uno del usuario, `origin` vacío): exige pesar ESTRICTAMENTE más —
+/// como la importancia externa está capada a 0.6, jamás invalida una preferencia.
+fn may_supersede(new_imp: f32, new_origin: &str, old_imp: f32, old_origin: &str) -> bool {
+    let cross_origin = !new_origin.is_empty() && old_origin.is_empty();
+    if cross_origin {
+        new_imp > old_imp
+    } else {
+        new_imp + 0.1 >= old_imp
+    }
 }
 
 /// Memoria vectorial: embeddings + recuperación por coseno, con persistencia opcional.
@@ -195,6 +215,46 @@ impl VectorMemory {
             .collect()
     }
 
+    /// Vacía la memoria EN RAM y borra el archivo persistente (factory reset). En una
+    /// instancia COMPARTIDA deja el estado coherente con el disco al instante (sin esto,
+    /// borrar el archivo a mano dejaría el snapshot en RAM y la próxima escritura lo
+    /// resucitaría). Idempotente si ya está vacía.
+    pub fn clear(&self) -> Result<()> {
+        self.records.lock().unwrap().clear();
+        if let Some(path) = &self.path {
+            if path.exists() {
+                std::fs::remove_file(path).map_err(|e| AionError::Memory(e.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Recarga la memoria desde el archivo persistente, descartando la copia EN RAM.
+    /// Necesario cuando algo sobrescribe el JSONL POR FUERA del singleton (p. ej. una
+    /// restauración de backup): sin esto, el snapshot viejo en RAM pisaría el archivo
+    /// recién restaurado en la próxima escritura. No-op si la memoria es efímera.
+    pub fn reload(&self) -> Result<()> {
+        if let Some(path) = &self.path {
+            let fresh = load_jsonl(path)?;
+            *self.records.lock().unwrap() = fresh;
+        }
+        Ok(())
+    }
+
+    /// PROCEDENCIA (`origin`) de un conjunto de ids: `""` = el propio AION, otro valor
+    /// (p. ej. `"claude-code"`) = agente externo. Permite marcar en los prompts internos
+    /// lo escrito por terceros sin separar almacenes (cuarentena suave).
+    pub fn origins_for(&self, ids: &[String]) -> std::collections::HashMap<String, String> {
+        let set: std::collections::HashSet<&String> = ids.iter().collect();
+        self.records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| set.contains(&r.id))
+            .map(|r| (r.id.clone(), r.origin.clone()))
+            .collect()
+    }
+
     /// **Qué cambió** desde `since` (bi-temporal): lo que AION aprendió de nuevo y lo
     /// que dejó de ser válido en esa ventana. Permite responder «¿qué ha cambiado desde
     /// la semana pasada?» sin un grafo completo.
@@ -248,6 +308,61 @@ impl VectorMemory {
         for r in recs.iter_mut() {
             if !r.superseded && set.contains(&r.id) {
                 r.superseded = true;
+                n += 1;
+            }
+        }
+        if n > 0 {
+            if let Some(path) = &self.path {
+                rewrite_jsonl(path, &recs)?;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Par de recuerdos LEJANOS entre sí (mínima similitud coseno entre los
+    /// recientes): materia prima de la **bisociación creativa** — cruzar lo que
+    /// normalmente no se toca. `None` si hay pocos recuerdos o todos se parecen
+    /// (sim mínima ≥ 0.5): la creatividad forzada produce ruido, no ideas.
+    pub fn distant_pair(&self) -> Option<(String, String)> {
+        let recs = self.records.lock().unwrap();
+        let pool: Vec<&MemoryRecord> = recs
+            .iter()
+            .filter(|r| !r.superseded && !r.embedding.is_empty())
+            .rev()
+            .take(40)
+            .collect();
+        if pool.len() < 6 {
+            return None;
+        }
+        let mut best: Option<(usize, usize, f32)> = None;
+        for i in 0..pool.len() {
+            for j in (i + 1)..pool.len() {
+                let s = cosine(&pool[i].embedding, &pool[j].embedding);
+                if best.map(|(_, _, b)| s < b).unwrap_or(true) {
+                    best = Some((i, j, s));
+                }
+            }
+        }
+        let (i, j, s) = best?;
+        if s >= 0.5 {
+            return None;
+        }
+        Some((pool[i].content.clone(), pool[j].content.clone()))
+    }
+
+    /// **Re-scoring darwiniano por resultado REAL**: ajusta la aptitud (`fitness`)
+    /// de los recuerdos que sirvieron de grounding a una tarea según cómo terminó.
+    /// Un recuerdo que acompaña éxitos sube (sobrevive a la poda); uno que acompaña
+    /// fracasos baja. Asimétrico a propósito: el fracaso informa más que el éxito,
+    /// y así una lección equivocada no se perpetúa solo por ser recuperada a menudo.
+    pub fn reinforce(&self, ids: &[String], success: bool) -> Result<usize> {
+        let set: std::collections::HashSet<&String> = ids.iter().collect();
+        let delta = if success { 0.05 } else { -0.10 };
+        let mut recs = self.records.lock().unwrap();
+        let mut n = 0;
+        for r in recs.iter_mut() {
+            if set.contains(&r.id) {
+                r.fitness = (r.fitness + delta).clamp(0.0, 1.0);
                 n += 1;
             }
         }
@@ -382,12 +497,16 @@ impl VectorMemory {
                 continue;
             }
             let sim = cosine(&embedding, &r.embedding);
-            // Supersede CONSCIENTE DE IMPORTANCIA: un comentario de paso no puede
-            // invalidar una preferencia/decisión del usuario sobre el mismo tema
-            // (con BGE-M3, paráfrasis del mismo tópico superan 0.88 con facilidad).
-            // Solo actualiza si el recuerdo nuevo pesa al menos tanto como el viejo
-            // (tolerancia 0.1); si no, quedan ENLAZADOS como relacionados.
-            if sim > SUPERSEDE_SIM && record.importance + 0.1 >= r.importance {
+            // Supersede CONSCIENTE DE IMPORTANCIA Y PROCEDENCIA: un comentario de paso
+            // no puede invalidar una preferencia/decisión del usuario sobre el mismo
+            // tema (con BGE-M3, paráfrasis del mismo tópico superan 0.88 con facilidad).
+            // Mismo origen: basta con pesar casi tanto (tolerancia 0.1). CRUZADO
+            // (un recuerdo EXTERNO sobre uno del usuario): exige pesar ESTRICTAMENTE
+            // más — como la importancia externa está capada a 0.6, jamás pisa una
+            // preferencia del usuario. Si no procede supersede, quedan ENLAZADOS.
+            if sim > SUPERSEDE_SIM
+                && may_supersede(record.importance, &record.origin, r.importance, &r.origin)
+            {
                 r.superseded = true;
                 r.superseded_at = Some(now); // bi-temporal: cuándo dejó de ser válido
                 dirty = true;
@@ -445,9 +564,15 @@ impl MemoryStore for VectorMemory {
                 let ent = entity_overlap(&q_ents, &entities(&r.content));
                 // Recencia REAL (Generative Agents): decay exponencial por edad con
                 // semivida de 7 días — antes era el índice ordinal, que premiaba la
-                // posición en el archivo y no el tiempo.
-                let age_days = (now - r.created_at).num_seconds().max(0) as f32 / 86_400.0;
-                let rec = 0.5_f32.powf(age_days / 7.0);
+                // posición en el archivo y no el tiempo. Las fechas DESCONOCIDAS (epoch
+                // 1970: recuerdos previos al campo `created_at`) no deben hundir la
+                // recencia a ~0 y enterrarlos para siempre → recencia neutra.
+                let rec = if is_unknown_time(r.created_at) {
+                    0.3
+                } else {
+                    let age_days = (now - r.created_at).num_seconds().max(0) as f32 / 86_400.0;
+                    0.5_f32.powf(age_days / 7.0)
+                };
                 let usage = if max_access > 0.0 {
                     r.access_count as f32 / max_access
                 } else {
@@ -699,15 +824,26 @@ impl VectorMemory {
             {
                 k.access_count += r.access_count;
                 k.fitness = k.fitness.max(r.fitness);
+                // PROCEDENCIA: si uno de los fundidos es del usuario (origin vacío) y el
+                // superviviente era externo, la versión del usuario manda — el recuerdo
+                // resultante deja de estar en cuarentena y conserva el texto del usuario.
+                if r.origin.is_empty() && !k.origin.is_empty() {
+                    k.content = r.content.clone();
+                    k.origin = String::new();
+                }
+                k.importance = k.importance.max(r.importance);
                 merged += 1;
             } else {
                 kept.push(r);
             }
         }
 
-        // 3) Poda: fuera los de aptitud baja que nunca se usaron.
+        // 3) Poda: fuera los de aptitud baja que nunca se usaron — SALVO los
+        // importantes ([aprendizaje]/[reflexión] arrancan en 0.7; preferencias del
+        // usuario ≥0.65): el decay por sí solo los hundía bajo el suelo en ~12
+        // consolidaciones sin uso, y AION olvidaba sus propias lecciones.
         let after_merge = kept.len();
-        kept.retain(|r| r.fitness >= cfg.prune_floor || r.access_count > 0);
+        kept.retain(|r| r.fitness >= cfg.prune_floor || r.access_count > 0 || r.importance >= 0.65);
         let pruned = after_merge - kept.len();
 
         *recs = kept;
@@ -744,7 +880,12 @@ fn rewrite_jsonl(path: &PathBuf, records: &[MemoryRecord]) -> Result<()> {
         buf.push_str(&serde_json::to_string(r)?);
         buf.push('\n');
     }
-    std::fs::write(path, buf).map_err(|e| AionError::Memory(e.to_string()))
+    // Escritura ATÓMICA (tmp + rename): un crash o corte a mitad de fs::write
+    // dejaría el archivo de memoria a medias — aquí o queda la versión vieja
+    // completa o la nueva completa, nunca un JSONL truncado.
+    let tmp = path.with_extension("jsonl.tmp");
+    std::fs::write(&tmp, buf).map_err(|e| AionError::Memory(e.to_string()))?;
+    std::fs::rename(&tmp, path).map_err(|e| AionError::Memory(e.to_string()))
 }
 
 fn load_jsonl(path: &PathBuf) -> Result<Vec<MemoryRecord>> {
@@ -802,6 +943,32 @@ mod tests {
     }
 
     #[test]
+    fn reinforce_adjusts_fitness_by_real_outcome() {
+        let mem = VectorMemory::default_local();
+        let (id_a, id_b) = {
+            let mut r = mem.records.lock().unwrap();
+            r.push(rec(vec![1.0, 0.0, 0.0], 0.5, 0));
+            r.push(rec(vec![0.0, 1.0, 0.0], 0.5, 0));
+            (r[0].id.clone(), r[1].id.clone())
+        };
+        // Éxito: sube poco. Fracaso: baja más (asimetría a propósito).
+        assert_eq!(mem.reinforce(std::slice::from_ref(&id_a), true).unwrap(), 1);
+        assert_eq!(
+            mem.reinforce(std::slice::from_ref(&id_b), false).unwrap(),
+            1
+        );
+        let r = mem.records.lock().unwrap();
+        assert!((r[0].fitness - 0.55).abs() < 1e-6);
+        assert!((r[1].fitness - 0.40).abs() < 1e-6);
+        drop(r);
+        // El fitness queda acotado a [0,1] aunque se refuerce muchas veces.
+        for _ in 0..20 {
+            let _ = mem.reinforce(std::slice::from_ref(&id_b), false);
+        }
+        assert!(mem.records.lock().unwrap()[1].fitness >= 0.0);
+    }
+
+    #[test]
     fn consolidation_merges_duplicates_and_prunes_weak() {
         let mem = VectorMemory::default_local();
         {
@@ -838,6 +1005,93 @@ mod tests {
         assert!(pref > casual, "una preferencia pesa más que un comentario");
         assert!(learn > casual, "una lección pesa más que un comentario");
         assert!((0.0..=1.0).contains(&pref));
+    }
+
+    #[test]
+    fn external_memory_cannot_supersede_user_preference() {
+        // Preferencia del usuario (origin="") con importancia típica 0.66.
+        // Un recuerdo EXTERNO capado a 0.6 NO puede invalidarla aunque sea idéntico.
+        assert!(!may_supersede(0.6, "claude-code", 0.66, ""));
+        // Tampoco a una de igual peso (exige estrictamente mayor en cruzado).
+        assert!(!may_supersede(0.6, "claude-code", 0.6, ""));
+        // Pero el propio usuario sí puede refrescar su recuerdo (mismo origen, tol 0.1).
+        assert!(may_supersede(0.6, "", 0.66, ""));
+        // Y un externo puede actualizar a otro externo menos importante.
+        assert!(may_supersede(0.6, "claude-code", 0.5, "claude-code"));
+    }
+
+    #[test]
+    fn merge_prefers_user_provenance_over_external() {
+        let mem = VectorMemory::default_local();
+        {
+            let mut r = mem.records.lock().unwrap();
+            // Mismo embedding → se funden. El externo entró primero (superviviente),
+            // el del usuario después: tras fundir, gana la procedencia del usuario.
+            let mut externo = rec(vec![1.0, 0.0, 0.0], 0.5, 0);
+            externo.origin = "claude-code".into();
+            externo.content = "nota externa".into();
+            externo.importance = 0.6;
+            r.push(externo);
+            let mut propio = rec(vec![1.0, 0.0, 0.0], 0.5, 0);
+            propio.origin = String::new();
+            propio.content = "decisión del usuario".into();
+            propio.importance = 0.66;
+            r.push(propio);
+        }
+        let report = mem.consolidate(&ConsolidationConfig::default()).unwrap();
+        assert_eq!(report.merged, 1);
+        let r = mem.records.lock().unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].origin, "", "el superviviente queda como del usuario");
+        assert_eq!(r[0].content, "decisión del usuario");
+        assert!((r[0].importance - 0.66).abs() < 1e-6);
+    }
+
+    #[test]
+    fn clear_and_reload_roundtrip_with_file() {
+        // Archivo JSONL con un recuerdo, cargado por una memoria persistente.
+        let path = std::env::temp_dir().join(format!("aion-mem-{}.jsonl", Uuid::new_v4()));
+        let r = rec(vec![1.0, 0.0], 0.5, 0);
+        std::fs::write(&path, serde_json::to_string(&r).unwrap() + "\n").unwrap();
+        let mem = VectorMemory::persistent(OllamaEmbedder::default_local(), &path).unwrap();
+        assert_eq!(mem.len(), 1);
+
+        // clear(): vacía RAM y borra el archivo.
+        mem.clear().unwrap();
+        assert_eq!(mem.len(), 0);
+        assert!(!path.exists());
+
+        // Alguien restaura el archivo POR FUERA; reload() lo trae de vuelta a RAM.
+        std::fs::write(&path, serde_json::to_string(&r).unwrap() + "\n").unwrap();
+        assert_eq!(mem.len(), 0, "aún no se ve sin reload");
+        mem.reload().unwrap();
+        assert_eq!(mem.len(), 1, "reload trae el archivo restaurado a RAM");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn unknown_time_detects_epoch() {
+        assert!(is_unknown_time(epoch()));
+        assert!(!is_unknown_time(Utc::now()));
+    }
+
+    #[test]
+    fn origins_for_maps_ids_to_provenance() {
+        let mem = VectorMemory::default_local();
+        let (id_u, id_e) = {
+            let mut r = mem.records.lock().unwrap();
+            let mut u = rec(vec![1.0, 0.0], 0.5, 0);
+            u.origin = String::new();
+            let mut e = rec(vec![0.0, 1.0], 0.5, 0);
+            e.origin = "claude-code".into();
+            r.push(u.clone());
+            r.push(e.clone());
+            (u.id, e.id)
+        };
+        let map = mem.origins_for(&[id_u.clone(), id_e.clone()]);
+        assert_eq!(map.get(&id_u).map(String::as_str), Some(""));
+        assert_eq!(map.get(&id_e).map(String::as_str), Some("claude-code"));
     }
 
     #[test]

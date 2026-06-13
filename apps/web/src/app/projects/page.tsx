@@ -42,7 +42,7 @@ export default function ProjectsPage() {
 
   return (
     <AppShell title="Proyectos">
-      <div className="max-w-6xl mx-auto px-8 py-8">
+      <div className="max-w-6xl mx-auto px-3 py-6">
         <p className="text-[15px] mb-7 max-w-2xl" style={{ color: "var(--text-2)" }}>
           Cada proyecto es un espacio de trabajo: reúne <strong>fuentes</strong> (tu conocimiento),
           un <strong>chat con foco</strong> en ellas y un <strong>Studio</strong> de salidas que AION

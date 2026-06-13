@@ -157,8 +157,10 @@ pub fn reentry_note(n: usize) -> String {
         return String::new();
     }
     let mut b = String::from(
-        "TU CORRIENTE RECIENTE (lo último que tu propio sistema hizo y pensó — es TUYO, \
-         conéctalo con naturalidad si viene al caso):\n",
+        "TU CORRIENTE RECIENTE (lo último que tu propio sistema hizo y pensó — es TUYO). \
+         Es contexto sobre tu estado, NO material para la respuesta: no lo cites ni lo \
+         parafrasees al hablar, y JAMÁS extraigas de aquí datos del mundo (temperaturas, \
+         cifras, resultados) como si fueran actuales — caducaron:\n",
     );
     for e in evs.iter().rev() {
         b.push_str(&format!(

@@ -46,7 +46,8 @@ pub fn load() -> Config {
 
 pub fn save(c: &Config) {
     if let Ok(b) = serde_json::to_string_pretty(c) {
-        crate::write_atomic(&path(), &b);
+        // Contiene el token Bearer → 0600 (antes 0644 world-readable).
+        crate::write_atomic_secret(&path(), &b);
     }
 }
 
@@ -103,30 +104,19 @@ pub fn find_claude_cli() -> Option<PathBuf> {
     None
 }
 
-/// Registra el servidor MCP de AION en Claude Code (scope user, transporte HTTP).
-/// Primero vía CLI; si el exec falla, fallback: merge directo en ~/.claude.json.
+/// Registra el servidor MCP de AION en Claude Code (scope user, transporte HTTP)
+/// editando directamente `mcpServers.aion` en ~/.claude.json. NO usa `claude mcp add`
+/// porque eso pasaría el token por argv (visible en `ps` durante el registro); el
+/// `insert` reemplaza cualquier entrada previa, así reconectar regenera limpio.
 /// CLI ausente → Err("cli_not_found") para que la UI muestre el hint de instalación.
 pub fn register(token: &str) -> Result<(), String> {
-    let Some(cli) = find_claude_cli() else {
+    if find_claude_cli().is_none() {
         return Err("cli_not_found".into());
-    };
-    // Limpia un registro previo para que reconectar regenere limpio (ignora error).
-    let _ = std::process::Command::new(&cli)
-        .args(["mcp", "remove", "-s", "user", MCP_NAME])
-        .output();
-    let auth = format!("Authorization: Bearer {token}");
-    let out = std::process::Command::new(&cli)
-        .args([
-            "mcp", "add", "-s", "user", "-t", "http", MCP_NAME, MCP_URL, "-H", &auth,
-        ])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => Ok(()),
-        _ => register_fallback(token),
     }
+    register_fallback(token)
 }
 
-/// Fallback sin CLI: edita SOLO `mcpServers.aion` en ~/.claude.json (atómico).
+/// Edita SOLO `mcpServers.aion` en ~/.claude.json (atómico, sin exponer el token).
 fn register_fallback(token: &str) -> Result<(), String> {
     let p = claude_json_path();
     let mut root: serde_json::Value = std::fs::read_to_string(&p)
@@ -151,7 +141,8 @@ fn register_fallback(token: &str) -> Result<(), String> {
             }),
         );
     let body = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    crate::write_atomic(&p, &body);
+    // ~/.claude.json lleva el token Bearer → 0600 (no degradar a 0644 al reescribir).
+    crate::write_atomic_secret(&p, &body);
     Ok(())
 }
 
@@ -175,7 +166,7 @@ pub fn unregister() -> Result<(), String> {
     if let Some(servers) = root.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
         servers.remove(MCP_NAME);
         if let Ok(body) = serde_json::to_string_pretty(&root) {
-            crate::write_atomic(&p, &body);
+            crate::write_atomic_secret(&p, &body);
         }
     }
     Ok(())
@@ -190,9 +181,9 @@ pub fn is_registered() -> bool {
         .unwrap_or(false)
 }
 
-/// BRIEF compacto (~600 tokens máx) para orientar a Claude Code: quién es este
-/// AION, recuerdos recientes, proyectos y dominios de la biblioteca. Nunca expone
-/// el id de identidad, tokens ni credenciales. Cache de 5 minutos.
+/// BRIEF compacto (~450 tokens máx) para orientar a Claude Code: quién es este
+/// AION, recuerdos recientes (de-duplicados), proyectos y dominios de la biblioteca.
+/// Nunca expone el id de identidad, tokens ni credenciales. Cache de 5 minutos.
 pub async fn build_brief() -> String {
     static CACHE: OnceLock<Mutex<Option<(Instant, String)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
@@ -208,15 +199,32 @@ pub async fn build_brief() -> String {
         me.name
     );
 
-    // Recuerdos recientes vigentes (con fecha), truncados.
-    if let Ok(mem) = aion_memory::VectorMemory::persistent_local(crate::memory_path()) {
-        let recent = mem.recent_with_time(10);
-        if !recent.is_empty() {
-            out.push_str("\n## Recuerdos recientes\n");
-            for (content, ts) in recent {
-                let c: String = content.chars().take(180).collect();
-                out.push_str(&format!("- [{}] {}\n", ts.format("%Y-%m-%d"), c));
+    // Recuerdos recientes vigentes, DE-DUPLICADOS y truncados. Se piden de más (14)
+    // para poder descartar casi-duplicados (p. ej. variantes del mismo insight que aún
+    // no consolidó el sueño) y quedarnos con 8 distintos: menos tokens, cero pérdida de
+    // información real. Las fechas desconocidas (epoch 1970) se omiten en vez de mentir.
+    if let Ok(mem) = crate::shared_memory() {
+        let recent = mem.recent_with_time(14);
+        let mut shown: Vec<String> = Vec::new();
+        let mut lines = String::new();
+        for (content, ts) in recent.into_iter().rev() {
+            let c: String = content.chars().take(180).collect();
+            if shown.iter().any(|s| near_duplicate(s, &c)) {
+                continue;
             }
+            if aion_memory::is_unknown_time(ts) {
+                lines.push_str(&format!("- {c}\n"));
+            } else {
+                lines.push_str(&format!("- [{}] {}\n", ts.format("%Y-%m-%d"), c));
+            }
+            shown.push(c);
+            if shown.len() >= 8 {
+                break;
+            }
+        }
+        if !lines.is_empty() {
+            out.push_str("\n## Recuerdos recientes\n");
+            out.push_str(&lines);
         }
     }
 
@@ -240,10 +248,42 @@ pub async fn build_brief() -> String {
         }
     }
 
-    // Techo duro ~600 tokens (≈2400 chars).
-    if out.chars().count() > 2400 {
-        out = out.chars().take(2400).collect();
+    // Grafo de conocimiento: orienta sobre estructura sin necesitar una llamada extra a
+    // aion_graph_query. Una sola línea (≤120 chars / ~30 tokens) con conteo de conceptos,
+    // comunidades y los 3 temas principales — suficiente para decidir si vale la pena
+    // profundizar con una query directa al grafo.
+    let g = crate::graph::KnowledgeGraph::open(crate::graph_path());
+    let g_summary = g.brief_summary();
+    if !g_summary.is_empty() {
+        out.push_str(&format!("\n## Grafo de conocimiento\n{g_summary}\n"));
+    }
+
+    // Techo duro ~450 tokens (≈1800 chars): el brief es coste por sesión, se mantiene
+    // compacto sin perder lo esencial (identidad + recientes de-duplicados + proyectos).
+    if out.chars().count() > 1800 {
+        out = out.chars().take(1800).collect();
     }
     *cache.lock().unwrap() = Some((Instant::now(), out.clone()));
     out
+}
+
+/// ¿Son `a` y `b` casi el mismo texto? Jaccard de palabras significativas (>3 chars)
+/// ≥ 0.6 — barato y suficiente para descartar variantes del mismo recuerdo en el brief.
+fn near_duplicate(a: &str, b: &str) -> bool {
+    fn words(s: &str) -> std::collections::HashSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 3)
+            .map(|w| w.to_string())
+            .collect()
+    }
+    let (wa, wb) = (words(a), words(b));
+    if wa.is_empty() || wb.is_empty() {
+        return false;
+    }
+    let inter = wa.intersection(&wb).count() as f32;
+    let union = wa.union(&wb).count() as f32;
+    // 0.72: lo bastante alto para no fundir recuerdos que solo comparten vocabulario
+    // común (y difieren en tokens cortos significativos: siglas, A/B, versiones).
+    union > 0.0 && inter / union >= 0.72
 }

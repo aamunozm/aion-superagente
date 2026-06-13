@@ -15,6 +15,117 @@ pub struct SystemScan {
     /// Nivel recomendado: "bajo" | "medio" | "superior".
     pub tier: String,
     pub tier_reason: String,
+    /// **Sensores vivos del cuerpo** (estado físico AHORA, no fijo): batería, energía,
+    /// presión térmica, tiempo encendido. Es lo que convierte el escáner de hardware en
+    /// percepción real del propio equipo, no una ficha estática.
+    #[serde(default)]
+    pub sensors: HostSensors,
+}
+
+/// Lecturas instantáneas de los sensores del equipo. Todo opcional: si el SO no expone
+/// una señal (o falla la lectura), queda en `None` y AION simplemente no la menciona.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HostSensors {
+    /// % de carga de batería (None en equipos sin batería o si no se pudo leer).
+    #[serde(default)]
+    pub battery_pct: Option<i64>,
+    /// Fuente de energía: "enchufado" | "con batería".
+    #[serde(default)]
+    pub power: Option<String>,
+    /// Presión térmica: "normal" | "elevada (CPU limitada al N%)".
+    #[serde(default)]
+    pub thermal: Option<String>,
+    /// Tiempo encendido, en lenguaje natural ("3 horas", "2 días").
+    #[serde(default)]
+    pub uptime: Option<String>,
+}
+
+/// Lee los sensores del equipo. macOS: `pmset` (batería/térmica) + `sysctl` (uptime).
+/// Otros SO: por ahora sin sensores (devuelve todo `None`). Barato y tolerante a fallos.
+pub fn read_sensors() -> HostSensors {
+    #[cfg(target_os = "macos")]
+    {
+        let mut s = HostSensors::default();
+        // Batería y fuente de energía.
+        if let Ok(out) = std::process::Command::new("pmset")
+            .args(["-g", "batt"])
+            .output()
+        {
+            let txt = String::from_utf8_lossy(&out.stdout);
+            if let Some(idx) = txt.find('%') {
+                let pct: String = txt[..idx]
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                if let Ok(n) = pct.parse::<i64>() {
+                    s.battery_pct = Some(n);
+                }
+            }
+            // "Now drawing from 'AC Power'" → enchufado; si no, con batería.
+            if s.battery_pct.is_some() {
+                s.power = Some(
+                    if txt.contains("AC Power") {
+                        "enchufado"
+                    } else {
+                        "con batería"
+                    }
+                    .into(),
+                );
+            }
+        }
+        // Presión térmica: CPU_Speed_Limit < 100 ⇒ el sistema está limitando por calor.
+        if let Ok(out) = std::process::Command::new("pmset")
+            .args(["-g", "therm"])
+            .output()
+        {
+            let txt = String::from_utf8_lossy(&out.stdout);
+            if let Some(line) = txt.lines().find(|l| l.contains("CPU_Speed_Limit")) {
+                let lim: i64 = line
+                    .split('=')
+                    .nth(1)
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(100);
+                s.thermal = Some(if lim >= 100 {
+                    "normal".into()
+                } else {
+                    format!("elevada (CPU limitada al {lim}%)")
+                });
+            } else if txt.contains("No thermal") {
+                s.thermal = Some("normal".into());
+            }
+        }
+        // Uptime desde kern.boottime: "{ sec = 1699900000, usec = 0 } ...".
+        if let Ok(out) = std::process::Command::new("sysctl")
+            .args(["-n", "kern.boottime"])
+            .output()
+        {
+            let txt = String::from_utf8_lossy(&out.stdout);
+            if let Some(after) = txt.split("sec =").nth(1) {
+                let boot: i64 = after
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(0);
+                if boot > 0 {
+                    let up = chrono::Utc::now().timestamp() - boot;
+                    if up > 0 {
+                        s.uptime = Some(crate::awareness::humanize_secs(up));
+                    }
+                }
+            }
+        }
+        s
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        HostSensors::default()
+    }
 }
 
 /// Escanea el equipo y deduce el nivel recomendado.
@@ -92,6 +203,7 @@ pub fn scan() -> SystemScan {
         gpu,
         tier: tier.to_string(),
         tier_reason,
+        sensors: read_sensors(),
     }
 }
 

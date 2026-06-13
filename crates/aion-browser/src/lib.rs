@@ -195,6 +195,134 @@ impl WebClient {
         Ok(out)
     }
 
+    /// **Clima EN TIEMPO REAL de un lugar** vía Open-Meteo (sin API key): geocodifica
+    /// la ciudad y devuelve la observación actual (temperatura, sensación, cielo,
+    /// humedad, viento). Es la fuente correcta para "¿qué temperatura hace?": la
+    /// búsqueda web general solo devuelve artículos, nunca el dato del momento.
+    pub async fn weather(&self, place: &str) -> Result<String> {
+        let q = urlencode(place.trim());
+        let geo: serde_json::Value = self
+            .http
+            .get(format!(
+                "https://geocoding-api.open-meteo.com/v1/search?name={q}&count=1\
+                 &language=es&format=json"
+            ))
+            .send()
+            .await
+            .map_err(|e| AionError::Internal(format!("geocoding falló: {e}")))?
+            .json()
+            .await
+            .map_err(|e| AionError::Internal(format!("geocoding json inválido: {e}")))?;
+        let Some(hit) = geo["results"].as_array().and_then(|a| a.first()) else {
+            return Err(AionError::Internal(format!(
+                "no encontré el lugar «{}» en el mapa",
+                place.trim()
+            )));
+        };
+        let (Some(lat), Some(lon)) = (hit["latitude"].as_f64(), hit["longitude"].as_f64()) else {
+            return Err(AionError::Internal("lugar sin coordenadas".into()));
+        };
+        let name = hit["name"].as_str().unwrap_or(place.trim());
+        let country = hit["country"].as_str().unwrap_or("");
+        let label = if country.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name} ({country})")
+        };
+        self.forecast_at(lat, lon, &label).await
+    }
+
+    /// **Clima SIN ciudad — autonomía**: geolocaliza el equipo por su IP pública y
+    /// consulta el clima ahí. Permite responder «¿qué temperatura hace?» sin pedirle
+    /// la ciudad al usuario.
+    pub async fn weather_auto(&self) -> Result<String> {
+        let (lat, lon, label) = self.geolocate().await?;
+        let r = self.forecast_at(lat, lon, &label).await?;
+        Ok(format!("{r} [ubicación estimada por la IP del equipo]"))
+    }
+
+    /// Ubicación aproximada del equipo por su IP pública → (lat, lon, etiqueta
+    /// «Ciudad (País)»). Precisión a nivel de ciudad. Dos proveedores HTTPS sin API
+    /// key: ipwho.is (principal) e ipinfo.io (respaldo) — ipapi.co quedó descartado
+    /// por rate-limit agresivo. OJO: detrás de AION_PROXY (Tor/VPN) la IP es la del
+    /// nodo de salida — la ubicación será la del túnel, no la real del equipo.
+    pub async fn geolocate(&self) -> Result<(f64, f64, String)> {
+        if let Ok(json) = self.fetch_json("https://ipwho.is/").await {
+            if json["success"].as_bool().unwrap_or(false) {
+                if let (Some(lat), Some(lon)) =
+                    (json["latitude"].as_f64(), json["longitude"].as_f64())
+                {
+                    let city = json["city"].as_str().unwrap_or("");
+                    let country = json["country"].as_str().unwrap_or("");
+                    return Ok((lat, lon, place_label(city, country)));
+                }
+            }
+        }
+        // Respaldo: ipinfo.io entrega las coordenadas como "lat,lon" en `loc`.
+        let json = self.fetch_json("https://ipinfo.io/json").await?;
+        let mut parts = json["loc"].as_str().unwrap_or("").split(',');
+        let (Some(lat), Some(lon)) = (
+            parts.next().and_then(|s| s.trim().parse::<f64>().ok()),
+            parts.next().and_then(|s| s.trim().parse::<f64>().ok()),
+        ) else {
+            return Err(AionError::Internal(
+                "la geolocalización por IP no devolvió coordenadas".into(),
+            ));
+        };
+        let city = json["city"].as_str().unwrap_or("");
+        let country = json["country"].as_str().unwrap_or("");
+        Ok((lat, lon, place_label(city, country)))
+    }
+
+    /// GET → JSON con errores legibles (para las APIs públicas sin key).
+    async fn fetch_json(&self, url: &str) -> Result<serde_json::Value> {
+        self.http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| AionError::Internal(format!("{url} falló: {e}")))?
+            .json()
+            .await
+            .map_err(|e| AionError::Internal(format!("{url} json inválido: {e}")))
+    }
+
+    /// Observación actual de Open-Meteo en unas coordenadas, formateada en español.
+    async fn forecast_at(&self, lat: f64, lon: f64, label: &str) -> Result<String> {
+        let wx: serde_json::Value = self
+            .http
+            .get(format!(
+                "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}\
+                 &current=temperature_2m,apparent_temperature,relative_humidity_2m,\
+                 weather_code,wind_speed_10m&timezone=auto"
+            ))
+            .send()
+            .await
+            .map_err(|e| AionError::Internal(format!("open-meteo falló: {e}")))?
+            .json()
+            .await
+            .map_err(|e| AionError::Internal(format!("open-meteo json inválido: {e}")))?;
+        let cur = &wx["current"];
+        let Some(temp) = cur["temperature_2m"].as_f64() else {
+            return Err(AionError::Internal(
+                "open-meteo no devolvió temperatura".into(),
+            ));
+        };
+        let feels = cur["apparent_temperature"].as_f64().unwrap_or(temp);
+        let hum = cur["relative_humidity_2m"].as_f64().unwrap_or(0.0);
+        let wind = cur["wind_speed_10m"].as_f64().unwrap_or(0.0);
+        let desc = weather_desc(cur["weather_code"].as_u64().unwrap_or(u64::MAX));
+        let when = cur["time"].as_str().unwrap_or("");
+        Ok(format!(
+            "Ahora en {label}: {temp:.0} °C (sensación {feels:.0} °C), {desc}, \
+             humedad {hum:.0}%, viento {wind:.0} km/h{}.",
+            if when.is_empty() {
+                String::new()
+            } else {
+                format!(" — medido a las {}", &when[when.len().saturating_sub(5)..])
+            }
+        ))
+    }
+
     /// **Búsqueda de LUGARES/NEGOCIOS por dirección** vía OpenStreetMap (Nominatim,
     /// sin API key). Ideal para "¿qué negocio hay en tal dirección?", coordenadas,
     /// tipo de local (restaurante, tienda…). Más fiable que la búsqueda web general
@@ -405,6 +533,32 @@ fn strip_html_tags(s: &str) -> String {
         .replace("&quot;", "\"")
         .trim()
         .to_string()
+}
+
+/// Etiqueta legible «Ciudad (País)» para la geolocalización (best-effort).
+fn place_label(city: &str, country: &str) -> String {
+    match (city.is_empty(), country.is_empty()) {
+        (false, false) => format!("{city} ({country})"),
+        (false, true) => city.to_string(),
+        _ => "tu zona".to_string(),
+    }
+}
+
+/// Descripción en español de un código de tiempo WMO (los que devuelve Open-Meteo).
+fn weather_desc(code: u64) -> &'static str {
+    match code {
+        0 => "despejado",
+        1 | 2 => "parcialmente nublado",
+        3 => "nublado",
+        45 | 48 => "niebla",
+        51..=57 => "llovizna",
+        61..=67 => "lluvia",
+        71..=77 => "nieve",
+        80..=82 => "chubascos",
+        85 | 86 => "chubascos de nieve",
+        95..=99 => "tormenta",
+        _ => "condiciones variables",
+    }
 }
 
 /// Codifica una cadena para usarla en una query string (percent-encoding).

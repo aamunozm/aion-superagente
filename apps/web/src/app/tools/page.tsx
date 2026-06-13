@@ -58,7 +58,7 @@ export default function ToolsPage() {
 
   return (
     <AppShell title="Herramientas">
-      <div className="max-w-6xl mx-auto px-8 py-8">
+      <div className="max-w-6xl mx-auto px-3 py-6">
         <p className="text-[15px] mb-7 max-w-2xl" style={{ color: "var(--text-2)" }}>
           Conecta capacidades a AION. Las activas ya las usa el agente; las disponibles se
           activan concediendo permisos del sistema.

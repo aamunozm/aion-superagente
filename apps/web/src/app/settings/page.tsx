@@ -11,6 +11,7 @@ import {
   modelsInstalled,
   modelsPull,
   modelsRemove,
+  providerGet,
   providerSet,
   systemScan,
   status,
@@ -34,9 +35,37 @@ import {
   type CredMeta,
   type InstalledModel,
   type ModelOption,
+  type ProviderState,
   type SensorConfig,
   type SystemScan,
 } from "@/lib/api";
+
+// Proveedores de motor LLM. "local" = Ollama (privado). Los externos hablan una API
+// OpenAI-compatible; AION ya despacha a ellas desde el backend (build_engine).
+type ProvKey = "local" | "google" | "deepseek" | "custom";
+const PROVIDERS: Record<
+  Exclude<ProvKey, "local">,
+  { label: string; base_url: string; defaultModel: string; keyHint: string }
+> = {
+  google: {
+    label: "Google AI Studio (Gemini)",
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+    defaultModel: "gemini-2.5-flash",
+    keyHint: "API key de aistudio.google.com",
+  },
+  deepseek: {
+    label: "DeepSeek",
+    base_url: "https://api.deepseek.com",
+    defaultModel: "deepseek-chat",
+    keyHint: "API key de platform.deepseek.com",
+  },
+  custom: {
+    label: "API OpenAI-compatible (otra)",
+    base_url: "",
+    defaultModel: "",
+    keyHint: "API key del proveedor",
+  },
+};
 
 export default function SettingsPage() {
   const { t, lang, setLang } = useT();
@@ -60,11 +89,75 @@ export default function SettingsPage() {
   const [ccBusy, setCcBusy] = useState(false);
   const [ccMsg, setCcMsg] = useState<string>("");
 
+  // ── Proveedor del motor: LOCAL (Ollama, privado) o API CLOUD (Google / DeepSeek) ──
+  const [prov, setProv] = useState<ProviderState | null>(null);
+  const [provSel, setProvSel] = useState<ProvKey>("local");
+  const [provModel, setProvModel] = useState<string>("");
+  const [provKey, setProvKey] = useState<string>("");
+  const [customUrl, setCustomUrl] = useState<string>("");
+  const [provBusy, setProvBusy] = useState(false);
+  const [provMsg, setProvMsg] = useState<string>("");
+
+  function applyProv(p: ProviderState) {
+    setProv(p);
+    if (p.kind !== "external") {
+      setProvSel("local");
+    } else if (p.base_url.includes("googleapis")) {
+      setProvSel("google");
+    } else if (p.base_url.includes("deepseek")) {
+      setProvSel("deepseek");
+    } else {
+      setProvSel("custom");
+    }
+    setProvModel(p.model);
+  }
+
+  async function saveProvider(sel: ProvKey, model: string, key: string) {
+    if (provBusy) return;
+    setProvBusy(true);
+    setProvMsg("");
+    try {
+      if (sel === "local") {
+        await providerSet({ kind: "local", model: model || current || "gemma4-reason" });
+        setProvMsg("✅ Motor local activo · privacidad total, nada sale del Mac.");
+      } else {
+        const preset = PROVIDERS[sel];
+        const base_url = sel === "custom" ? customUrl.trim() : preset.base_url;
+        if (!base_url) {
+          setProvMsg("⚠️ Indica la Base URL del proveedor.");
+          setProvBusy(false);
+          return;
+        }
+        const usingExisting = !key && prov?.has_key && prov.base_url === base_url;
+        if (!key && !usingExisting) {
+          setProvMsg("⚠️ Pega tu API key para activar este proveedor.");
+          setProvBusy(false);
+          return;
+        }
+        await providerSet({
+          kind: "external",
+          model: model || preset.defaultModel,
+          base_url,
+          api_key: key, // vacío = el backend conserva la key ya guardada
+        });
+        setProvMsg(`✅ ${preset.label} activo · tus mensajes saldrán del Mac hacia esta API.`);
+        setProvKey("");
+      }
+      await providerGet().then(applyProv).catch(() => {});
+      await refreshModels();
+    } catch (e) {
+      setProvMsg(`⚠️ ${e instanceof Error ? e.message : "error"}`);
+    } finally {
+      setProvBusy(false);
+    }
+  }
+
   useEffect(() => {
     getIdentity().then(setIdent);
     a2aGet().then((r) => setA2a(r.config));
     sensorsGet().then(setSensors).catch(() => {});
     claudeCodeGet().then(setCc).catch(() => {});
+    providerGet().then(applyProv).catch(() => {});
   }, []);
 
   const ccConnected = cc.enabled && cc.registered;
@@ -266,7 +359,7 @@ export default function SettingsPage() {
 
   return (
     <AppShell title={t("nav.settings")}>
-      <div className="max-w-2xl mx-auto px-6 py-8 flex flex-col gap-6">
+      <div className="max-w-6xl mx-auto px-3 py-6 flex flex-col gap-6">
         <div className="card">
           <h2 className="t-section mb-3" style={{ color: "var(--text-2)" }}>
             {t("settings.account")}
@@ -379,6 +472,108 @@ export default function SettingsPage() {
           <p className="text-xs mt-2" style={{ color: "var(--text-3)" }}>
             {t("settings.modelsNote2")}
           </p>
+        </div>
+
+        {/* ── Proveedor del motor: LOCAL (privado) o API CLOUD ── */}
+        <div className="card">
+          <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
+            <Icon name="cpu" size={16} /> Proveedor del motor
+          </h2>
+          <p className="text-xs mb-3" style={{ color: "var(--text-3)" }}>
+            Elige con qué cerebro piensa AION. <strong>Local</strong>: corre en tu Mac, nada
+            sale de aquí (máxima privacidad). <strong>API cloud</strong>: respuestas más rápidas y
+            potentes, pero tus mensajes viajan al proveedor que elijas. Puedes cambiar cuando
+            quieras; los embeddings y la visión siguen siendo siempre locales.
+          </p>
+
+          {/* Estado activo */}
+          <div
+            className="rounded-lg px-3 py-2 mb-3 text-xs flex items-center gap-2"
+            style={{ background: "var(--surface-2)", color: "var(--text-2)" }}
+          >
+            <span
+              className="inline-block w-2 h-2 rounded-full"
+              style={{ background: prov?.kind === "external" ? "#f59e0b" : "var(--accent)" }}
+            />
+            {prov?.kind === "external" ? (
+              <span>Activo: <strong>API cloud</strong> · {prov.model} {prov.has_key ? "· key guardada 🔒" : "· sin key ⚠️"}</span>
+            ) : (
+              <span>Activo: <strong>Local (Ollama)</strong> · {prov?.model ?? current ?? "—"} · privacidad total</span>
+            )}
+          </div>
+
+          {/* Selector de proveedor */}
+          <div className="flex flex-wrap gap-2 mb-3">
+            {(["local", "google", "deepseek", "custom"] as ProvKey[]).map((k) => {
+              const active = provSel === k;
+              const label = k === "local" ? "Local (privado)" : PROVIDERS[k].label;
+              return (
+                <button
+                  key={k}
+                  onClick={() => {
+                    setProvSel(k);
+                    setProvMsg("");
+                    if (k !== "local") setProvModel(prov?.kind === "external" && prov.base_url === PROVIDERS[k].base_url ? prov.model : PROVIDERS[k].defaultModel);
+                  }}
+                  className="px-3 py-1.5 rounded-xl text-xs transition-all"
+                  style={{
+                    background: active ? "var(--accent-subtle)" : "var(--surface-1)",
+                    color: active ? "var(--gold-deep)" : "var(--text-2)",
+                    fontWeight: active ? 600 : 500,
+                    border: `1px solid ${active ? "var(--accent)" : "transparent"}`,
+                  }}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+
+          {provSel === "local" ? (
+            <p className="text-xs mb-3 px-3 py-2 rounded-lg" style={{ background: "var(--surface-1)", color: "var(--text-3)" }}>
+              🔒 Todo se queda en tu Mac. El modelo concreto se elige arriba, en «{t("settings.models")}».
+            </p>
+          ) : (
+            <div className="flex flex-col gap-2 mb-3">
+              {provSel === "custom" && (
+                <input
+                  className="input"
+                  placeholder="Base URL (https://… /v1)"
+                  value={customUrl}
+                  onChange={(e) => { setCustomUrl(e.target.value); setProvMsg(""); }}
+                  autoComplete="off"
+                />
+              )}
+              <input
+                className="input"
+                placeholder="Modelo (p. ej. gemini-2.5-flash, deepseek-chat)"
+                value={provModel}
+                onChange={(e) => setProvModel(e.target.value)}
+                autoComplete="off"
+              />
+              <input
+                className="input"
+                type="password"
+                placeholder={prov?.has_key && prov.base_url === PROVIDERS[provSel].base_url ? "API key guardada — déjalo vacío para conservarla" : PROVIDERS[provSel].keyHint}
+                value={provKey}
+                onChange={(e) => setProvKey(e.target.value)}
+                autoComplete="new-password"
+              />
+              <p className="text-[11px] px-1" style={{ color: "#f59e0b" }}>
+                ⚠️ Con esta opción, lo que escribas a AION se envía a {PROVIDERS[provSel].label}. La key se guarda cifrada en tu Mac (permisos 0600).
+              </p>
+            </div>
+          )}
+
+          <button
+            className="btn"
+            disabled={provBusy}
+            onClick={() => saveProvider(provSel, provModel, provKey)}
+            style={{ background: "var(--ink)", color: "#fff", opacity: provBusy ? 0.5 : 1 }}
+          >
+            {provBusy ? "Guardando…" : provSel === "local" ? "Usar motor local" : `Activar ${PROVIDERS[provSel].label}`}
+          </button>
+          {provMsg && <p className="mt-3 text-sm" style={{ color: "var(--accent)" }}>{provMsg}</p>}
         </div>
 
         <div className="card flex items-center justify-between">

@@ -25,7 +25,7 @@ pub type AskFn =
 /// vacío/plantilla (típico del 12B ante algo incontestable), o agotó los pasos sin
 /// recopilar nada útil. Jamás una respuesta en blanco ni un dato inventado: dice la
 /// verdad ("no puedo"/"no tengo"), que además es lo que un verificador confirmaría.
-const HONEST_REFUSAL: &str =
+pub const HONEST_REFUSAL: &str =
     "No puedo responder eso con fiabilidad: no tengo la información ni una herramienta \
      que la obtenga. Prefiero decírtelo claro antes que inventar.";
 
@@ -151,8 +151,13 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
              • DIRECCIONES/NEGOCIOS/LUGARES (qué negocio hay en una calle, dónde queda \
              algo, tipo de local): usa SIEMPRE place_lookup (mapas), NUNCA web_search \
              para direcciones.\n\
+             • CLIMA/TEMPERATURA actual o pronóstico: usa SIEMPRE weather. Si el usuario \
+             dijo una ciudad, pásala como entrada; si NO la sabes, llama weather SIN \
+             entrada (se ubica solo con la IP del equipo) — NO le preguntes la ciudad. \
+             NUNCA web_search para el clima: no da datos en tiempo real.\n\
              • web_search/web_fetch: solo para información de INTERNET, no para archivos \
-             locales, ni la red local, ni direcciones (para eso, place_lookup).\n\
+             locales, ni la red local, ni direcciones (para eso, place_lookup), ni el \
+             clima (para eso, weather).\n\
              • PANTALLA Y CONTROL DEL PC (apps de escritorio, todo el Mac): usa screen_see \
              para MIRAR la pantalla, screen_elements para localizar botones (coordenadas), y \
              pc_click «x y» / pc_type / pc_key para ACTUAR. Cada acción de control pide tu OK. \
@@ -226,6 +231,12 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
         // Acciones (herramienta+entrada) que YA fallaron o se cancelaron: nunca se
         // re-ejecutan idénticas. Mata el bucle de "reintentar lo mismo 5 veces".
         let mut failed: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        // Acciones que ya se ejecutaron CON ÉXITO: tampoco se repiten idénticas.
+        // Una búsqueda que "funciona" pero devuelve resultados inútiles no es un
+        // fallo de herramienta, y sin esto el modelo la relanza igual hasta agotar
+        // los pasos (visto: la misma web_search 4 veces seguidas).
+        let mut executed: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
 
         for step in 0..self.max_steps {
@@ -332,8 +343,12 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                             continue;
                         }
                         _ => {
+                            // Sin respuesta del usuario: la pregunta NO puede llegar
+                            // cruda como «respuesta» (parece un eco). Se enmarca.
                             return Ok(AgentRun {
-                                answer: question,
+                                answer: format!(
+                                    "Para continuar necesito que me aclares: {question}"
+                                ),
                                 steps: step + 1,
                                 failures: failed.values().cloned().collect(),
                             });
@@ -341,7 +356,7 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                     },
                     None => {
                         return Ok(AgentRun {
-                            answer: question,
+                            answer: format!("Para continuar necesito que me aclares: {question}"),
                             steps: step + 1,
                             failures: failed.values().cloned().collect(),
                         });
@@ -377,6 +392,16 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                     "⚠️ Ya intentaste «{action}» con la misma entrada y no resultó ({prev}). \
                      NO repitas lo mismo: usa OTRA herramienta, reformula la entrada, o si \
                      necesitas un dato que solo el usuario tiene, pregúntale con 'Final Answer:'."
+                )
+            } else if let Some(prev) = executed.get(&sig) {
+                // Ya se ejecutó EXACTAMENTE esto y dio resultado: repetirlo no aporta
+                // nada nuevo. Redirigir, y si lo recopilado no responde la tarea,
+                // empujar a la negativa honesta en vez de a otra vuelta del bucle.
+                format!(
+                    "⚠️ Ya ejecutaste «{action}» con ESTA MISMA entrada en esta tarea y \
+                     obtuviste: {prev}. NO la repitas: cambia la entrada, usa OTRA \
+                     herramienta, o da ya tu 'Final Answer:' con lo que tienes — y si nada \
+                     de lo recopilado responde la tarea, dilo con franqueza."
                 )
             } else {
                 let obs = match self.tools.get(&action) {
@@ -415,6 +440,8 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                         )
                     };
                     failed.insert(sig.clone(), human);
+                } else {
+                    executed.insert(sig.clone(), first_line(&obs));
                 }
                 obs
             };
@@ -638,6 +665,21 @@ fn sanitize(text: &str) -> String {
     ] {
         s = s.replace(junk, "");
     }
+    // 2b) Tag TRUNCADO al final: cuando max_tokens corta la salida a mitad de un tag
+    // («</thought», «</», «<think»), los literales de arriba no lo capturan y llega
+    // al usuario tal cual. Si tras el último '<' no hay '>' y lo que sigue parece
+    // tag (solo letras, '/', '|', '_' — sin espacios ni dígitos), se corta ahí.
+    if let Some(i) = s.rfind('<') {
+        let tail = &s[i + 1..];
+        if !tail.contains('>')
+            && tail.chars().count() <= 12
+            && tail
+                .chars()
+                .all(|c| c.is_ascii_alphabetic() || c == '/' || c == '|' || c == '_')
+        {
+            s.truncate(i);
+        }
+    }
     // 3) Colapsar repetición degenerada: ningún token se repite >3 veces seguidas.
     let mut out: Vec<&str> = Vec::new();
     let mut run = 0usize;
@@ -706,5 +748,18 @@ mod tests {
         // Colapsa repeticiones degeneradas.
         let rep = "hola hola hola hola hola hola mundo";
         assert_eq!(sanitize(rep), "hola hola hola mundo");
+    }
+
+    #[test]
+    fn sanitize_strips_truncated_trailing_tags() {
+        // Caso real: max_tokens corta la salida a mitad de un tag de pensamiento
+        // y el fragmento llegaba al usuario tal cual («</», «</thought»).
+        assert_eq!(sanitize("</"), "");
+        assert_eq!(sanitize("</thought"), "");
+        assert_eq!(sanitize("La respuesta es 4</thought"), "La respuesta es 4");
+        assert_eq!(sanitize("Pensando<think"), "Pensando");
+        // Un '<' legítimo (comparación, con espacios o dígitos) NO se toca.
+        assert_eq!(sanitize("a < b"), "a < b");
+        assert_eq!(sanitize("x<5"), "x<5");
     }
 }

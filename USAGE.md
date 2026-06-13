@@ -45,6 +45,15 @@ cargo run -p aion-control-plane                     # auth/licencias :8787
 cd apps/web && pnpm dev                             # UI en http://localhost:3000
 ```
 
+## Conectar Claude Code (memoria compartida vía MCP)
+AION expone su memoria a Claude Code por MCP en `http://127.0.0.1:8765/mcp` (loopback, token Bearer, auditado). En **cada máquina** la conexión se hace una vez:
+
+1. **Instala la CLI de Claude Code** si no la tienes: `npm install -g @anthropic-ai/claude-code`. AION la detecta sola en las rutas típicas; si falta, la pantalla de conexión muestra el comando con botón de copiar.
+2. Con AION corriendo, abre **Ajustes → Claude Code** (o `http://localhost:3000/claude-code`) y pulsa **Conectar**. AION escribe solo el bloque `mcpServers.aion` en `~/.claude.json` (permisos `0600`, sin exponer el token) y genera un Bearer nuevo.
+3. Reinicia Claude Code; ya verás las tools `aion_*` (memoria, biblioteca, grafo, proyectos, brief, remember).
+
+**Máquina nueva / reinstalación:** la URL es local y el token se regenera por máquina, así que la conexión **no se transporta**. Pero si restauras la config de AION (`claude_code.json` con `enabled: true`), AION **re-registra el endpoint solo al arrancar** reutilizando ese token — no hace falta volver a pulsar "Conectar". La **memoria** sí es portable aparte vía backup `.aion` (export/import); el registro MCP es independiente.
+
 ## Que AION "viva" en segundo plano (opt-in)
 ```bash
 cp infra/launchd/it.prontoclick.aion.live.plist ~/Library/LaunchAgents/

@@ -17,8 +17,11 @@ import {
   libraryUpload,
   visionAsk,
   status,
+  providerGet,
+  providerToggle,
   type AgentEvent,
   type ChatEvent,
+  type ProviderState,
 } from "@/lib/api";
 
 type Step = { kind: "thought" | "action" | "observation"; text: string; agent?: string };
@@ -73,6 +76,22 @@ export default function ChatPage() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
   const [modelReady, setModelReady] = useState(true);
+  // Proveedor del motor (local Ollama / API externa) para el indicador + toggle del header.
+  const [prov, setProv] = useState<ProviderState | null>(null);
+  const [provBusy, setProvBusy] = useState(false);
+
+  // Alterna local↔API en un clic. Solo se ofrece si ambos están configurados (can_toggle).
+  async function toggleEngine() {
+    if (provBusy) return;
+    setProvBusy(true);
+    try {
+      await providerToggle();
+      const p = await providerGet().catch(() => null);
+      if (p) setProv(p);
+    } finally {
+      setProvBusy(false);
+    }
+  }
 
   // Añade un mensaje que AION inició (saludo/aviso) como un turno cronológico al final
   // (sin burbuja de usuario). Dedup por texto para no duplicar en recargas.
@@ -147,6 +166,12 @@ export default function ChatPage() {
       try {
         const s = await status();
         if (alive) setModelReady(s.model_ready);
+      } catch {
+        /* núcleo aún arrancando */
+      }
+      try {
+        const p = await providerGet();
+        if (alive) setProv(p);
       } catch {
         /* núcleo aún arrancando */
       }
@@ -304,6 +329,22 @@ export default function ChatPage() {
         }, convoId);
       } else {
         const stream = mode === "crew" ? crewStream : agentStream;
+        // CONTEXTO RECIENTE para el agente: los últimos turnos viajan con la tarea.
+        // Sin esto, «puedes buscarlo tú» llega huérfano al backend y el modelo
+        // alucina el antecedente. Acotado (3 turnos, 280 chars por mensaje) para
+        // no inflar el prompt del modelo local.
+        const context = turns
+          .slice(-3)
+          .map((t) =>
+            [
+              t.prompt ? `Usuario: ${t.prompt.slice(0, 280)}` : "",
+              t.answer ? `AION: ${t.answer.slice(0, 280)}` : "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          )
+          .filter(Boolean)
+          .join("\n");
         await stream(prompt, (ev: AgentEvent) => {
           if (ev.kind === "thought" || ev.kind === "action" || ev.kind === "observation")
             update((t) => ({
@@ -316,7 +357,7 @@ export default function ChatPage() {
           else if (ev.kind === "ask") { setPendingAsk({ id: ev.id, text: ev.text }); setAskDraft(""); }
           else if (ev.kind === "error") update((t) => ({ ...t, answer: `⚠️ ${ev.text}` }));
           scroll();
-        });
+        }, context || undefined);
       }
     } catch (err) {
       update((t) => ({ ...t, answer: `⚠️ ${err instanceof Error ? err.message : "error"}` }));
@@ -377,9 +418,52 @@ export default function ChatPage() {
             </div>
           )}
         </div>
-        <span className="text-xs" style={{ color: "var(--text-3)" }}>
-          {busy ? "AION trabajando…" : "gemma4-reason · local"}
-        </span>
+        {busy ? (
+          <span className="text-xs" style={{ color: "var(--text-3)" }}>AION trabajando…</span>
+        ) : prov ? (
+          <div className="flex items-center gap-1.5">
+            {prov.can_toggle ? (
+              <button
+                onClick={toggleEngine}
+                disabled={provBusy}
+                className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full transition-all"
+                style={{ background: "var(--surface-2)", color: "var(--text-2)", opacity: provBusy ? 0.5 : 1 }}
+                title={
+                  prov.kind === "external"
+                    ? `Cambiar al modelo local (${prov.local_model}) · privacidad total, nada sale del Mac`
+                    : `Cambiar a la API externa (${prov.ext_model})`
+                }
+              >
+                <span
+                  className="inline-block w-2 h-2 rounded-full"
+                  style={{ background: prov.kind === "external" ? "#f59e0b" : "var(--accent)" }}
+                />
+                {provBusy ? "Cambiando…" : `${prov.model} · ${prov.kind === "external" ? "API" : "local"}`}
+                <Icon name="refresh" size={12} />
+              </button>
+            ) : (
+              <span className="flex items-center gap-1.5 text-xs" style={{ color: "var(--text-3)" }}>
+                <span
+                  className="inline-block w-2 h-2 rounded-full"
+                  style={{ background: prov.kind === "external" ? "#f59e0b" : "var(--accent)" }}
+                />
+                {prov.model} · {prov.kind === "external" ? "API" : "local"}
+              </span>
+            )}
+            {prov.kind === "external" && (
+              <span
+                className="flex items-center cursor-help"
+                style={{ color: "#f59e0b" }}
+                title="Riesgo de privacidad: con la API externa, lo que escribes a AION se envía a un servidor en la nube. Cambia a un modelo local para que nada salga de tu Mac."
+                aria-label="Riesgo de privacidad: la API externa envía tus mensajes a la nube"
+              >
+                <Icon name="warn" size={14} />
+              </span>
+            )}
+          </div>
+        ) : (
+          <span className="text-xs" style={{ color: "var(--text-3)" }}>…</span>
+        )}
         <div className="ml-auto flex gap-1 p-1 rounded-full" style={{ background: "var(--surface-2)" }}>
           {(["agent", "crew", "chat"] as const).map((m) => (
             <button

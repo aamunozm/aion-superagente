@@ -12,12 +12,26 @@
 
 use std::process::Child as StdChild;
 use std::sync::Mutex;
-use tauri::{Manager, RunEvent};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
 /// Puerto privado del Ollama embebido (poco común, evita choques con :11434).
 const OLLAMA_HOST: &str = "127.0.0.1:11919";
+
+/// Muestra (y enfoca) la ventana principal desde la bandeja o el icono del Dock.
+/// En macOS restaura el icono del Dock (política Regular), que ocultamos al cerrar.
+fn show_main(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+}
 
 /// Procesos hijos para detenerlos limpiamente al salir.
 #[derive(Default)]
@@ -145,6 +159,56 @@ fn main() {
                 }
                 let _ = win.show();
                 let _ = win.set_focus();
+
+                // CERRAR LA VENTANA = OCULTAR A LA BARRA DE MENÚ (no salir). El proceso
+                // sigue vivo, así que el núcleo aion-core (:8765) y con él Claude Code,
+                // la memoria y el agente SIGUEN funcionando en background. Salir de verdad
+                // se hace desde la bandeja ("Salir") o con ⌘Q.
+                let handle = app.handle().clone();
+                win.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        if let Some(w) = handle.get_webview_window("main") {
+                            let _ = w.hide();
+                        }
+                        // macOS: quita el icono del Dock → queda SOLO en la barra de menú.
+                        #[cfg(target_os = "macos")]
+                        let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    }
+                });
+            }
+
+            // BANDEJA (barra de menú): AION queda "arriba" aunque cierres la ventana.
+            // Icono con menú "Mostrar aplicación" / "Salir". Clic izquierdo → mostrar.
+            if let Some(icon) = app.default_window_icon().cloned() {
+                let show_i =
+                    MenuItem::with_id(app, "show", "Mostrar aplicación", true, None::<&str>)?;
+                let sep = PredefinedMenuItem::separator(app)?;
+                let quit_i = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show_i, &sep, &quit_i])?;
+                let _tray = TrayIconBuilder::with_id("aion-tray")
+                    .icon(icon)
+                    .tooltip("AION")
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "show" => show_main(app),
+                        // "Salir": cierre DEFINITIVO. Dispara RunEvent::Exit, que mata los
+                        // sidecars (aion-core, control-plane, ollama) limpiamente.
+                        "quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            show_main(tray.app_handle());
+                        }
+                    })
+                    .build(app)?;
             }
             Ok(())
         })

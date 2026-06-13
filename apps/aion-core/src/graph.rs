@@ -216,6 +216,37 @@ impl KnowledgeGraph {
         &self.edges
     }
 
+    /// Resumen de 1 línea para el brief de Claude Code: cuántos conceptos y comunidades
+    /// hay y cuáles son los temas principales. Vacío si el grafo aún no tiene contenido.
+    pub fn brief_summary(&self) -> String {
+        let concepts = self
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Concept)
+            .count();
+        if concepts == 0 {
+            return String::new();
+        }
+        let n_comms = self.communities.len();
+        let mut s = format!("{concepts} conceptos · {n_comms} comunidades");
+        // Top 3 comunidades por tamaño que tengan etiqueta
+        let mut sorted: Vec<&Community> = self
+            .communities
+            .iter()
+            .filter(|c| !c.label.is_empty())
+            .collect();
+        sorted.sort_by_key(|c| std::cmp::Reverse(c.size));
+        let labels: Vec<String> = sorted
+            .iter()
+            .take(3)
+            .map(|c| format!("«{}»", c.label))
+            .collect();
+        if !labels.is_empty() {
+            s.push_str(&format!(" · Temas: {}", labels.join(", ")));
+        }
+        s
+    }
+
     pub fn stats(&self) -> serde_json::Value {
         let concepts = self
             .nodes
@@ -1752,6 +1783,44 @@ mod tests {
             "el multi-hop no cruzó documentos: {:?}",
             hits.iter().map(|h| &h.chunk_id).collect::<Vec<_>>()
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn brief_summary_muestra_temas_principales() {
+        let (mut g, path) = tmp_graph();
+        let emb = MockEmbedder { twins: vec![] };
+        // Sin contenido: brief vacío.
+        assert!(g.brief_summary().is_empty());
+        // MIN_DOC_FREQ=2: los conceptos deben aparecer ≥2 veces en el documento.
+        let d1 = doc_chunks(
+            "proj",
+            "arch.md",
+            &[
+                "rust async runtime usa tokio runtime para ejecutar tareas async",
+                "el runtime tokio gestiona el scheduler async y las tareas async",
+            ],
+        );
+        let d2 = doc_chunks(
+            "proj",
+            "mem.md",
+            &[
+                "vector memory almacena embeddings de alta dimensión para retrieval",
+                "el retrieval usa embeddings del vector memory para encontrar pasajes",
+            ],
+        );
+        g.upsert_document("proj", "arch.md", &d1, &emb)
+            .await
+            .unwrap();
+        g.upsert_document("proj", "mem.md", &d2, &emb)
+            .await
+            .unwrap();
+        let s = g.brief_summary();
+        assert!(
+            !s.is_empty(),
+            "brief_summary debe retornar texto con conceptos"
+        );
+        assert!(s.contains("conceptos"), "debe incluir conteo de conceptos");
         let _ = std::fs::remove_file(&path);
     }
 }

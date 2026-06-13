@@ -41,12 +41,21 @@ cargo tauri build --target "$UNI" --bundles app
 # permisos (Grabación de pantalla / Accesibilidad) tras cada actualización.
 # Si no existe (CI u otra máquina), cae a ad-hoc — sigue funcionando.
 APP="src-tauri/target/$UNI/release/bundle/macos/AION.app"
-if security find-identity -p codesigning 2>/dev/null | grep -q "AION Local Signing"; then
-  echo "==> firmando con identidad estable 'AION Local Signing' (permisos persistentes)"
-  codesign --force --deep --sign "AION Local Signing" "$APP"
+# Detección ROBUSTA de la identidad estable: el cert self-signed "AION Local Signing"
+# NO aparece en `find-identity -p codesigning` (no es un Developer ID de Apple), pero
+# codesign SÍ puede firmar con él por nombre. Antes el check fallaba y caía a ad-hoc,
+# perdiendo los permisos TCC en cada build. Ahora lo PROBAMOS firmando un archivo
+# desechable: si funciona, usamos la identidad estable (hash de firma constante → macOS
+# conserva Grabación de pantalla / Accesibilidad entre actualizaciones).
+SIGN_ID="AION Local Signing"
+__probe="$(mktemp)"; cp /bin/echo "$__probe" 2>/dev/null || true
+if codesign --force --sign "$SIGN_ID" "$__probe" >/dev/null 2>&1; then
+  echo "==> firmando con identidad estable '$SIGN_ID' (permisos TCC persistentes)"
+  codesign --force --deep --sign "$SIGN_ID" "$APP"
 else
-  echo "==> identidad estable no encontrada → firma ad-hoc (los permisos se reconceden por versión)"
+  echo "==> identidad estable no disponible → firma ad-hoc (los permisos se reconceden por versión)"
   codesign --force --deep --sign - "$APP"
 fi
+rm -f "$__probe"
 codesign -dvv "$APP" 2>&1 | grep -E "Authority=|Signature=" | head -2 || true
 echo "==> .app universal en $APP"

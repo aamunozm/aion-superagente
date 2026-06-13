@@ -350,8 +350,14 @@ impl Tool for FileReadTool {
         }
         let content = std::fs::read_to_string(&canon)
             .map_err(|_| "no pude leerlo (¿es binario?)".to_string())?;
-        let mut out = content;
-        out.truncate(8000); // tope de contexto
+        // Tope de contexto POR CARACTERES (String::truncate corta por bytes y entra
+        // en pánico si el byte 8000 cae en medio de una tilde UTF-8), y con marca
+        // explícita: el agente debe saber que NO leyó el archivo completo.
+        let truncated = content.chars().count() > 8000;
+        let mut out: String = content.chars().take(8000).collect();
+        if truncated {
+            out.push_str("\n… [TRUNCADO: el archivo continúa; esto es solo el inicio]");
+        }
         Ok(out)
     }
 }
@@ -1077,7 +1083,13 @@ impl Tool for RunCommandTool {
             s.push_str("\n[stderr] ");
             s.push_str(&err);
         }
-        let body: String = s.trim().chars().take(4000).collect();
+        let total_chars = s.trim().chars().count();
+        let mut body: String = s.trim().chars().take(4000).collect();
+        if total_chars > 4000 {
+            // El agente debe saber que la salida está incompleta — sin la marca,
+            // razona sobre un resultado a medias creyéndolo entero.
+            body.push_str("\n… [TRUNCADO: la salida del comando era más larga]");
+        }
         if body.is_empty() {
             Ok(format!("(sin salida; código de salida {code})"))
         } else {
@@ -1378,7 +1390,9 @@ impl Tool for CredentialLoginTool {
         let host = crate::credentials::normalize_host(input);
         // get() solo lo llama el backend; el valor jamás se devuelve al agente.
         let Some((user, pass)) = crate::credentials::get(&host) else {
-            return Ok(format!(
+            // Err (no Ok): es un bloqueo real — así el bucle lo registra como fallo,
+            // no lo reintenta idéntico y la capa de aprendizaje extrae la lección.
+            return Err(format!(
                 "no hay credenciales guardadas para «{host}». Pídele al usuario que las añada \
                  en Ajustes → Credenciales (no las pidas por el chat)."
             ));
@@ -1463,7 +1477,13 @@ impl Tool for PlaceLookupTool {
             .await
             .map_err(|e| e.to_string())?;
         if places.is_empty() {
-            return Ok("(no encontré ningún lugar/negocio en esa dirección en el mapa)".into());
+            // Err (no Ok): mismo criterio que web_search — sin resultados es un fallo
+            // accionable que debe registrarse, no un éxito vacío que se reintenta.
+            return Err(
+                "no encontré ningún lugar/negocio en esa dirección en el mapa; \
+                 reformula la dirección (calle y ciudad)"
+                    .into(),
+            );
         }
         Ok(places
             .iter()
@@ -1510,13 +1530,59 @@ impl Tool for SearchTool {
             .await
             .map_err(|e| e.to_string())?;
         if results.is_empty() {
-            return Ok("(sin resultados)".into());
+            // Err (no Ok): una búsqueda sin resultados es un fallo accionable — así
+            // el bucle no la reintenta idéntica y empuja a reformular o cambiar de tool.
+            return Err(
+                "la búsqueda no devolvió resultados; reformula la consulta con otras \
+                 palabras o usa otra herramienta"
+                    .into(),
+            );
         }
         Ok(results
             .iter()
             .map(|r| format!("• {} — {}\n  {}", r.title, r.url, r.snippet))
             .collect::<Vec<_>>()
             .join("\n"))
+    }
+}
+
+// ── 0b) Clima en tiempo real (Open-Meteo, sin API key) ──────────────────────
+
+/// Temperatura y clima ACTUALES de un lugar. Es la herramienta correcta para
+/// «¿qué temperatura hace?»: web_search solo devuelve artículos (Wikipedia,
+/// definiciones), nunca el dato del momento.
+pub struct WeatherTool {
+    web: Arc<WebClient>,
+}
+
+impl WeatherTool {
+    pub fn new(web: Arc<WebClient>) -> Self {
+        Self { web }
+    }
+}
+
+#[async_trait]
+impl Tool for WeatherTool {
+    fn name(&self) -> &str {
+        "weather"
+    }
+    fn description(&self) -> &str {
+        "Temperatura y clima ACTUALES (en tiempo real). Entrada: la ciudad o lugar \
+         (p. ej. «Milán») — o VACÍA para usar la ubicación actual del equipo \
+         automáticamente. Devuelve temperatura, sensación térmica, cielo, humedad y \
+         viento de AHORA. Úsala SIEMPRE para clima/temperatura; web_search NO sirve \
+         para eso."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let place = input
+            .trim()
+            .trim_matches(|c| c == '«' || c == '»' || c == '"');
+        if place.is_empty() {
+            // AUTONOMÍA: sin ciudad, AION se ubica solo (IP pública) y consulta ahí
+            // — no hace falta preguntarle al usuario dónde está.
+            return self.web.weather_auto().await.map_err(|e| e.to_string());
+        }
+        self.web.weather(place).await.map_err(|e| e.to_string())
     }
 }
 

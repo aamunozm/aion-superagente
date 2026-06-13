@@ -132,9 +132,17 @@ export type ClaudeCodeAuditEntry = {
 export type ClaudeCodeStats = {
   total_calls: number;
   by_tool: Record<string, number>;
+  by_tool_tokens?: Record<string, number>;
   tokens_served: number;
   writes: number;
+  errors?: number;
   full_dump_tokens: number;
+  memory_count?: number;
+  avg_tokens_per_call?: number;
+  savings_pct?: number;
+  total_savings_est?: number;
+  graph_concepts?: number;
+  graph_communities?: number;
   last_activity?: string | null;
 };
 export async function claudeCodeGet(): Promise<ClaudeCodeStatus> {
@@ -329,15 +337,18 @@ export async function chatReset(convoId: string): Promise<void> {
   }).catch(() => {});
 }
 
-/** Agente ReAct con herramientas: emite pasos (thought/action/observation) + answer. */
+/** Agente ReAct con herramientas: emite pasos (thought/action/observation) + answer.
+ * `context`: últimos turnos de la conversación — sin él, una tarea referencial
+ * («puedes buscarlo tú») llega huérfana al backend y el modelo alucina el antecedente. */
 export async function agentStream(
   task: string,
   onEvent: (e: AgentEvent) => void,
+  context?: string,
 ): Promise<void> {
   const res = await fetch(`${BRIDGE_URL}/api/agent`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ task, lang: lang() }),
+    body: JSON.stringify({ task, lang: lang(), context }),
   });
   await readSse(res, onEvent);
 }
@@ -346,11 +357,12 @@ export async function agentStream(
 export async function crewStream(
   task: string,
   onEvent: (e: AgentEvent) => void,
+  context?: string,
 ): Promise<void> {
   const res = await fetch(`${BRIDGE_URL}/api/crew`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ task, lang: lang() }),
+    body: JSON.stringify({ task, lang: lang(), context }),
   });
   await readSse(res, onEvent);
 }
@@ -483,6 +495,17 @@ async function jsonCall<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const memoryStats = () => jsonCall<MemoryStats>("/api/memory");
 
+export type GraphStats = {
+  nodes: number;
+  edges: number;
+  concepts: number;
+  sources: number;
+  communities: number;
+  community_edges: number;
+};
+// Estadísticas del grafo de conocimiento (conceptos, comunidades).
+export const graphStats = () => jsonCall<GraphStats>("/api/graph/stats");
+
 export const memoryRemember = (text: string) =>
   jsonCall<{ ok: boolean; count: number }>("/api/memory/remember", {
     method: "POST",
@@ -550,6 +573,25 @@ export const providerSet = (cfg: {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ base_url: "", api_key: "", ...cfg }),
   });
+
+export type ProviderState = {
+  kind: string;
+  model: string;
+  base_url: string;
+  has_key: boolean;
+  local_model: string;
+  ext_model: string;
+  can_toggle: boolean;
+};
+// Lee el proveedor activo. NUNCA devuelve la API key (solo `has_key`).
+export const providerGet = () => jsonCall<ProviderState>("/api/provider");
+
+// Alterna en un clic el motor activo local↔API (solo si ambos están configurados).
+export const providerToggle = () =>
+  jsonCall<{ ok?: boolean; kind?: string; model?: string; has_key?: boolean; error?: string }>(
+    "/api/provider/toggle",
+    { method: "POST" },
+  );
 
 export const governanceSetup = (posture: string) =>
   jsonCall<{ ok: boolean }>("/api/governance/setup", {
@@ -642,6 +684,39 @@ export async function mindStream(
 
 export const innerState = () => jsonCall<InnerStateInfo>("/api/inner");
 export const consciousness = () => jsonCall<ConsciousnessInfo>("/api/consciousness");
+
+// Existencia: dimensiones de autonomía/presencia/curiosidad (datos reales).
+export type ExistenceInfo = {
+  debts_open: number;
+  seconds_since_user: number | null;
+  curiosity: { goals: number; learning: number; top: string };
+  journal: {
+    entries: number;
+    last: { at: number; text: string; dominant: string } | null;
+  };
+  capabilities: { tool_families: number; skills: number };
+  host: {
+    battery_pct: number | null;
+    power: string | null;
+    thermal: string | null;
+    uptime: string | null;
+    ram_gb: number;
+    cpu_cores: number;
+    gpu: string;
+  };
+};
+export const existence = () => jsonCall<ExistenceInfo>("/api/existence");
+
+// Diario de existencia: las jornadas que AION cierra por su cuenta, en primera persona.
+export type JournalEntry = {
+  id: string;
+  at: number;
+  text: string;
+  dominant: string;
+  debts_resolved: number;
+};
+export const journal = () =>
+  jsonCall<{ count: number; entries: JournalEntry[] }>("/api/journal");
 
 export type SensorConfig = {
   enabled: boolean;
