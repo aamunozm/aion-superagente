@@ -85,19 +85,21 @@ pub fn compact_for_bridge(content: &str) -> String {
     content.to_string()
 }
 
-/// Motor LOCAL (Ollama/Gemma) forzado — la traducción debe ser GRATIS aunque el motor
-/// activo del usuario sea una API externa de pago.
-fn local_engine() -> Arc<dyn LlmEngine> {
-    let cfg = crate::provider::load();
-    let model = if cfg.local_model.is_empty() {
-        "gemma4-reason".to_string()
-    } else {
-        cfg.local_model
-    };
-    Arc::new(aion_llm::OllamaEngine::new(
+/// Motor LOCAL para traducir. Usa el MODELO que el usuario tenga configurado como local
+/// (`provider.local_model`) — un componente INTERCAMBIABLE, nunca uno fijo: cambia el
+/// modelo (más potente o más ligero según el equipo) y la traducción lo sigue. Siempre
+/// local (gratis) aunque el motor de chat sea una API externa de pago. Si no hay modelo
+/// local configurado, devuelve `None` → la compactación se salta (fail-open a español):
+/// el modelo NO es una pieza obligatoria de AION.
+fn local_engine() -> Option<Arc<dyn LlmEngine>> {
+    let model = crate::provider::load().local_model.trim().to_string();
+    if model.is_empty() {
+        return None;
+    }
+    Some(Arc::new(aion_llm::OllamaEngine::new(
         aion_llm::OllamaEngine::base_url_from_env(),
         &model,
-    ))
+    )))
 }
 
 /// Traduce+compacta el contenido a inglés con Gemma local y lo cachea. Idempotente:
@@ -120,7 +122,8 @@ pub async fn ensure_english(content: &str) -> Option<String> {
     if body.chars().count() < 20 {
         return None;
     }
-    let engine = local_engine();
+    // Sin modelo local configurado → no traducimos (el modelo no es obligatorio).
+    let engine = local_engine()?;
     let req = GenerateRequest {
         messages: vec![Message::user(format!(
             "Translate the following Spanish note into clear, faithful English. \
