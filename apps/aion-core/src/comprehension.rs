@@ -210,12 +210,24 @@ pub async fn comprehend(prompt: &str, grounding: &str) -> Option<Comprension> {
         ],
         think: false,
         temperature: Some(0.0),
-        max_tokens: Some(320),
+        // El JSON de salida es pequeño (intención + pocos hechos); 200 sobra y acorta el
+        // único camino que aún bloquea la respuesta (turnos-pregunta).
+        max_tokens: Some(200),
     };
 
     // SIEMPRE local: privado y barato, aunque el chat principal sea cloud.
     let engine = aion_llm::OllamaEngine::default_local();
-    let out = engine.generate(req).await.ok()?;
+    // TIMEOUT DURO: la comprensión usa el mismo 12B que el chat. Bajo presión de RAM el
+    // modelo se evacúa entre turnos y una carga en frío puede costar ~13s. En el camino de
+    // PREGUNTA esto bloquea la respuesta, así que si tarda demasiado preferimos seguir SIN
+    // comprensión (fail-open a None) antes que dejar a AION pegado. El chat principal ya
+    // recargará el modelo igual; aquí no esperamos por él.
+    let out =
+        match tokio::time::timeout(std::time::Duration::from_secs(8), engine.generate(req)).await {
+            Ok(Ok(out)) => out,
+            // Error del motor o timeout: degradamos a None sin colgar la respuesta.
+            Ok(Err(_)) | Err(_) => return None,
+        };
     parse(&out.content)
 }
 

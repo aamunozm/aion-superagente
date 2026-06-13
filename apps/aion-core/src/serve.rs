@@ -728,6 +728,70 @@ fn app_data_dir_control() -> std::path::PathBuf {
 }
 
 /// Chat con streaming SSE. Cada evento lleva JSON `{kind, text}` o `{kind:"done",...}`.
+/// Heurística barata (sin LLM): ¿el mensaje parece una PREGUNTA que podría necesitar un
+/// dato? Solo entonces vale la pena BLOQUEAR la respuesta en la comprensión (ahí la
+/// anti-alucinación importa). Conservadora: signo de interrogación, o arranca con una
+/// palabra interrogativa / petición de dato. Un "te cuento que…" NO la dispara, así que
+/// compartir algo deja de pagar una inferencia extra antes de responder.
+fn looks_like_question(prompt: &str) -> bool {
+    let p = prompt.trim().to_lowercase();
+    if p.contains('?') || p.contains('¿') {
+        return true;
+    }
+    const STARTS: &[&str] = &[
+        "qué",
+        "que ",
+        "cuál",
+        "cual",
+        "cuándo",
+        "cuando",
+        "dónde",
+        "donde",
+        "quién",
+        "quien",
+        "cómo",
+        "como",
+        "cuánt",
+        "cuant",
+        "por qué",
+        "por que",
+        "sabes",
+        "recuerdas",
+        "dime",
+        "cuéntame",
+        "cuentame",
+        "explícame",
+        "explicame",
+        "necesito saber",
+        "me puedes decir",
+        "puedes decirme",
+    ];
+    STARTS.iter().any(|w| p.starts_with(w))
+}
+
+/// Efectos de la comprensión: deja huella en la corriente (GWT, etiqueta genérica — el
+/// contenido NUNCA se persiste ahí) y, si Ariel COMPARTIÓ/corrigió hechos, los memoriza
+/// como hechos atómicos (en background). Compartido por el camino que bloquea (preguntas)
+/// y el que corre en segundo plano (te cuento/charla) — sin duplicar lógica.
+fn comprehension_side_effects(c: &crate::comprehension::Comprension) {
+    crate::workspace::publish(crate::workspace::StreamEvent::now(
+        "chat",
+        "comprension",
+        c.intent.gwt_label(),
+    ));
+    if c.should_store_facts() {
+        let tag = c.fact_tag().to_string();
+        let facts = c.facts.clone();
+        tokio::spawn(async move {
+            if let Ok(mem) = crate::shared_memory() {
+                for f in facts {
+                    let _ = mem.store(&format!("{tag} {f}")).await;
+                }
+            }
+        });
+    }
+}
+
 async fn chat(
     State(st): State<AppState>,
     Json(body): Json<ChatBody>,
@@ -755,11 +819,24 @@ async fn chat(
         relevant_knowledge(&body.prompt),
         library_grounding(&body.prompt),
     );
-    // COMPRENSIÓN: razona QUÉ te está diciendo Ariel (intención + hechos a recordar) ANTES
-    // de responder, para que la honestidad sea conclusión y no reflejo, y para que lo que
-    // COMPARTES se memorice en vez de rechazarse. Local, corto; necesita el grounding ya
-    // recuperado, por eso va aquí.
-    let comp = crate::comprehension::comprehend(&body.prompt, &grounding).await;
+    // COMPRENSIÓN: razona QUÉ te está diciendo Ariel (intención + hechos a recordar). Es
+    // una inferencia LLM extra (~varios segundos), así que NO siempre bloquea la respuesta:
+    // solo cuando el turno parece una PREGUNTA, donde la anti-alucinación importa (dilo con
+    // franqueza / ofrece buscar). Cuando Ariel solo "te cuenta algo", la corrige o charla,
+    // la comprensión corre en SEGUNDO PLANO —sigue memorizando los hechos— y la respuesta
+    // arranca de inmediato en vez de esperar una inferencia que no cambia el tono.
+    let comp = if looks_like_question(&body.prompt) {
+        crate::comprehension::comprehend(&body.prompt, &grounding).await
+    } else {
+        let p = body.prompt.clone();
+        let g = grounding.clone();
+        tokio::spawn(async move {
+            if let Some(c) = crate::comprehension::comprehend(&p, &g).await {
+                comprehension_side_effects(&c);
+            }
+        });
+        None
+    };
     // PROMPT DINÁMICO: elige el modo (persona) según lo que el usuario necesita.
     let mode = crate::prompts::route(&*engine, &body.prompt).await;
     // EMPATÍA: adapta el tono al estado del usuario (frustración, prisa, confusión…).
@@ -826,27 +903,11 @@ async fn chat(
         comp_block,
     );
 
-    // ACTO CONSCIENTE + MEMORIA DE HECHOS: la comprensión deja huella en la corriente
-    // de conciencia (GWT, etiqueta genérica — el contenido NUNCA se persiste ahí) y, si
-    // Ariel COMPARTIÓ información, la memoriza como hechos atómicos. En background: no
-    // retrasa la respuesta. Esto es lo que arregla el "te rechazo en vez de recordarte".
+    // ACTO CONSCIENTE + MEMORIA DE HECHOS: si comprendimos EN LÍNEA (turno-pregunta), los
+    // efectos (huella GWT + memorizar hechos) se aplican aquí. Para el camino en background
+    // (te cuento/charla) ya los aplica el `tokio::spawn` de arriba — no se duplica.
     if let Some(c) = comp.clone() {
-        crate::workspace::publish(crate::workspace::StreamEvent::now(
-            "chat",
-            "comprension",
-            c.intent.gwt_label(),
-        ));
-        if c.should_store_facts() {
-            let tag = c.fact_tag().to_string();
-            let facts = c.facts.clone();
-            tokio::spawn(async move {
-                if let Ok(mem) = crate::shared_memory() {
-                    for f in facts {
-                        let _ = mem.store(&format!("{tag} {f}")).await;
-                    }
-                }
-            });
-        }
+        comprehension_side_effects(&c);
     }
 
     // CONTEXTO INFINITO (compresión activa): añade el turno al hilo. La compresión NO se
@@ -1239,7 +1300,41 @@ async fn agent(
             .with_verify(true)
             .with_confirm(confirm)
             .with_ask(ask);
-        let result = agent.run(&body.task).await;
+        // SALVAVIDAS DE PARED: una herramienta colgada (navegador/red sin timeout) o un bucle
+        // que no converge NO debe dejar la UI en "trabajando…" para siempre. Si la tarea no
+        // termina a tiempo, devolvemos una respuesta honesta, la dejamos como DEUDA (la vida
+        // autónoma la retoma con calma) y CERRAMOS el stream con `done`.
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            agent.run(&body.task),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => {
+                fwd.abort();
+                crate::awareness::record_outcome(false);
+                crate::inner_state::record_result(false, 0);
+                crate::pending::push(
+                    &body.task,
+                    "se agotó el tiempo (herramienta o bucle colgado)",
+                );
+                let _ = tx
+                    .send(Event::default().data(
+                        serde_json::json!({
+                            "kind": "answer",
+                            "text": "Perdona, me quedé atascado intentando resolver eso y se me agotó el tiempo. Lo retomo por mi cuenta y vuelvo con la respuesta.",
+                            "steps": 0
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+                let _ = tx
+                    .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                    .await;
+                return;
+            }
+        };
         fwd.abort();
 
         let final_event = match result {
@@ -2572,6 +2667,37 @@ fn agent_is_conversational(task: &str) -> bool {
         "quien soy",
     ];
     if CONV.iter().any(|k| t.contains(k)) {
+        return true;
+    }
+    // CHARLA NARRATIVA: Ariel COMPARTE algo de su día/vida ("te cuento que…", un relato en
+    // primera persona y pasado). Puede ser LARGO, pero NO pide herramientas (ya filtramos
+    // TOOLISH arriba, que tiene prioridad). Sin esto, un mensaje cálido y largo —contar que
+    // sacó al perro y lo picaron los zancudos— caía al bucle ReAct, gastaba 8 vueltas
+    // buscando herramientas inexistentes y se quedaba en "trabajando…" sin responder nunca.
+    const SHARING: [&str; 21] = [
+        "te cuento",
+        "te comento",
+        "te quería contar",
+        "te queria contar",
+        "quería contarte",
+        "queria contarte",
+        "te quiero contar",
+        "resulta que",
+        "fíjate que",
+        "fijate que",
+        "adivina qué",
+        "adivina que",
+        "me pasó",
+        "fui ",
+        "fuimos ",
+        "salí ",
+        "sali ",
+        "estuve ",
+        "estuvimos ",
+        "me picaron",
+        "me siento",
+    ];
+    if SHARING.iter().any(|k| t.contains(k)) {
         return true;
     }
     // Mensaje corto sin intención de herramienta → trátalo como charla (rápido).
