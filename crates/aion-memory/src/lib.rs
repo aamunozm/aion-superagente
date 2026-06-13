@@ -11,6 +11,7 @@
 pub mod compressor;
 mod embedder;
 pub mod multilingual;
+pub mod tfidf_compressor;
 mod vector;
 
 pub use embedder::OllamaEmbedder;
