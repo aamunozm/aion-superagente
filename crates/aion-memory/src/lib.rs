@@ -9,11 +9,9 @@
 //!   consolidación tipo "sueño".
 
 mod embedder;
-pub mod multilingual;
 mod vector;
 
 pub use embedder::OllamaEmbedder;
-pub use multilingual::Language;
 pub use vector::{
     is_unknown_time, ConsolidationConfig, ConsolidationReport, MemoryRecord, VectorMemory,
 };

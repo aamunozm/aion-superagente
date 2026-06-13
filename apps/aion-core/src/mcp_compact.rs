@@ -108,11 +108,12 @@ pub async fn ensure_english(content: &str) -> Option<String> {
         return Some(en);
     }
     let trimmed = content.trim();
-    // Saltar lo trivial y lo que ya está en inglés (traducirlo no ahorra nada).
+    // Saltar lo trivial y lo que NO tiene señal de español (ya está en inglés/código →
+    // traducirlo no ahorra nada). Gate sesgado a traducir: ver `has_spanish_signal`.
     if trimmed.chars().count() < 40 {
         return None;
     }
-    if crate::language_detector::detect_language(trimmed) == aion_memory::Language::English {
+    if !crate::language_detector::has_spanish_signal(trimmed) {
         return None;
     }
     let (tag, body) = split_tag(trimmed);

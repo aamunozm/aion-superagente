@@ -219,10 +219,16 @@ pub async fn build_brief() -> String {
             if shown.iter().any(|s| near_duplicate(s, &c)) {
                 continue;
             }
+            // El brief es coste GARANTIZADO por sesión y lo consume SOLO Claude Code
+            // (tokens de pago) → se muestra la versión inglesa cacheada (~40% menos
+            // tokens) cuando existe; en miss se muestra español y se calienta para la
+            // próxima. La de-duplicación sigue sobre el español (`c`), para que el filtro
+            // no varíe según esté o no traducido el recuerdo.
+            let display = crate::mcp_compact::compact_for_bridge(&c);
             if aion_memory::is_unknown_time(ts) {
-                lines.push_str(&format!("- {c}\n"));
+                lines.push_str(&format!("- {display}\n"));
             } else {
-                lines.push_str(&format!("- [{}] {}\n", ts.format("%Y-%m-%d"), c));
+                lines.push_str(&format!("- [{}] {}\n", ts.format("%Y-%m-%d"), display));
             }
             shown.push(c);
             if shown.len() >= 8 {

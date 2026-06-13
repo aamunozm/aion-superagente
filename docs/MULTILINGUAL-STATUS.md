@@ -43,8 +43,18 @@ compresores. Lo que sobrevive: el enum `Language` y el detector heurístico.
    cerrado o la traducción falla, simplemente se sirve español. Nunca bloquea ni corrompe.
 4. Preserva la etiqueta de procedencia (`[hecho]`, `[aprendizaje]`…) sin traducirla.
 
-**Conectado**: `aion_memory_search` (el coste repetido por consulta). El `aion_brief`
-(~450 tok, una vez por sesión) queda como siguiente incremento.
+**Conectado**: `aion_memory_search` (coste repetido por consulta) y `aion_brief`
+(~450 tok, coste GARANTIZADO una vez por sesión). Ambos son los únicos consumidores de
+memoria del puente; `aion_library_search` queda como siguiente incremento.
+
+### Cuándo se materializa el ahorro (honesto)
+
+El patrón es *lazy-warm*: en la PRIMERA aparición de un recuerdo hay *cache miss* → se
+sirve español y se traduce en background. El ahorro real llega cuando ese recuerdo se
+vuelve a servir (misma sesión si se repite, o la siguiente). Por eso se conectó el
+`brief`: es lo que se pide en CADA sesión, así que tras la 1ª se sirve ya en inglés.
+Un *warmer* idle acotado (pre-traducir los recuerdos recientes al arrancar) haría que
+incluso la 1ª sesión ahorre — pendiente, con cuidado de no competir con Gemma del chat.
 
 ---
 
@@ -52,14 +62,25 @@ compresores. Lo que sobrevive: el enum `Language` y el detector heurístico.
 
 | Archivo | Qué hace | Estado |
 |---|---|---|
-| `crates/aion-memory/src/multilingual.rs` | Solo el enum `Language` | ✅ |
-| `apps/aion-core/src/language_detector.rs` | Detección heurística ES/IT/EN (sin LLM) | ✅ 6 tests |
-| `apps/aion-core/src/mcp_compact.rs` | Traducción Gemma + caché + fail-open | ✅ 4 tests |
+| `apps/aion-core/src/language_detector.rs` | `has_spanish_signal()`: gate barato y robusto | ✅ 2 tests sobre datos reales |
+| `apps/aion-core/src/mcp_compact.rs` | Traducción Gemma + caché SHA-256 + fail-open | ✅ 4 tests |
 | `apps/aion-core/src/claude_mcp.rs` | `aion_memory_search` usa `compact_for_bridge()` | ✅ |
+| `apps/aion-core/src/claude_code.rs` | `build_brief` compacta sus líneas de memoria | ✅ |
 | `apps/aion-core/src/serve.rs` | Ruta Gemma revertida a español íntegro | ✅ |
 
-Compresores borrados: `compressor.rs`, `tfidf_compressor.rs`. Código muerto eliminado:
-`MultilingualMemory`, `shared_multilingual_memory`, `index_document`.
+Borrado: `compressor.rs`, `tfidf_compressor.rs`, `multilingual.rs` (enum `Language`),
+`detect_language` (detector frágil), `MultilingualMemory`, `shared_multilingual_memory`,
+`index_document`.
+
+### Bug encontrado y corregido en la 2ª verificación
+
+`detect_language` usaba un umbral de densidad (`spanish_norm > 0.05`) que clasificaba
+como **inglés** al español **técnico** (pocos acentos, muchos anglicismos) — justo los
+recuerdos que Claude Code recupera. Test reproductor: el recuerdo real de auth/CORS
+(`[hecho] El pendiente crítico … autenticación … CORS … puerto 8765 …`) salía `English`
+→ **se saltaba la traducción**. Se reemplazó por `has_spanish_signal()`, sesgado a
+traducir (basta acento/ñ, ¿¡, o dos palabras función), validado sobre 5 recuerdos
+técnicos reales (todos → traducir) y 3 notas inglesas (todas → saltar).
 
 ---
 
