@@ -84,30 +84,56 @@ técnicos reales (todos → traducir) y 3 notas inglesas (todas → saltar).
 
 ---
 
-## Verificación
+## Verificación (E2E REALIZADA 2026-06-14)
 
 ```bash
 # Unit tests (sin Ollama)
-cargo test -p aion-core mcp_compact language_detector
+cargo test -p aion-core mcp_compact spanish_signal
 cargo test -p aion-memory
 
-# End-to-end con Gemma local (requiere Ollama arriba) — mide ahorro real ES→EN
+# Traducción aislada con Gemma local — mide fidelidad y ahorro ES→EN
 python3 scripts/verify_mcp_compact.py
 ```
 
-**Medición previa (tiktoken, traducción fiel manual)**: 244 tok ES → 138 tok EN = **43%**.
-Pendiente: confirmar con Gemma real vía `verify_mcp_compact.py` (Ollama estaba cerrado
-al implementar).
+**Verificado de punta a punta** levantando el binario nuevo en un puerto alterno y
+llamando al `/mcp aion_memory_search` real:
+
+1. **El pipeline funciona**: 1ª llamada (caché fría) → español servido (*fail-open*,
+   nunca rompe) + traducción disparada en background; 2ª llamada → **inglés**. La caché
+   `mcp_compact_en.json` se pobló con 11 traducciones reales de Gemma.
+2. **Fidelidad excelente**: puerto 8765, fechas y nombres intactos; los tags de
+   procedencia (`[reflexión]`, `[proyecto: aion]`) se preservan sin traducir.
+3. **Bug `think:false`**: `gemma4-reason` es un modelo de RAZONAMIENTO; sin ese flag
+   gasta todo el presupuesto "pensando" y devuelve vacío. El código Rust YA lo envía
+   (`ollama.rs:111` → `mcp_compact` pone `think:false`); el fallo era solo del script.
+
+### Números REALES medidos (tiktoken cl100k)
+
+| Medición | Ahorro |
+|---|---|
+| Traducción aislada, prosa española limpia (3 recuerdos) | **28%** (137→99 tok) |
+| **Payload MCP real** de este usuario (11 recuerdos, query "Rust núcleo") | **12%** (1048→922 tok) |
+
+El 28% aislado **no** se traslada al 12% real porque la memoria ACTUAL de este usuario
+está dominada por notas técnicas **cargadas de inglés** (ADR-0004, MultilingualMemory,
+BGE-M3, hashes de commit, código): traducirlas ahorra poco. **El ahorro escala con la
+densidad de prosa española**; una memoria más personal/de negocio se acercaría al 28%.
 
 ---
 
 ## Economía honesta
 
-~43% sobre la memoria que entra por MCP. Por sesión: si llamo `aion_memory_search` unas
-pocas veces (~600 tok/llamada de memoria), el ahorro son cientos de tokens/sesión —
-modesto en €, pero **se acumula en cada sesión, gratis tras calentar la caché**, y no
-añade latencia (precomputado) ni riesgo (fail-open a español). Es la optimización
-correcta y de bajo riesgo para este puente.
+**~12% sobre el payload MCP real de hoy** (no el 28% aislado ni el 43% que estimé al
+principio). Para la memoria actual —muy técnica y anglosajona— el ahorro es modesto:
+~126 tok menos en una respuesta de `aion_memory_search` de ~1048. Se acumula en cada
+sesión y es gratis tras calentar la caché, sin latencia (precomputado) ni riesgo
+(fail-open a español). Crecerá si la memoria se vuelve más española.
+
+**Veredicto sincero**: la optimización es correcta, segura y está verificada, pero su
+impacto económico es pequeño para este perfil de memoria. Vale por ser local-first y de
+riesgo cero; no esperes una factura notablemente menor. Si el objetivo fuera un ahorro
+grande, el lever no es traducir sino **recuperar menos y mejor** (subir el umbral de
+score del puente, devolver 3 hits en vez de 8) — eso sí recorta tokens de golpe.
 
 ---
 

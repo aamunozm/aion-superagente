@@ -45,6 +45,10 @@ def translate(body: str) -> str:
                 "model": MODEL,
                 "prompt": PROMPT_TMPL.format(body=body),
                 "stream": False,
+                # gemma4-reason es un modelo de RAZONAMIENTO: sin think:false gasta todo
+                # el presupuesto "pensando" y `response` vuelve vacío. mcp_compact.rs envía
+                # think:false vía OllamaEngine; aquí debemos replicarlo para medir igual.
+                "think": False,
                 "options": {"temperature": 0.1, "num_predict": 220},
             }
         ).encode(),
