@@ -199,15 +199,22 @@ pub async fn build_brief() -> String {
         me.name
     );
 
-    // Recuerdos recientes vigentes, DE-DUPLICADOS y truncados. Se piden de más (14)
-    // para poder descartar casi-duplicados (p. ej. variantes del mismo insight que aún
-    // no consolidó el sueño) y quedarnos con 8 distintos: menos tokens, cero pérdida de
-    // información real. Las fechas desconocidas (epoch 1970) se omiten en vez de mentir.
+    // Recuerdos recientes vigentes, DURABLES, DE-DUPLICADOS y truncados. Las fechas
+    // desconocidas (epoch 1970) se omiten en vez de mentir.
     if let Ok(mem) = crate::shared_memory() {
-        let recent = mem.recent_with_time(14);
+        // Se piden de más (24) para backfill tras descartar ruido (eco conversacional/deudas
+        // resueltas) y casi-duplicados, y aun así quedarnos con 8 recuerdos DURABLES y
+        // distintos: menos tokens, cero pérdida de información real.
+        let recent = mem.recent_with_time(24);
         let mut shown: Vec<String> = Vec::new();
         let mut lines = String::new();
         for (content, ts) in recent.into_iter().rev() {
+            // Fuera el eco conversacional y las deudas ya resueltas: son turnos de charla
+            // efímera cuyos HECHOS ya viven como [hecho]/[proyecto] aparte. No pagan su sitio
+            // en el brief (que es coste por sesión). El recuerdo sigue en memoria y buscable.
+            if is_brief_noise(&content) {
+                continue;
+            }
             let c: String = content.chars().take(180).collect();
             if shown.iter().any(|s| near_duplicate(s, &c)) {
                 continue;
@@ -228,8 +235,12 @@ pub async fn build_brief() -> String {
         }
     }
 
-    // Proyectos del workspace (nombre + descripción).
-    let projects = crate::projects::list();
+    // Proyectos del workspace (nombre + descripción). Fuera los de PRUEBA (TEST_*, itest):
+    // son fixtures de desarrollo, no contexto real del usuario — no deben gastar tokens aquí.
+    let projects: Vec<_> = crate::projects::list()
+        .into_iter()
+        .filter(|p| !is_test_fixture(&p.name))
+        .collect();
     if !projects.is_empty() {
         out.push_str("\n## Proyectos\n");
         for p in projects.iter().take(12) {
@@ -238,9 +249,14 @@ pub async fn build_brief() -> String {
         }
     }
 
-    // Dominios/documentos de la biblioteca de conocimiento.
+    // Dominios/documentos de la biblioteca de conocimiento. Fuera los de prueba (dominio
+    // itest / fixtures): no son la biblioteca real del usuario.
     let lib = crate::library::Library::open(crate::knowledge_path());
-    let docs = lib.documents();
+    let docs: Vec<_> = lib
+        .documents()
+        .into_iter()
+        .filter(|(domain, source, _)| !is_test_fixture(domain) && !is_test_fixture(source))
+        .collect();
     if !docs.is_empty() {
         out.push_str("\n## Biblioteca\n");
         for (domain, source, chunks) in docs.iter().take(15) {
@@ -265,6 +281,25 @@ pub async fn build_brief() -> String {
     }
     *cache.lock().unwrap() = Some((Instant::now(), out.clone()));
     out
+}
+
+/// ¿Es este recuerdo RUIDO EFÍMERO para el brief? El eco conversacional ("[conversación]
+/// yo: … · AION: …") y las deudas ya resueltas ("[resuelto] …") son turnos de charla cuyos
+/// hechos durables ya viven aparte como `[hecho]`/`[proyecto:]`. Mostrarlos en el brief
+/// gasta tokens cada sesión sin añadir contexto. Solo afecta a la PRESENTACIÓN del brief:
+/// el recuerdo permanece en memoria y sigue siendo recuperable por `aion_memory_search`.
+fn is_brief_noise(content: &str) -> bool {
+    let c = content.trim_start().to_lowercase();
+    c.starts_with("[conversación]")
+        || c.starts_with("[conversacion]")
+        || c.starts_with("[resuelto]")
+}
+
+/// ¿Es un nombre de PRUEBA/fixture de desarrollo (proyecto o dominio de biblioteca)?
+/// `TEST_*`, `itest` — ruido de desarrollo que no es contexto real del usuario.
+fn is_test_fixture(name: &str) -> bool {
+    let n = name.trim().to_lowercase();
+    n.starts_with("test") || n.starts_with("itest")
 }
 
 /// ¿Son `a` y `b` casi el mismo texto? Jaccard de palabras significativas (>3 chars)
