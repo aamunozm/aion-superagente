@@ -30,13 +30,18 @@ pub const HONEST_REFUSAL: &str =
      que la obtenga. Prefiero decírtelo claro antes que inventar.";
 
 /// Resultado de una ejecución del agente.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AgentRun {
     pub answer: String,
     pub steps: usize,
     /// Acciones que fallaron o se cancelaron durante la tarea (para que la capa
     /// superior reflexione y APRENDA de ellas, persistiéndolas en memoria).
     pub failures: Vec<String>,
+    /// El turno resultó ser CHARLA, no una tarea con herramientas: el modelo no
+    /// pidió ninguna acción ni pudo (ni necesitaba) fundamentar una respuesta en el
+    /// primer paso. La capa HTTP debe responder cálidamente (vía conversacional) en
+    /// vez de soltar la negativa honesta fría. `answer` viene vacío en este caso.
+    pub conversational: bool,
 }
 
 /// Agente ReAct configurable.
@@ -269,10 +274,22 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                 // teatro, sin inventar). Contiene «no puedo»/«no tengo» a propósito —
                 // es la verdad y además es verificable.
                 if answer.trim().is_empty() || echoes_template(&answer) {
+                    // CHARLA MAL ENRUTADA: si esto pasa en el PRIMER paso sin haber usado
+                    // ninguna herramienta, el turno no era una tarea — era conversación que
+                    // el bucle ReAct no sabe expresar. En vez de la negativa fría, lo
+                    // señalamos para que la capa HTTP responda cálidamente (vía charla).
+                    if step == 0 && scratchpad.trim().is_empty() {
+                        return Ok(AgentRun {
+                            conversational: true,
+                            steps: step + 1,
+                            ..Default::default()
+                        });
+                    }
                     return Ok(AgentRun {
                         answer: HONEST_REFUSAL.into(),
                         steps: step + 1,
                         failures: failed.values().cloned().collect(),
+                        ..Default::default()
                     });
                 }
                 // VERIFICACIÓN (anti-alucinación): un juez comprueba que la respuesta esté
@@ -291,6 +308,7 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                     answer,
                     steps: step + 1,
                     failures: failed.values().cloned().collect(),
+                    ..Default::default()
                 });
             }
 
@@ -351,6 +369,7 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                                 ),
                                 steps: step + 1,
                                 failures: failed.values().cloned().collect(),
+                                ..Default::default()
                             });
                         }
                     },
@@ -359,6 +378,7 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                             answer: format!("Para continuar necesito que me aclares: {question}"),
                             steps: step + 1,
                             failures: failed.values().cloned().collect(),
+                            ..Default::default()
                         });
                     }
                 }
@@ -376,6 +396,7 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                     answer: clean.to_string(),
                     steps: step + 1,
                     failures: failed.values().cloned().collect(),
+                    ..Default::default()
                 });
             };
 
@@ -474,6 +495,7 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                 answer: HONEST_REFUSAL.into(),
                 steps: self.max_steps,
                 failures: failed.values().cloned().collect(),
+                ..Default::default()
             });
         }
         let synth = GenerateRequest {
@@ -505,6 +527,7 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
             answer,
             steps: self.max_steps,
             failures: failed.values().cloned().collect(),
+            ..Default::default()
         })
     }
 }

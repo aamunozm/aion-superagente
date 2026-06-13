@@ -9,9 +9,14 @@
 //!   consolidación tipo "sueño".
 
 mod embedder;
+pub mod multilingual;
 mod vector;
 
 pub use embedder::OllamaEmbedder;
+pub use multilingual::{
+    CompressorService, DocumentMetadata, Language, MultilingualDocument, MultilingualMemory,
+    RetrievalResult,
+};
 pub use vector::{
     is_unknown_time, ConsolidationConfig, ConsolidationReport, MemoryRecord, VectorMemory,
 };
