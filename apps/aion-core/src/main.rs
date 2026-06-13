@@ -24,6 +24,7 @@ mod inner_state;
 mod journal;
 mod language_detector;
 mod library;
+mod local_runtime;
 mod mcp_compact;
 mod memory_tool;
 mod ollama_runtime;

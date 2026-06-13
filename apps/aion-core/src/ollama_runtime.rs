@@ -14,9 +14,27 @@
 //! arranca a tiempo, AION sigue sirviendo (lo que dependa del modelo degradará con
 //! elegancia, no se cae).
 
+use crate::local_runtime::LocalRuntime;
+use async_trait::async_trait;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// Implementación de [`LocalRuntime`] para Ollama (el runtime embebido de AION hoy).
+pub struct OllamaRuntime;
+
+#[async_trait]
+impl LocalRuntime for OllamaRuntime {
+    fn name(&self) -> &'static str {
+        "ollama"
+    }
+    async fn ensure_running(&self) -> bool {
+        ensure_running().await
+    }
+    fn shutdown(&self) {
+        shutdown()
+    }
+}
 
 /// El hijo que LANZAMOS nosotros (si lo hicimos). Solo a este lo terminamos al cerrar:
 /// un Ollama externo del usuario jamás se toca.
@@ -72,7 +90,7 @@ async fn is_up() -> bool {
 
 /// Asegura que haya un Ollama escuchando. Idempotente: reutiliza el existente; solo lanza
 /// el embebido si hace falta. Devuelve `true` si quedó disponible. Nunca paniquea.
-pub async fn ensure_running() -> bool {
+async fn ensure_running() -> bool {
     if is_up().await {
         tracing::info!("Ollama ya responde — reutilizo el servidor existente");
         return true;
@@ -118,7 +136,7 @@ pub async fn ensure_running() -> bool {
 
 /// Termina el Ollama que lanzamos NOSOTROS (si lo hicimos). No toca un Ollama externo del
 /// usuario. Se llama en el apagado limpio de AION.
-pub fn shutdown() {
+fn shutdown() {
     if let Some(mut child) = SPAWNED.lock().unwrap().take() {
         let _ = child.kill();
         let _ = child.wait();

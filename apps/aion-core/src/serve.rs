@@ -107,11 +107,11 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         convos: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
-    // AUTOCONTENCIÓN local-first: garantiza el Ollama EMBEBIDO de AION antes que nada. El
-    // chat, los embeddings (BGE-M3) y la compactación EN del puente MCP lo necesitan vivo.
-    // Idempotente (reutiliza uno existente) y fail-open (si no arranca, AION sigue sirviendo
-    // y lo dependiente degrada con elegancia). Ver crate::ollama_runtime.
-    crate::ollama_runtime::ensure_running().await;
+    // AUTOCONTENCIÓN local-first: garantiza el RUNTIME local (Ollama hoy; intercambiable
+    // tras crate::local_runtime) antes que nada. El chat, los embeddings y la compactación
+    // EN del puente MCP lo necesitan vivo. Idempotente (reutiliza uno existente) y fail-open
+    // (si no arranca, AION sigue sirviendo y lo dependiente degrada con elegancia).
+    crate::local_runtime::ensure().await;
 
     // RIGHT-SIZE del CONTEXTO según la RAM (latencia mínima en CUALQUIER equipo): un ctx
     // demasiado grande en una máquina modesta presiona la memoria y lo ralentiza todo. Se
@@ -419,7 +419,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
-    crate::ollama_runtime::shutdown();
+    crate::local_runtime::shutdown();
     Ok(())
 }
 

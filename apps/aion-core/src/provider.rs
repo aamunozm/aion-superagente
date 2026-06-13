@@ -34,6 +34,10 @@ pub struct ProviderConfig {
     /// en uno modesto, todo ligero. Vacío → las tareas de fondo usan `local_model`.
     #[serde(default)]
     pub utility_model: String,
+    /// Runtime de inferencia LOCAL: "ollama" (por defecto). Costura para futuros motores
+    /// (MLX, mistral.rs…). Vacío se trata como "ollama". Ver crate::local_runtime.
+    #[serde(default)]
+    pub runtime: String,
 }
 
 impl Default for ProviderConfig {
@@ -46,6 +50,7 @@ impl Default for ProviderConfig {
             local_model: "gemma4-reason".into(),
             ext_model: String::new(),
             utility_model: String::new(),
+            runtime: "ollama".into(),
         }
     }
 }
@@ -125,6 +130,10 @@ pub fn merge(incoming: ProviderConfig) -> ProviderConfig {
     // se conserva el previo (no se pierde al alternar local↔API).
     if out.utility_model.trim().is_empty() {
         out.utility_model = prev.utility_model.clone();
+    }
+    // Igual con el runtime local elegido.
+    if out.runtime.trim().is_empty() {
+        out.runtime = prev.runtime.clone();
     }
     out
 }
