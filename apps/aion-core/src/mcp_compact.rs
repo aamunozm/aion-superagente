@@ -67,9 +67,38 @@ fn split_tag(s: &str) -> (Option<&str>, &str) {
     (None, s)
 }
 
+/// Búsqueda en caché por clave ya calculada.
+fn cached(k: &str) -> Option<String> {
+    cache().lock().ok()?.get(k).cloned()
+}
+
 /// Versión cacheada en inglés para este contenido, si existe. Instantáneo, fail-open.
 pub fn english_for(content: &str) -> Option<String> {
-    cache().lock().ok()?.get(&key(content)).cloned()
+    cached(&key(content))
+}
+
+/// Límite de traducciones de FONDO simultáneas. Una a la vez: una tarea de fondo no debe
+/// competir con el chat del usuario por el modelo local (que es el mismo proceso Ollama).
+fn translate_gate() -> &'static tokio::sync::Semaphore {
+    static SEM: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| tokio::sync::Semaphore::new(1))
+}
+
+/// Claves cuya traducción está EN CURSO — evita disparar dos veces la misma (p. ej. si el
+/// mismo recuerdo se recupera en dos búsquedas casi simultáneas).
+fn inflight() -> &'static Mutex<std::collections::HashSet<String>> {
+    static IN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    IN.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// RAII: quita la clave del conjunto "en vuelo" pase lo que pase (incluido early-return).
+struct InflightGuard(String);
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        if let Ok(mut s) = inflight().lock() {
+            s.remove(&self.0);
+        }
+    }
 }
 
 /// Sirve la versión óptima para el puente MCP: inglés si está cacheado; si no, devuelve
@@ -106,7 +135,7 @@ fn local_engine() -> Option<Arc<dyn LlmEngine>> {
 /// si ya está, no rehace. Devuelve la versión inglesa (o `None` si se salta/falla).
 pub async fn ensure_english(content: &str) -> Option<String> {
     let k = key(content);
-    if let Some(en) = cache().lock().ok().and_then(|c| c.get(&k).cloned()) {
+    if let Some(en) = cached(&k) {
         return Some(en);
     }
     let trimmed = content.trim();
@@ -122,6 +151,26 @@ pub async fn ensure_english(content: &str) -> Option<String> {
     if body.chars().count() < 20 {
         return None;
     }
+
+    // DEDUP EN VUELO: si ya hay una traducción de este contenido en curso, no dispares otra.
+    if !inflight()
+        .lock()
+        .map(|mut s| s.insert(k.clone()))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let _guard = InflightGuard(k.clone());
+
+    // LÍMITE DE CONCURRENCIA: como mucho una traducción de fondo a la vez → no compite con
+    // el chat del usuario por el modelo local. El resto espera su turno aquí.
+    let _permit = translate_gate().acquire().await.ok()?;
+
+    // Otra traducción pudo cachear esto mientras esperábamos el turno: no lo rehagas.
+    if let Some(en) = cached(&k) {
+        return Some(en);
+    }
+
     // Sin modelo local configurado → no traducimos (el modelo no es obligatorio).
     let engine = local_engine()?;
     let req = GenerateRequest {
@@ -144,21 +193,32 @@ pub async fn ensure_english(content: &str) -> Option<String> {
         Some(t) => format!("{t} {en}"),
         None => en,
     };
-    if let Ok(mut c) = cache().lock() {
-        c.insert(k, full.clone());
-        let n = c.len();
-        persist(&c);
-        tracing::debug!(
-            cached = n,
-            "mcp_compact: recuerdo traducido a inglés y cacheado"
-        );
-    }
+    store(&k, &full);
     Some(full)
 }
 
-/// Persiste la caché de forma atómica (tmp + rename) — un crash nunca deja JSON a medias.
-fn persist(map: &HashMap<String, String>) {
-    if let Ok(json) = serde_json::to_string(map) {
+/// Caché máxima de traducciones. Generosa: la memoria del usuario crece despacio. Al
+/// superarla se descarta una entrada arbitraria (evita crecimiento ilimitado del archivo).
+const MAX_ENTRIES: usize = 10_000;
+
+/// Inserta en caché (acotada) y persiste de forma atómica. La serialización ocurre bajo un
+/// lock BREVE; la escritura a disco va FUERA del lock para no bloquear a los lectores.
+fn store(k: &str, value: &str) {
+    let json = {
+        let Ok(mut c) = cache().lock() else { return };
+        c.insert(k.to_string(), value.to_string());
+        if c.len() > MAX_ENTRIES {
+            if let Some(victim) = c.keys().next().cloned() {
+                c.remove(&victim);
+            }
+        }
+        tracing::debug!(
+            cached = c.len(),
+            "mcp_compact: recuerdo traducido a inglés y cacheado"
+        );
+        serde_json::to_string(&*c).ok()
+    }; // lock liberado aquí
+    if let Some(json) = json {
         crate::write_atomic(&cache_path(), &json);
     }
 }

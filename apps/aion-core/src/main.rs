@@ -2454,7 +2454,14 @@ fn run_models_ensure() {
     use std::process::Command;
     use std::time::Duration;
 
-    let bin = std::env::var("AION_OLLAMA_BIN").unwrap_or_else(|_| "ollama".to_string());
+    // Binario de Ollama: override explícito → binario EMBEBIDO de AION → "ollama" del PATH.
+    // Resolver el embebido evita depender del `ollama` del PATH (que puede ser un symlink
+    // roto a una app del cask desinstalada) — coherente con la autocontención local-first.
+    let bin = std::env::var("AION_OLLAMA_BIN").unwrap_or_else(|_| {
+        ollama_runtime::embedded_binary()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "ollama".to_string())
+    });
     let modelfile = std::env::var("AION_MODELFILE").unwrap_or_default();
     const CHAT: &str = "gemma4-reason";
     // BGE-M3: embeddings multilingües reales (español). Sustituye a nomic-embed-text.

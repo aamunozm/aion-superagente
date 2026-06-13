@@ -47,7 +47,7 @@ fn host() -> String {
 
 /// Resuelve la ruta del binario Ollama embebido. Orden: override explícito → relativo al
 /// ejecutable (bundle .app y dev) → ruta conocida de la app instalada.
-fn embedded_binary() -> Option<std::path::PathBuf> {
+pub(crate) fn embedded_binary() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("AION_OLLAMA_BIN") {
         let pb = std::path::PathBuf::from(p);
         if pb.exists() {

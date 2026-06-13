@@ -108,10 +108,13 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // AUTOCONTENCIÓN local-first: garantiza el RUNTIME local (Ollama hoy; intercambiable
-    // tras crate::local_runtime) antes que nada. El chat, los embeddings y la compactación
-    // EN del puente MCP lo necesitan vivo. Idempotente (reutiliza uno existente) y fail-open
-    // (si no arranca, AION sigue sirviendo y lo dependiente degrada con elegancia).
-    crate::local_runtime::ensure().await;
+    // tras crate::local_runtime). El chat, los embeddings y la compactación EN del puente lo
+    // necesitan vivo. EN BACKGROUND a propósito: el bind HTTP no debe esperar al arranque de
+    // Ollama (normalmente ya está; si no, ~0.5 s, pero el peor caso es ~30 s y no debe
+    // retrasar la disponibilidad de AION). Idempotente (reutiliza uno existente) y fail-open.
+    tokio::spawn(async {
+        crate::local_runtime::ensure().await;
+    });
 
     // RIGHT-SIZE del CONTEXTO según la RAM (latencia mínima en CUALQUIER equipo): un ctx
     // demasiado grande en una máquina modesta presiona la memoria y lo ralentiza todo. Se
