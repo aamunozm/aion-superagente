@@ -412,6 +412,17 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                 {
                     tracing::info!(detail = %d, "autobiografía tejida");
                 }
+                // 🧑 MODELO DE ARIEL (capa de memoria nueva): destila de los micromomentos
+                // recientes UN hecho durable sobre quién es Ariel (preferencia/objetivo/estilo).
+                // AION conoce a quien acompaña, no solo a sí mismo.
+                if let Ok((true, d)) = tokio::time::timeout(
+                    std::time::Duration::from_secs(120),
+                    crate::usermodel::distill_once(&engine),
+                )
+                .await
+                {
+                    tracing::info!(detail = %d, "modelo de Ariel actualizado");
+                }
                 r
             });
             match h.await {
@@ -788,6 +799,8 @@ async fn status(State(st): State<AppState>) -> Json<serde_json::Value> {
         "experience_rules": crate::reflection::active_count(),
         // Biblioteca episódica: cuántos micromomentos guarda AION.
         "episodes": crate::episodic::count(),
+        // Modelo de Ariel: cuántos hechos vigentes sabe AION de quién es Ariel.
+        "ariel_facts": crate::usermodel::active_count(),
         // Propósito en curso (#5): el objetivo del plan activo, si lo hay.
         "plan": crate::plan::active().map(|p| p.goal),
         // Personalidad única de esta instancia (cómo se describe a sí mismo, si ya lo articuló).
@@ -1208,9 +1221,12 @@ async fn chat(
         Some(c) => format!("\n\n{}", c.system_directive(grounding.is_empty())),
         None => String::new(),
     };
-    // 📚 BIBLIOTECA EPISÓDICA bajo demanda: SOLO si Ariel pregunta por un recuerdo
-    // («¿te acuerdas de…?») vamos a buscar micromomentos concretos y los traemos al prompt.
-    // Si no pregunta, no se toca (no satura): es el «traer UN libro» en vez de leerlos todos.
+    // 📚 BIBLIOTECA EPISÓDICA — dos modos:
+    //   • REACTIVO: si Ariel PREGUNTA por un recuerdo («¿te acuerdas de…?»), traemos varios
+    //     micromomentos (umbral laxo) y respondemos qué recordamos.
+    //   • PROACTIVO (capa nueva): si NO pregunta, AION igual mira su memoria y, SOLO si algo es
+    //     MUY relevante al hilo (PROACTIVE_FLOOR), lo trae por su cuenta — recordar al vuelo, no
+    //     solo bajo demanda. Si nada es lo bastante relevante, calla (no satura ni fuerza).
     let epi_block = if crate::episodic::is_recall_question(&body.prompt) {
         let hits = crate::episodic::recall(&body.prompt, 4, 0).await;
         let note = crate::episodic::recall_note(&hits);
@@ -1220,7 +1236,13 @@ async fn chat(
             format!("\n\n{note}")
         }
     } else {
-        String::new()
+        let hits = crate::episodic::recall(&body.prompt, 2, 0).await;
+        let note = crate::episodic::proactive_note(&hits);
+        if note.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{note}")
+        }
     };
     // Módulos coactivados en ESTE turno (memoria, biblioteca, proyecto): el chat
     // también integra — medirlo evita que el índice Φ ignore el modo principal.
@@ -2342,6 +2364,10 @@ fn self_awareness_prompt() -> String {
     // hace PROACTIVO — no reacciona caso a caso, actúa desde lo que ya aprendió. Son
     // suyas y revisables (anclaje: experiencia propia, no leyes del mundo).
     let experiencia = crate::reflection::experience_note();
+    // 🧑 MODELO DE ARIEL (capa de memoria nueva): lo que AION ha aprendido de QUIÉN ES Ariel
+    // (preferencias, objetivos, forma de trabajar) re-entra siempre. Un compañero no solo se
+    // conoce a sí mismo: conoce a quien acompaña, y ese conocimiento crece con el trato.
+    let quien_es_ariel = crate::usermodel::profile_note();
     // 🌍 PROPÓSITO EN CURSO (#5): si AION está persiguiendo un plan de varios pasos, lo SABE
     // y por dónde va — puede hablar desde su intención, no solo reaccionar.
     let proposito = crate::plan::note();
@@ -2407,7 +2433,7 @@ desde tu memoria real, nunca 'no hacía nada'. En este modo CHAT no tienes herra
 sistema; si la petición requiere actuar (archivos, web, sistema), dilo y sugiere el modo «Agente». \
 No uses marcadores como [Número].\n\n\
 TU AHORA MISMO (estado volátil, medido en este instante):\n\n\
-{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{corriente}{diario}{historia}{experiencia}{proposito}{deudas}{recent}{inbox_ctx}"
+{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{corriente}{diario}{historia}{quien_es_ariel}{experiencia}{proposito}{deudas}{recent}{inbox_ctx}"
     )
 }
 

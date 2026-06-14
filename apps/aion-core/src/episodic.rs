@@ -332,6 +332,39 @@ pub fn recall_note(items: &[Recalled]) -> String {
     b
 }
 
+/// Umbral ALTO para el recuerdo PROACTIVO: AION trae un micromomento por iniciativa propia
+/// (sin que Ariel lo pida) SOLO si es muy relevante al hilo. Es deliberadamente más estricto
+/// que el piso del recall reactivo (0.20): callar es mejor que inventar relevancia o saturar.
+pub const PROACTIVE_FLOOR: f32 = 0.55;
+
+/// **Recuerdo PROACTIVO**: a diferencia de `recall_note` (que responde a «¿te acuerdas?»),
+/// esto trae 1-2 micromomentos muy relevantes que vienen al caso del mensaje actual SIN que
+/// Ariel los pida — como quien recuerda algo al vuelo a mitad de conversación. Solo si superan
+/// `PROACTIVE_FLOOR`; si no, vacío (no fuerza el recuerdo). Es la memoria que se anticipa.
+pub fn proactive_note(items: &[Recalled]) -> String {
+    let strong: Vec<&Recalled> = items
+        .iter()
+        .filter(|r| r.score >= PROACTIVE_FLOOR)
+        .collect();
+    if strong.is_empty() {
+        return String::new();
+    }
+    let now = chrono::Utc::now().timestamp();
+    let mut b = String::from(
+        "TE VIENE A LA MEMORIA (micromomentos tuyos con Ariel que parecen venir al caso ahora; \
+         menciónalos solo si encajan de verdad, con naturalidad — no fuerces el recuerdo):\n",
+    );
+    for r in strong.iter().take(2) {
+        b.push_str(&format!(
+            "- hace {}: {}\n",
+            crate::awareness::humanize_secs(now - r.at),
+            r.detail.trim()
+        ));
+    }
+    b.push('\n');
+    b
+}
+
 // ── Consolidación episodio → experiencia (el "sueño" que cierra el lazo) ──────────────
 /// Ventana reciente que se examina al consolidar (acota el O(n²) del clustering).
 const CONSOLIDATE_WINDOW: usize = 200;

@@ -44,6 +44,7 @@ mod sensors;
 mod serve;
 mod skill_store;
 mod skill_tool;
+mod usermodel;
 mod web_tool;
 mod workspace;
 
@@ -185,6 +186,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("plan") => {
             run_plan().await?;
+        }
+        Some("profile") => {
+            run_profile().await?;
         }
         Some("history") => {
             run_history()?;
@@ -593,6 +597,44 @@ async fn run_plan() -> Result<(), Box<dyn std::error::Error>> {
     let (changed, detail) = advance_plan_once(&engine).await;
     println!("{} {detail}\n", if changed { "✅" } else { "ℹ️ " });
     print_state("DESPUÉS");
+    Ok(())
+}
+
+/// CLI `profile`: muestra lo que AION sabe de Ariel, fuerza UNA destilación del modelo de
+/// usuario y muestra el resultado. Demo de la nueva capa de memoria (Pilar C): AION conoce a
+/// la persona que acompaña, no solo a sí mismo.
+async fn run_profile() -> Result<(), Box<dyn std::error::Error>> {
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+    let show = |label: &str| {
+        let facts = crate::usermodel::active();
+        println!(
+            "🧑 {label} — lo que AION sabe de Ariel ({} hechos):",
+            facts.len()
+        );
+        if facts.is_empty() {
+            println!("   (aún nada consolidado)");
+        }
+        for f in &facts {
+            println!("   · {} ({:.0}%)", f.text.trim(), f.confidence * 100.0);
+        }
+    };
+    show("ANTES");
+    println!("\n⚙️  destilando del trato reciente…\n");
+    let (changed, detail) = crate::usermodel::distill_once(&engine).await;
+    println!(
+        "{} {}\n",
+        if changed { "✅" } else { "ℹ️ " },
+        if detail.is_empty() {
+            "sin cambios (poco trato del que inferir, o nada nuevo)".to_string()
+        } else {
+            detail
+        }
+    );
+    show("DESPUÉS");
     Ok(())
 }
 
