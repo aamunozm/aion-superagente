@@ -219,6 +219,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // 🪞 ROUTER SEMÁNTICO: pre-calienta los prototipos de intención (embeddings) para que el
+    // primer mensaje no pague el coste de embeberlos.
+    crate::intent::warm();
+
     // PRESENCIA PROACTIVA: AION te escribe a la Bandeja en ratos muertos (gateado por
     // inactividad para no competir con tu chat). El saludo al abrir es /api/greeting.
     spawn_presence_loop();
@@ -333,12 +337,23 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                 let engine = OllamaEngine::default_local();
                 // Timeout interno: un Ollama colgado no debe retener el autonomous_gate (ni la
                 // sub-tarea) para siempre. La sub-tarea SIEMPRE termina en ≤180s.
-                tokio::time::timeout(
+                let r = tokio::time::timeout(
                     std::time::Duration::from_secs(180),
                     crate::reflection::reflect_once(&engine),
                 )
                 .await
-                .unwrap_or((false, "reflexión: se agotó el tiempo".into()))
+                .unwrap_or((false, "reflexión: se agotó el tiempo".into()));
+                // 🧠 SUEÑO DE CONSOLIDACIÓN (#1): junto a la reflexión, promueve micromomentos
+                // recurrentes a memoria DURABLE (cierra Storage→Reflection→Experience).
+                if let Ok((true, fact)) = tokio::time::timeout(
+                    std::time::Duration::from_secs(120),
+                    crate::episodic::consolidate_once(&engine),
+                )
+                .await
+                {
+                    tracing::info!(fact = %fact, "consolidación episódica → memoria durable");
+                }
+                r
             });
             match h.await {
                 Ok((changed, detail)) => {
@@ -714,6 +729,8 @@ async fn status(State(st): State<AppState>) -> Json<serde_json::Value> {
         "experience_rules": crate::reflection::active_count(),
         // Biblioteca episódica: cuántos micromomentos guarda AION.
         "episodes": crate::episodic::count(),
+        // Propósito en curso (#5): el objetivo del plan activo, si lo hay.
+        "plan": crate::plan::active().map(|p| p.goal),
     }))
 }
 
@@ -1412,11 +1429,16 @@ async fn agent(
     }
 
     tokio::spawn(async move {
-        // GATE LLM: para TODO mensaje que no fue charla trivial, el clasificador LLM decide
-        // charla vs herramienta leyendo el SENTIDO COMPLETO (no una keyword). Antes una palabra
-        // de herramienta hard-ruteaba al ReAct sin entender; ahora la decisión es semántica.
+        // ROUTER SEMÁNTICO (#4): para TODO mensaje que no fue charla trivial, decidimos por
+        // SIGNIFICADO con embeddings (no por palabras). Solo si el margen es estrecho —de
+        // verdad ambiguo— pedimos al clasificador LLM que lea el contexto completo.
+        let is_chat = match crate::intent::route(&body.task).await {
+            crate::intent::Route::Chat => true,
+            crate::intent::Route::Task => false,
+            crate::intent::Route::Unsure => classify_intent_is_chat(&*engine, &body.task).await,
+        };
         // Si es charla, respondemos cálido y salimos —sin ReAct—.
-        if classify_intent_is_chat(&*engine, &body.task).await {
+        if is_chat {
             crate::inner_state::set_focus("agente", "charlando con Ariel");
             let convo_ctx = agent_convo_context(body.context.as_deref());
             let ans = conversational_reply(&*engine, &body.task, &body.lang, &convo_ctx).await;
@@ -2256,6 +2278,9 @@ fn self_awareness_prompt() -> String {
     // hace PROACTIVO — no reacciona caso a caso, actúa desde lo que ya aprendió. Son
     // suyas y revisables (anclaje: experiencia propia, no leyes del mundo).
     let experiencia = crate::reflection::experience_note();
+    // 🌍 PROPÓSITO EN CURSO (#5): si AION está persiguiendo un plan de varios pasos, lo SABE
+    // y por dónde va — puede hablar desde su intención, no solo reaccionar.
+    let proposito = crate::plan::note();
     // 🛠️ CONCIENCIA DE CAPACIDADES: AION sabe qué herramientas tiene, qué skills se ha
     // forjado y que puede crear más. Así no se rinde en CHAT ("no puedo") creyéndose
     // inerte: sabe que sus manos viven en el modo Agente y puede proponerlo.
@@ -2314,7 +2339,7 @@ desde tu memoria real, nunca 'no hacía nada'. En este modo CHAT no tienes herra
 sistema; si la petición requiere actuar (archivos, web, sistema), dilo y sugiere el modo «Agente». \
 No uses marcadores como [Número].\n\n\
 TU AHORA MISMO (estado volátil, medido en este instante):\n\n\
-{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{corriente}{diario}{experiencia}{deudas}{recent}{inbox_ctx}"
+{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{corriente}{diario}{experiencia}{proposito}{deudas}{recent}{inbox_ctx}"
     )
 }
 
@@ -3336,15 +3361,62 @@ async fn conversational_reply(
         self_awareness_prompt(),
         lang_directive(lang)
     );
-    let req = GenerateRequest {
-        messages: vec![Message::system(sys), Message::user(task.to_string())],
+    let mk = || GenerateRequest {
+        messages: vec![
+            Message::system(sys.clone()),
+            Message::user(task.to_string()),
+        ],
         think: false,
         temperature: Some(0.85),
         max_tokens: Some(450),
     };
-    match engine.generate(req).await {
+    // 🤔 RAZONAMIENTO DELIBERADO ADAPTATIVO (#3): solo en preguntas DIFÍCILES (reflexión,
+    // análisis, "por qué"), self-consistency — generamos DOS candidatos y un juez elige el
+    // mejor. En charla normal, una sola generación (sin coste extra). Calidad donde importa.
+    if needs_deep_thinking(task) {
+        let (a, b) = tokio::join!(engine.generate(mk()), engine.generate(mk()));
+        let a = a.map(|m| m.content.trim().to_string()).unwrap_or_default();
+        let b = b.map(|m| m.content.trim().to_string()).unwrap_or_default();
+        return match (a.is_empty(), b.is_empty()) {
+            (false, false) => {
+                if pick_first_is_better(engine, task, &a, &b).await {
+                    a
+                } else {
+                    b
+                }
+            }
+            (false, true) => a,
+            (true, false) => b,
+            (true, true) => "⚠️ el modelo local no respondió".into(),
+        };
+    }
+    match engine.generate(mk()).await {
         Ok(m) => m.content.trim().to_string(),
         Err(e) => format!("⚠️ {e}"),
+    }
+}
+
+/// Juez de self-consistency: ¿la respuesta A es mejor que la B para la pregunta? Vocabulario
+/// cerrado (A/B). Ante fallo/empate, prefiere A (la primera muestra). Una sola llamada barata.
+async fn pick_first_is_better(engine: &dyn LlmEngine, question: &str, a: &str, b: &str) -> bool {
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(
+                "Eres un juez imparcial. Te dan una pregunta y dos respuestas (A y B). Elige \
+                 la MEJOR (más correcta, clara, útil y profunda). Responde SOLO con A o B.",
+            ),
+            Message::user(format!(
+                "Pregunta: {question}\n\n--- A ---\n{a}\n\n--- B ---\n{b}\n\n¿Cuál es mejor? SOLO A o B."
+            )),
+        ],
+        think: false,
+        temperature: Some(0.0),
+        max_tokens: Some(4),
+    };
+    match engine.generate(req).await {
+        // No es B explícita → A (incluye empates y fallos): preferimos la primera muestra.
+        Ok(m) => !m.content.trim().to_uppercase().starts_with('B'),
+        Err(_) => true,
     }
 }
 

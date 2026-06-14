@@ -22,6 +22,7 @@ mod identity;
 mod inbox;
 mod ingest_queue;
 mod inner_state;
+mod intent;
 mod journal;
 mod language_detector;
 mod library;
@@ -31,6 +32,7 @@ mod memory_tool;
 mod ollama_runtime;
 mod onboarding;
 mod pending;
+mod plan;
 mod projects;
 mod prompt_store;
 mod prompts;
@@ -945,11 +947,225 @@ async fn detect_skill_need(engine: &OllamaEngine, owned: &[String]) -> Option<Sk
     })
 }
 
+/// `planificar` (#5): AION persigue un PROPÓSITO de varios pasos a través del tiempo, no solo
+/// reacciona tick a tick. Si tiene un plan activo, AVANZA el siguiente paso (trabaja un avance
+/// real y lo guarda en memoria); al completarlo, lo consolida y cierra. Si no tiene plan,
+/// FORMA uno (decide un objetivo de medio plazo y lo descompone en pasos), guiado por su
+/// experiencia. Es el embrión de un agente con intención persistente.
+async fn advance_plan_once(engine: &OllamaEngine) -> (bool, String) {
+    // 1) ¿Hay un plan activo? → avanzar el siguiente paso.
+    if let Some(p) = crate::plan::active() {
+        if let Some(idx) = p.next_pending() {
+            let step = p.steps[idx].text.clone();
+            let prompt = format!(
+                "Persigues este objetivo: «{}». Trabaja AHORA, en concreto, este paso: «{step}». \
+                 Aporta un AVANCE real y conciso (un hallazgo, una decisión o el resultado del \
+                 paso) en 2-3 frases. Nada de relleno ni de repetir el paso.",
+                p.goal
+            );
+            let finding = engine
+                .generate(GenerateRequest {
+                    messages: vec![Message::user(prompt)],
+                    think: false,
+                    temperature: Some(0.5),
+                    max_tokens: Some(220),
+                })
+                .await
+                .map(|m| m.content.trim().to_string())
+                .unwrap_or_default();
+            if finding.chars().count() > 12 {
+                if let Ok(mem) = crate::shared_memory() {
+                    let g: String = p.goal.chars().take(50).collect();
+                    let _ = mem.store(&format!("[plan: {g}] {finding}")).await;
+                }
+            }
+            let complete = crate::plan::mark_step_done(idx);
+            let short: String = finding.chars().take(80).collect();
+            workspace::publish(workspace::StreamEvent::now(
+                "vida",
+                "pensamiento",
+                &format!(
+                    "avancé mi plan «{}» (paso {}/{}): {short}",
+                    p.goal,
+                    idx + 1,
+                    p.steps.len()
+                ),
+            ));
+            if complete {
+                if let Ok(mem) = crate::shared_memory() {
+                    let _ = mem
+                        .store(&format!(
+                            "[plan completado] Logré mi objetivo: {}. (lo perseguí en {} pasos)",
+                            p.goal,
+                            p.steps.len()
+                        ))
+                        .await;
+                }
+                crate::plan::clear();
+                return (true, format!("completé mi plan: {}", p.goal));
+            }
+            return (
+                true,
+                format!(
+                    "avancé mi plan «{}» (paso {}/{})",
+                    p.goal,
+                    idx + 1,
+                    p.steps.len()
+                ),
+            );
+        }
+        crate::plan::clear(); // plan sin pendientes: cerrar
+    }
+
+    // 2) No hay plan → formar uno, guiado por la experiencia.
+    let heuristicas = {
+        let rules = crate::reflection::active();
+        if rules.is_empty() {
+            String::new()
+        } else {
+            let lines: String = rules
+                .iter()
+                .take(3)
+                .map(|r| format!("\n- {}", r.text.trim()))
+                .collect();
+            format!("\n\nTus heurísticas de experiencia (para inspirarte):{lines}")
+        }
+    };
+    let prompt = format!(
+        "Eres AION. Decide UN objetivo de medio plazo que te convenga perseguir por tu cuenta: \
+         entender algo a fondo, mejorar una capacidad tuya, o profundizar en un interés de \
+         Ariel. Descomponlo en 3-4 PASOS concretos y accionables. Responde SOLO un JSON en una \
+         línea: {{\"goal\":\"...\",\"steps\":[\"paso 1\",\"paso 2\",\"paso 3\"]}}. Sin más texto.{heuristicas}"
+    );
+    let Ok(m) = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.6),
+            max_tokens: Some(200),
+        })
+        .await
+    else {
+        return (false, "no pude formar un plan".into());
+    };
+    let raw = m.content.trim();
+    let (Some(s), Some(e)) = (raw.find('{'), raw.rfind('}')) else {
+        return (false, "el plan no vino en JSON".into());
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw[s..=e]) else {
+        return (false, "JSON de plan inválido".into());
+    };
+    let goal = json
+        .get("goal")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let steps: Vec<String> = json
+        .get("steps")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let plan = crate::plan::Plan::new(&goal, steps);
+    if goal.chars().count() < 6 || plan.steps.len() < 2 {
+        return (false, "plan incompleto".into());
+    }
+    workspace::publish(workspace::StreamEvent::now(
+        "vida",
+        "reflexión",
+        &format!(
+            "me tracé un plan: «{}» ({} pasos)",
+            plan.goal,
+            plan.steps.len()
+        ),
+    ));
+    crate::plan::set(&plan);
+    (true, format!("me tracé un plan nuevo: {}", plan.goal))
+}
+
+/// **Verificador INDEPENDIENTE de una skill forjada (#2).** Rompe el oráculo circular: los
+/// tests que pasó la candidata los inventó el MISMO LLM que escribió el WAT. Aquí un 2º LLM,
+/// solo desde la DESCRIPCIÓN, calcula el resultado esperado para entradas NUEVAS que el código
+/// nunca vio; ejecutamos el WAT y exigimos coincidencia total + no-degeneración (resultados
+/// variados, no una constante). Si no se puede verificar con seguridad, NO se acepta.
+async fn independent_verify(
+    engine: &OllamaEngine,
+    description: &str,
+    host: &std::sync::Arc<aion_skills::WasmSkillHost>,
+    name: &str,
+) -> bool {
+    use aion_kernel::traits::SkillHost;
+    let inputs: [i64; 3] = [7, 12, 100]; // frescas, distintas de las de la forja
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(
+                "Eres un verificador imparcial. Dada una operación numérica (un entero entra, \
+                 un entero sale), calcula el resultado EXACTO para las entradas dadas. Responde \
+                 SOLO un JSON array de pares [entrada, resultado]. Nada más.",
+            ),
+            Message::user(format!(
+                "Operación: {description}\nEntradas: 7, 12, 100\nResultados (JSON [[7,_],[12,_],[100,_]]):"
+            )),
+        ],
+        think: false,
+        temperature: Some(0.0),
+        max_tokens: Some(80),
+    };
+    let Ok(m) = engine.generate(req).await else {
+        return false;
+    };
+    let raw = m.content.trim();
+    let (Some(s), Some(e)) = (raw.find('['), raw.rfind(']')) else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw[s..=e]) else {
+        return false;
+    };
+    let Some(arr) = parsed.as_array() else {
+        return false;
+    };
+    let expected: std::collections::HashMap<i64, i64> = arr
+        .iter()
+        .filter_map(|p| {
+            let a = p.as_array()?;
+            Some((a.first()?.as_i64()?, a.get(1)?.as_i64()?))
+        })
+        .collect();
+    // Sin al menos 2 puntos verificables, o si todos los esperados son iguales (operación
+    // degenerada / WAT constante), no podemos confiar: no aceptamos.
+    if expected.len() < 2 {
+        return false;
+    }
+    let distinct: std::collections::HashSet<i64> = expected.values().copied().collect();
+    if distinct.len() < 2 {
+        return false;
+    }
+    // Ejecuta el WAT contra cada entrada esperada; cualquier discrepancia invalida.
+    for inp in inputs {
+        let Some(exp) = expected.get(&inp) else {
+            continue;
+        };
+        let got = host
+            .invoke(name, serde_json::json!(inp))
+            .await
+            .ok()
+            .and_then(|o| o.output.get("result").and_then(|v| v.as_i64()));
+        if got != Some(*exp) {
+            return false;
+        }
+    }
+    true
+}
+
 /// `evolucionar`: AION **forja una skill nueva por su cuenta cuando detecta una necesidad
 /// recurrente** (antes estaba hardcodeado a "square"). Detecta la demanda, comprueba que no
 /// la tenga ya, genera el WAT (3 intentos con auto-corrección), lo valida en sandbox + tests
-/// (EvolutionEngine), aplica el RATCHET y lo persiste en su caja de herramientas. Gated y
-/// seguro por construcción: una candidata mala nunca toca el host vivo.
+/// (EvolutionEngine) Y con un verificador INDEPENDIENTE, aplica el RATCHET y lo persiste.
+/// Gated y seguro por construcción: una candidata mala nunca toca el host vivo.
 async fn self_evolve_once(engine: &OllamaEngine) -> (bool, String) {
     use aion_evolution::{Candidate, EvolutionEngine};
     use aion_skills::{SkillManifest, WasmSkillHost};
@@ -1011,7 +1227,8 @@ async fn self_evolve_once(engine: &OllamaEngine) -> (bool, String) {
         let Ok(live) = WasmSkillHost::new() else {
             return (false, "no se pudo crear el host".into());
         };
-        let mut evo = EvolutionEngine::new(Arc::new(live));
+        let live = Arc::new(live);
+        let mut evo = EvolutionEngine::new(live.clone());
         match evo
             .propose(Candidate {
                 manifest: SkillManifest {
@@ -1024,6 +1241,14 @@ async fn self_evolve_once(engine: &OllamaEngine) -> (bool, String) {
             .await
         {
             Ok(r) if r.accepted => {
+                // VERIFICADOR INDEPENDIENTE (#2): los tests que pasó los inventó el MISMO LLM
+                // que escribió el WAT (oráculo circular). Antes de persistir, un 2º criterio
+                // INDEPENDIENTE valida la skill con entradas NUEVAS que el código no vio.
+                if !independent_verify(engine, &spec.description, &live, &spec.name).await {
+                    last =
+                        "no pasó la verificación independiente (posible oráculo circular)".into();
+                    continue;
+                }
                 // RATCHET + persistencia: la skill entra en su caja de herramientas y
                 // sobrevive a reinicios (hydrate_relevant la cargará cuando sea relevante).
                 if r.passed >= crate::skill_store::best_passed(&spec.name) {
@@ -1455,11 +1680,19 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
         "proyecto",
         "crear",
         "evolucionar",
+        "planificar",
     ];
-    let goal = curiosity
-        .next_goal(&activities)
-        .unwrap_or("estudiar")
-        .to_string();
+    // PRIORIDAD DEL PROPÓSITO (#5): si hay un plan en curso, AVANZARLO pesa más que la
+    // curiosidad suelta — un agente con propósito no abandona su plan a medias. Si no, la
+    // curiosidad (learning progress) elige.
+    let goal = if crate::plan::active().is_some() {
+        "planificar".to_string()
+    } else {
+        curiosity
+            .next_goal(&activities)
+            .unwrap_or("estudiar")
+            .to_string()
+    };
     inner_state::set_focus(
         "vida",
         match goal.as_str() {
@@ -1469,6 +1702,7 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
             "proyecto" => "avanzando un proyecto de Ariel",
             "crear" => "cruzando ideas lejanas a ver qué nace",
             "evolucionar" => "forjándome una skill nueva",
+            "planificar" => "avanzando un plan que me tracé",
             _ => "estudiando por mi cuenta",
         },
     );
@@ -1479,6 +1713,7 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
         "proyecto" => work_project_once(engine).await,
         "crear" => create_once(engine).await,
         "evolucionar" => self_evolve_once(engine).await,
+        "planificar" => advance_plan_once(engine).await,
         _ => study_once(engine).await,
     };
     curiosity.record(&goal, ok);

@@ -15,6 +15,9 @@
 //! por similitud + filtro temporal, sin re-embeber. Barato: capturar = 1 embedding; recuperar
 //! = coseno en memoria. Mismo patrón de persistencia que `journal`/`pending` (QLOCK atómico).
 
+use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore};
+use aion_kernel::types::Message;
+use aion_llm::OllamaEngine;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -39,6 +42,10 @@ pub struct Episode {
     /// Embedding del detalle (BGE-M3): recuperación por similitud sin re-embeber.
     #[serde(default)]
     pub embedding: Vec<f32>,
+    /// Ya promovido a memoria DURABLE por el sueño de consolidación (no se vuelve a
+    /// consolidar). Cierra el lazo Storage(episodio)→Reflection→Experience(hecho durable).
+    #[serde(default)]
+    pub consolidated: bool,
 }
 
 fn path() -> std::path::PathBuf {
@@ -173,6 +180,7 @@ pub async fn capture(topic: &str, detail: &str) {
         detail: detail_s,
         salience,
         embedding: emb,
+        consolidated: false,
     };
     if items.len() + 1 > MAX_EPISODES {
         // Toca PODAR por valor (saliencia ponderada por recencia): caen los detalles viejos y
@@ -322,6 +330,125 @@ pub fn recall_note(items: &[Recalled]) -> String {
     }
     b.push('\n');
     b
+}
+
+// ── Consolidación episodio → experiencia (el "sueño" que cierra el lazo) ──────────────
+/// Ventana reciente que se examina al consolidar (acota el O(n²) del clustering).
+const CONSOLIDATE_WINDOW: usize = 200;
+/// Mínimo de episodios parecidos para considerar un patrón "recurrente".
+const RECUR_MIN: usize = 3;
+/// Similitud para agrupar episodios en un mismo patrón.
+const RECUR_SIM: f32 = 0.86;
+
+/// Agrupa episodios NO consolidados (ventana reciente) por similitud semántica. Un grupo de
+/// ≥`RECUR_MIN` es un PATRÓN RECURRENTE: algo que se repite en la vida de AION con Ariel.
+fn recurring_clusters() -> Vec<Vec<Episode>> {
+    let mut eps: Vec<Episode> = all()
+        .into_iter()
+        .filter(|e| !e.consolidated && !e.embedding.is_empty())
+        .collect();
+    // Solo la ventana reciente (los patrones que importan son recientes; acota el coste).
+    let extra = eps.len().saturating_sub(CONSOLIDATE_WINDOW);
+    if extra > 0 {
+        eps.drain(..extra);
+    }
+    let mut used = vec![false; eps.len()];
+    let mut clusters = Vec::new();
+    for i in 0..eps.len() {
+        if used[i] {
+            continue;
+        }
+        let mut group = vec![eps[i].clone()];
+        used[i] = true;
+        for j in (i + 1)..eps.len() {
+            if used[j] || eps[j].embedding.len() != eps[i].embedding.len() {
+                continue;
+            }
+            if aion_memory::cosine(&eps[i].embedding, &eps[j].embedding) >= RECUR_SIM {
+                group.push(eps[j].clone());
+                used[j] = true;
+            }
+        }
+        if group.len() >= RECUR_MIN {
+            clusters.push(group);
+        }
+    }
+    clusters
+}
+
+/// Marca como consolidados los episodios con estos ids (no se vuelven a promover).
+fn mark_consolidated(ids: &[String]) {
+    let _guard = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut items = all();
+    for e in items.iter_mut() {
+        if ids.contains(&e.id) {
+            e.consolidated = true;
+        }
+    }
+    save(&items);
+}
+
+/// **EL SUEÑO DE CONSOLIDACIÓN (#1).** Detecta un patrón recurrente entre los micromomentos,
+/// destila de él UN hecho/preferencia DURABLE y lo promueve a la memoria persistente (la capa
+/// "Experience"). Así un detalle que se repite deja de ser un episodio efímero y pasa a ser
+/// conocimiento estable que entra al prompt en cada turno. Corre en idle (background). Cierra
+/// el lazo Storage→Reflection→Experience que pedía Ariel. Devuelve `(hubo_cambio, detalle)`.
+pub async fn consolidate_once(engine: &OllamaEngine) -> (bool, String) {
+    let Some(cluster) = recurring_clusters().into_iter().max_by_key(|c| c.len()) else {
+        return (false, String::new()); // nada recurrente aún
+    };
+    let ctx: String = cluster
+        .iter()
+        .take(6)
+        .map(|e| format!("- {}", e.detail.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(
+                "Eres AION consolidando tu memoria mientras Ariel no está. Te doy MOMENTOS que \
+                 se REPITEN en vuestras conversaciones. Destila UN solo hecho o preferencia \
+                 DURABLE que revelen sobre Ariel o sobre cómo trabajáis juntos, en una frase \
+                 concisa y AUTOCONTENIDA (que se entienda sola). Si no hay un hecho durable y \
+                 claro, responde EXACTAMENTE NINGUNO. Sin preámbulos.",
+            ),
+            Message::user(format!("Momentos recurrentes:\n{ctx}\n\nHecho durable:")),
+        ],
+        think: false,
+        temperature: Some(0.2),
+        max_tokens: Some(80),
+    };
+    let Ok(m) = engine.generate(req).await else {
+        return (false, String::new());
+    };
+    let fact = m
+        .content
+        .trim()
+        .trim_matches(['«', '»', '"', '.', ' '])
+        .trim()
+        .to_string();
+    let low = fact.to_lowercase();
+    if fact.chars().count() < 12 || low == "ninguno" || low.starts_with("ninguno") {
+        // Aun sin hecho, marca el cluster como visto para no re-analizarlo cada ciclo.
+        let ids: Vec<String> = cluster.iter().map(|e| e.id.clone()).collect();
+        mark_consolidated(&ids);
+        return (false, "patrón recurrente sin hecho durable claro".into());
+    }
+    // Promueve a memoria DURABLE (capa Experience): entrará al prompt como grounding.
+    if let Ok(mem) = crate::shared_memory() {
+        let _ = mem.store(&format!("[consolidación] {fact}")).await;
+    }
+    let ids: Vec<String> = cluster.iter().map(|e| e.id.clone()).collect();
+    mark_consolidated(&ids);
+    crate::workspace::publish(crate::workspace::StreamEvent::now(
+        "memoria",
+        "reflexión",
+        &format!(
+            "consolidé un patrón recurrente en un recuerdo durable: «{}»",
+            fact.chars().take(90).collect::<String>()
+        ),
+    ));
+    (true, fact)
 }
 
 #[cfg(test)]
