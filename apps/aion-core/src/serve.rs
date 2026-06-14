@@ -103,6 +103,10 @@ fn lang_directive(lang: &Option<String>) -> String {
 
 /// Arranca el puente HTTP en la dirección indicada.
 pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // PRIVACIDAD EN DISCO (P0-1): cierra el data dir (0700) y sus archivos (0600) a otros
+    // usuarios del Mac. Una sola pasada al arrancar, antes de servir. No rompe clientes.
+    crate::harden_data_dir();
+
     let state = AppState {
         convos: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };

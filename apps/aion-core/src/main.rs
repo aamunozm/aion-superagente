@@ -51,15 +51,70 @@ mod workspace;
 /// Escritura ATÓMICA (tmp + rename): un crash o un lector concurrente jamás ven un
 /// archivo a medias. Para todos los estados pequeños de AION (inner_state, self_model,
 /// curiosity, recortes de las corrientes…).
+///
+/// **Privacidad en disco (P0-1, endurecimiento):** toda la mente de AION es privada de
+/// Ariel — memoria, diario, autobiografía, modelo de usuario, personalidad. En Unix el
+/// archivo nace ya con 0600 (solo el dueño): nada de la mente queda world-readable para
+/// otros usuarios del Mac. El modo se fija sobre el temporal ANTES del rename, así el
+/// archivo final jamás existe con una ventana de permisos laxos.
 pub fn write_atomic(path: &std::path::Path, contents: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, contents).is_ok() {
+    #[cfg(unix)]
+    let write_res = {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(contents.as_bytes()))
+    };
+    #[cfg(not(unix))]
+    let write_res = std::fs::write(&tmp, contents);
+    if write_res.is_ok() {
         let _ = std::fs::rename(&tmp, path);
+    } else {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
+
+/// **Endurecimiento de privacidad del data dir (P0-1).** Una sola pasada al arrancar: deja
+/// el directorio de datos en 0700 (ningún otro usuario del Mac puede siquiera entrar) y los
+/// archivos existentes en 0600. Es la protección de más alto impacto y cero ruptura: el
+/// backend corre como Ariel (dueño) y los clientes (web/desktop/MCP) nunca leen estos
+/// archivos directamente —pasan por la API HTTP autenticada—, así que cerrar el disco no
+/// rompe nada. Cubre incluso `memory.jsonl`/`episodic.jsonl` (que no pasan por write_atomic).
+/// Best-effort y silencioso: si algún chmod falla (FS sin permisos Unix), no aborta el arranque.
+#[cfg(unix)]
+pub fn harden_data_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = app_data_dir();
+    // El directorio a 0700: barrera maestra — sin permiso de ejecución/lectura del dir,
+    // otro usuario no puede listar ni abrir su contenido, sea cual sea el modo de cada archivo.
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    // Y, en profundidad, cada archivo de primer nivel a 0600 (los que ya existían world-readable
+    // de antes de este endurecimiento se corrigen aquí; los nuevos ya nacen 0600).
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Ok(ft) = entry.file_type() {
+                if ft.is_file() {
+                    let _ = std::fs::set_permissions(
+                        entry.path(),
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn harden_data_dir() {}
 
 /// Como [`write_atomic`], pero deja el archivo con permisos 0600 (solo el dueño):
 /// para secretos en disco (token Bearer de Claude Code, config con `~/.claude.json`).
