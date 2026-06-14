@@ -25,11 +25,15 @@ MEM = APP / "memory.jsonl"
 CACHE = APP / "mcp_compact_en.json"
 OLLAMA = "http://127.0.0.1:11434/api/generate"
 MODEL = "gemma4-reason:latest"
-PROMPT_TMPL = (
-    "Translate the following Spanish note into clear, faithful English. "
-    "Preserve EVERY fact, name, number, path and identifier exactly as-is. "
-    "Be concise but omit nothing. Output ONLY the English translation, with no "
-    "preamble, quotes or notes.\n\n{body}"
+PROMPT_TMPL = (  # meaning-first, en sync con mcp_compact.rs::ensure_english
+    "You are translating a personal-memory note written in Spanish or Italian (it may "
+    "contain typos, slang or regional expressions) into English for another AI agent. "
+    "First understand what the author MEANS — silently fix obvious typos, interpret idioms "
+    "and regionalisms by their intended sense, and resolve ambiguity — then express that "
+    "meaning in clear, natural English. Translate the MEANING, not word-for-word. Preserve "
+    "EVERY fact, name, number, path and identifier EXACTLY as written; never invent or add "
+    "anything that is not in the note. Be concise but omit nothing. Output ONLY the English "
+    "translation, with no preamble, quotes or notes.\n\n{body}"
 )
 # Cortes que aplican brief (180) y aion_memory_search (300) antes de compactar.
 CONSUMERS = {"brief (180)": 180, "aion_memory_search (300)": 300}

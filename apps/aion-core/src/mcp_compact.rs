@@ -211,7 +211,10 @@ pub async fn warm(contents: Vec<String>) -> usize {
 /// local configurado, devuelve `None` → la compactación se salta (fail-open a español):
 /// el modelo NO es una pieza obligatoria de AION.
 fn local_engine() -> Option<Arc<dyn LlmEngine>> {
-    let model = crate::provider::load().background_model();
+    // Modelo de TRADUCCIÓN (no el genérico de fondo): permite enchufar un especializado
+    // —TranslateGemma/GemmaX2— por config/env sin tocar código. Fail-open: si no hay ninguno
+    // especializado, `translation_model()` cae al de fondo de siempre.
+    let model = crate::provider::load().translation_model();
     if model.is_empty() {
         return None;
     }
@@ -264,11 +267,21 @@ pub async fn ensure_english(content: &str) -> Option<String> {
     // Sin modelo local configurado → no traducimos (el modelo no es obligatorio).
     let engine = local_engine()?;
     let req = GenerateRequest {
+        // MEANING-FIRST (mini-MAPS, arXiv 2305.04118): primero ENTENDER lo que el autor quiere
+        // decir —resolver typos, interpretar jerga/regionalismos e idioms por su sentido,
+        // desambiguar— y LUEGO expresar ese significado en inglés, en vez de traducir palabra
+        // por palabra. Sin coste extra (una sola llamada). Restringido a NO inventar: preserva
+        // hechos/nombres/números/rutas tal cual. Ataca el error de interpretación silencioso.
         messages: vec![Message::user(format!(
-            "Translate the following note (Spanish or Italian) into clear, faithful English. \
-             Preserve EVERY fact, name, number, path and identifier exactly as-is. \
-             Be concise but omit nothing. Output ONLY the English translation, with no \
-             preamble, quotes or notes.\n\n{body}"
+            "You are translating a personal-memory note written in Spanish or Italian (it may \
+             contain typos, slang or regional expressions) into English for another AI agent. \
+             First understand what the author MEANS — silently fix obvious typos, interpret \
+             idioms and regionalisms by their intended sense, and resolve ambiguity — then \
+             express that meaning in clear, natural English. Translate the MEANING, not \
+             word-for-word. Preserve EVERY fact, name, number, path and identifier EXACTLY as \
+             written; never invent or add anything that is not in the note. Be concise but omit \
+             nothing. Output ONLY the English translation, with no preamble, quotes or notes.\
+             \n\n{body}"
         ))],
         think: false,
         temperature: Some(0.1),
