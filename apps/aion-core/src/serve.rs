@@ -158,6 +158,29 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // WARMER DE COMPACTACIÓN MCP: pre-traduce al inglés los recuerdos más recientes para que
+    // la PRIMERA consulta de Claude Code en la sesión (brief / aion_memory_search) ya sirva
+    // inglés y ahorre tokens — sin esto el ahorro es perezoso (el primer hit a un recuerdo aún
+    // sin traducir va en español). En segundo plano y detrás de la precarga del modelo; el gate
+    // interno (1 traducción a la vez) evita competir con el chat. Fail-open total. AION_MCP_WARM=0
+    // lo desactiva; AION_MCP_WARM_N ajusta cuántos recuerdos calienta (por defecto 40).
+    tokio::spawn(async {
+        if std::env::var("AION_MCP_WARM").as_deref() == Ok("0") {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(25)).await; // tras calentar el modelo
+        let n: usize = std::env::var("AION_MCP_WARM_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(40);
+        let contents: Vec<String> = match crate::shared_memory() {
+            Ok(mem) => mem.recent_with_ids(n).into_iter().map(|(_, c)| c).collect(),
+            Err(_) => return,
+        };
+        crate::mcp_compact::warm(contents).await;
+    });
+
     // RITUAL DE NOMBRE: si aún no eligió su nombre, AION elige UNO PROPIO (una vez).
     // Así cada agente tiene nombre + id únicos: un individuo, no "un AION cualquiera".
     tokio::spawn(async {

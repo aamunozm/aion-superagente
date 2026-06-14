@@ -43,18 +43,20 @@ compresores. Lo que sobrevive: el enum `Language` y el detector heurístico.
    cerrado o la traducción falla, simplemente se sirve español. Nunca bloquea ni corrompe.
 4. Preserva la etiqueta de procedencia (`[hecho]`, `[aprendizaje]`…) sin traducirla.
 
-**Conectado**: `aion_memory_search` (coste repetido por consulta) y `aion_brief`
-(~450 tok, coste GARANTIZADO una vez por sesión). Ambos son los únicos consumidores de
-memoria del puente; `aion_library_search` queda como siguiente incremento.
+**Conectado**: `aion_memory_search` (coste repetido por consulta), `aion_brief`
+(~450 tok, coste GARANTIZADO una vez por sesión) y `aion_library_search` (pasajes de
+documentos, vía `compact_grounding()` que traduce solo la prosa y conserva la estructura
+`[N] (fuente: …)`/`[tema: …]`). Son los tres consumidores de memoria/biblioteca del puente.
 
 ### Cuándo se materializa el ahorro (honesto)
 
-El patrón es *lazy-warm*: en la PRIMERA aparición de un recuerdo hay *cache miss* → se
+El patrón base es *lazy-warm*: en la PRIMERA aparición de un recuerdo hay *cache miss* → se
 sirve español y se traduce en background. El ahorro real llega cuando ese recuerdo se
-vuelve a servir (misma sesión si se repite, o la siguiente). Por eso se conectó el
-`brief`: es lo que se pide en CADA sesión, así que tras la 1ª se sirve ya en inglés.
-Un *warmer* idle acotado (pre-traducir los recuerdos recientes al arrancar) haría que
-incluso la 1ª sesión ahorre — pendiente, con cuidado de no competir con Gemma del chat.
+vuelve a servir. **Resuelto con un warmer de arranque** (`mcp_compact::warm`, lanzado en
+`serve.rs` ~25 s tras arrancar): pre-traduce los N recuerdos recientes (def. 40) a las dos
+longitudes que truncan los consumidores (180 brief / 300 memory_search), respetando el gate
+de 1 traducción a la vez para no competir con el chat. Así **incluso la 1ª consulta de la
+sesión sirve inglés**. Desactivable con `AION_MCP_WARM=0`; tamaño con `AION_MCP_WARM_N`.
 
 ---
 
@@ -63,10 +65,10 @@ incluso la 1ª sesión ahorre — pendiente, con cuidado de no competir con Gemm
 | Archivo | Qué hace | Estado |
 |---|---|---|
 | `apps/aion-core/src/language_detector.rs` | `has_spanish_signal()`: gate barato y robusto | ✅ 2 tests sobre datos reales |
-| `apps/aion-core/src/mcp_compact.rs` | Traducción Gemma + caché SHA-256 + fail-open | ✅ 4 tests |
-| `apps/aion-core/src/claude_mcp.rs` | `aion_memory_search` usa `compact_for_bridge()` | ✅ |
+| `apps/aion-core/src/mcp_compact.rs` | Traducción Gemma + caché SHA-256 + fail-open + `compact_grounding()` + `warm()` | ✅ 5 tests |
+| `apps/aion-core/src/claude_mcp.rs` | `aion_memory_search` y `aion_library_search` compactan | ✅ |
 | `apps/aion-core/src/claude_code.rs` | `build_brief` compacta sus líneas de memoria | ✅ |
-| `apps/aion-core/src/serve.rs` | Ruta Gemma revertida a español íntegro | ✅ |
+| `apps/aion-core/src/serve.rs` | Ruta Gemma en español íntegro + warmer de arranque | ✅ |
 
 Borrado: `compressor.rs`, `tfidf_compressor.rs`, `multilingual.rs` (enum `Language`),
 `detect_language` (detector frágil), `MultilingualMemory`, `shared_multilingual_memory`,
@@ -113,6 +115,11 @@ llamando al `/mcp aion_memory_search` real:
 |---|---|
 | Traducción aislada, prosa española limpia (3 recuerdos) | **28%** (137→99 tok) |
 | **Payload MCP real** de este usuario (11 recuerdos, query "Rust núcleo") | **12%** (1048→922 tok) |
+| **Corpus REAL completo, totalmente calentado** (59 recuerdos vigentes, 2026-06-14) | **~14%** — brief 14.1% (2675→2297 tok) · memory_search 13.9% (3730→3213 tok) |
+
+El último número (`scripts/measure_mcp_real.py`) es el más representativo: mide los **59
+recuerdos reales** truncados igual que el puente y traducidos al 100 % (sin *cache miss*).
+Los 59 tienen señal española pero siguen densos en identificadores/código en inglés → ~14 %.
 
 El 28% aislado **no** se traslada al 12% real porque la memoria ACTUAL de este usuario
 está dominada por notas técnicas **cargadas de inglés** (ADR-0004, MultilingualMemory,
@@ -159,8 +166,12 @@ modo CLI/headless**. No corrige un agujero crítico del flujo de escritorio.
 
 ## Siguientes incrementos (opcionales)
 
-1. **`aion_brief` y `aion_library_search`** por el mismo `compact_for_bridge`.
-2. **Warmer idle acotado**: pre-traducir los N recuerdos más recientes al arrancar
-   (con límite de concurrencia) para que la caché no dependa solo del *lazy-on-miss*.
-3. **Invalidación**: si un recuerdo se edita, su hash cambia → nueva entrada; las viejas
-   se pueden podar por tamaño/LRU si la caché crece.
+- ✅ **`aion_brief` y `aion_library_search`** conectados (este último vía `compact_grounding`).
+- ✅ **Warmer de arranque acotado** (`mcp_compact::warm`, gate de 1 a la vez) — la caché ya
+  no depende solo del *lazy-on-miss*; la 1ª consulta de la sesión ya sirve inglés.
+
+Pendiente:
+
+1. **Invalidación**: si un recuerdo se edita, su hash cambia → nueva entrada; las viejas
+   se pueden podar por tamaño/LRU si la caché crece (hoy: descarte arbitrario al pasar 10 000).
+2. **Toggle de UI** + dashboard de ahorro acumulado por sesión.
