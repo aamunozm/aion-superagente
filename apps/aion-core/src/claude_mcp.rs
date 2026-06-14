@@ -446,7 +446,13 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             if grounding.is_empty() {
                 return Ok("La biblioteca no tiene pasajes relevantes para esa pregunta.".into());
             }
-            Ok(wrap_untrusted(&grounding))
+            // OPTIMIZACIÓN DE TOKENS DEL PUENTE (igual que aion_memory_search): Claude Code
+            // paga por token, así que se sirve la versión inglesa cacheada de cada pasaje
+            // cuando existe, conservando la estructura (fuente/tema). Fail-open a español y
+            // calentado en segundo plano. `library_grounding` se comparte con la ruta LOCAL de
+            // Gemma (tokens gratis) y por eso NO se toca allí: la compactación vive solo aquí.
+            let compact = crate::mcp_compact::compact_grounding(&grounding);
+            Ok(wrap_untrusted(&compact))
         }
         "aion_graph_query" => {
             let query = args

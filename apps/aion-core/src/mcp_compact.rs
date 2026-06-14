@@ -114,6 +114,65 @@ pub fn compact_for_bridge(content: &str) -> String {
     content.to_string()
 }
 
+/// Compacta un bloque de *grounding* de biblioteca para el puente MCP: traduce SOLO la
+/// prosa de cada pasaje a su versión inglesa cacheada, conservando intacta la ESTRUCTURA
+/// (la cabecera, los prefijos `[N] (fuente: …)` y las líneas `[tema: …]`). Trabaja línea a
+/// línea con `compact_for_bridge`, así que hereda su comportamiento: inglés si está cacheado;
+/// si no, español esta vez + calienta en segundo plano. Fail-open por línea — NUNCA bloquea
+/// ni corrompe. Se aplica solo aquí (puente de pago), nunca a la ruta local de Gemma.
+pub fn compact_grounding(blob: &str) -> String {
+    blob.lines()
+        .map(|line| {
+            // Pasaje: `[N] (fuente: X) contenido…` (o `… · vía A → B) contenido…`). El primer
+            // `") "` cierra el prefijo estructural; lo que sigue es la prosa a compactar. Las
+            // líneas `[tema: …]` y la cabecera no tienen `") "` → se devuelven tal cual.
+            if line.starts_with('[') {
+                if let Some(pos) = line.find(") ") {
+                    let (prefix, content) = line.split_at(pos + 2);
+                    return format!("{prefix}{}", compact_for_bridge(content));
+                }
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Longitudes a las que los consumidores del puente TRUNCAN un recuerdo antes de compactar
+/// (la clave de caché es el hash del texto YA truncado): el brief usa 180, `aion_memory_search`
+/// usa 300. El warmer calienta ambas para que las dos rutas sirvan inglés desde la 1ª consulta.
+/// Si cambias esos cortes en `claude_code.rs`/`claude_mcp.rs`, actualízalos aquí.
+const WARM_PREFIXES: [usize; 2] = [180, 300];
+
+/// WARMER de arranque: pre-traduce un lote de recuerdos para que incluso la PRIMERA consulta
+/// MCP de la sesión sirva inglés (sin esto, el primer hit a un recuerdo aún sin traducir va en
+/// español hasta que la caché se calienta sola). Reusa `ensure_english`, así que respeta caché,
+/// gate de concurrencia (1 traducción a la vez, no compite con el chat), dedup en vuelo y
+/// fail-open. Pensado para una tarea de fondo, sin prisa. Devuelve cuántas tradujo de nuevo.
+pub async fn warm(contents: Vec<String>) -> usize {
+    let mut done = 0usize;
+    for c in contents {
+        for &n in &WARM_PREFIXES {
+            let t: String = c.chars().take(n).collect();
+            // Si el recuerdo es más corto que el corte, ambas longitudes dan el MISMO texto:
+            // el segundo `ensure_english` es un cache hit barato (no retraduce).
+            if english_for(&t).is_some() {
+                continue;
+            }
+            if ensure_english(&t).await.is_some() {
+                done += 1;
+            }
+        }
+    }
+    if done > 0 {
+        tracing::info!(
+            traducidos = done,
+            "mcp_compact: warmer pre-tradujo recuerdos recientes al inglés"
+        );
+    }
+    done
+}
+
 /// Motor LOCAL para traducir. Usa el modelo de FONDO configurado (`utility_model` ligero
 /// si existe, si no `local_model`) — un componente INTERCAMBIABLE, nunca uno fijo: en un
 /// equipo modesto puedes traducir con un modelo de 1-3B aunque chatees con otro. Siempre
@@ -250,5 +309,23 @@ mod tests {
     #[test]
     fn english_for_miss_is_none() {
         assert!(english_for("contenido jamás cacheado xyzzy 9f3a").is_none());
+    }
+
+    // Necesita runtime: en cache miss `compact_for_bridge` hace `tokio::spawn` del calentado.
+    #[tokio::test]
+    async fn compact_grounding_preserves_structure() {
+        let blob = "Conocimiento de TU BIBLIOTECA relevante para esto:\n\
+                    [1] (fuente: manual.pdf) Este pasaje habla de la garantía del producto.\n\
+                    [2] (fuente: guia.pdf · vía A → B) Otro pasaje sobre la instalación.\n\
+                    [tema: Garantías] resumen del tema sin tocar";
+        let out = compact_grounding(blob);
+        let lines: Vec<&str> = out.lines().collect();
+        // Cabecera, prefijos de fuente/vía y línea de tema quedan intactos (sin caché, el
+        // contenido se sirve en español → fail-open; lo que comprobamos es la ESTRUCTURA).
+        assert!(lines[0].starts_with("Conocimiento de TU BIBLIOTECA"));
+        assert!(lines[1].starts_with("[1] (fuente: manual.pdf) "));
+        assert!(lines[2].starts_with("[2] (fuente: guia.pdf · vía A → B) "));
+        assert!(lines[3].starts_with("[tema: Garantías] "));
+        assert_eq!(lines.len(), 4);
     }
 }
