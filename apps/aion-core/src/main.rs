@@ -183,6 +183,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("weave") => {
             run_weave().await?;
         }
+        Some("plan") => {
+            run_plan().await?;
+        }
         Some("history") => {
             run_history()?;
         }
@@ -555,6 +558,41 @@ async fn run_weave() -> Result<(), Box<dyn std::error::Error>> {
     for c in &b.chapters {
         println!("\n• «{}»\n  {}", c.title, c.summary);
     }
+    Ok(())
+}
+
+/// CLI `plan`: muestra el plan activo, fuerza UN tick del planificador razonado (avanzar un
+/// paso conectado a la memoria, o constatar bloqueo → reintentar/replanificar) y muestra el
+/// estado resultante. Si no hay plan, el tick FORMA uno. Demo de Razonamiento + Autonomía (B).
+async fn run_plan() -> Result<(), Box<dyn std::error::Error>> {
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+    let print_state = |label: &str| {
+        println!("📋 {label}:");
+        match crate::plan::active() {
+            Some(p) => {
+                println!("   objetivo: «{}»  (revisiones: {})", p.goal, p.revisions);
+                for (i, s) in p.steps.iter().enumerate() {
+                    let mark = if s.done { "✓" } else { "·" };
+                    let att = if s.attempts > 0 {
+                        format!("  [intentos: {}]", s.attempts)
+                    } else {
+                        String::new()
+                    };
+                    println!("   {mark} {}. {}{att}", i + 1, s.text);
+                }
+            }
+            None => println!("   (sin plan activo)"),
+        }
+    };
+    print_state("ANTES");
+    println!("\n⚙️  ejecutando un tick del planificador…\n");
+    let (changed, detail) = advance_plan_once(&engine).await;
+    println!("{} {detail}\n", if changed { "✅" } else { "ℹ️ " });
+    print_state("DESPUÉS");
     Ok(())
 }
 
@@ -1019,14 +1057,42 @@ async fn detect_skill_need(engine: &OllamaEngine, owned: &[String]) -> Option<Sk
 /// FORMA uno (decide un objetivo de medio plazo y lo descompone en pasos), guiado por su
 /// experiencia. Es el embrión de un agente con intención persistente.
 async fn advance_plan_once(engine: &OllamaEngine) -> (bool, String) {
-    // 1) ¿Hay un plan activo? → avanzar el siguiente paso.
+    const MAX_STEP_ATTEMPTS: u8 = 2; // bloqueos en un paso antes de replanificar
+    const MAX_REVISIONS: u8 = 2; // replanificaciones antes de abandonar honestamente
+
+    // 1) ¿Hay un plan activo? → avanzar el siguiente paso, GROUNDED en su memoria.
     if let Some(p) = crate::plan::active() {
         if let Some(idx) = p.next_pending() {
             let step = p.steps[idx].text.clone();
+
+            // --- Razonamiento CONECTADO: trae lo que YA vivió y lo que YA halló sobre este paso,
+            // para no avanzar a ciegas (memoria episódica + hallazgos previos del propio plan). ---
+            let mut grounding = String::new();
+            let eps = crate::episodic::recall(&step, 3, 0).await;
+            if !eps.is_empty() {
+                let lines: String = eps
+                    .iter()
+                    .map(|e| format!("\n- {}", e.detail.chars().take(140).collect::<String>()))
+                    .collect();
+                grounding.push_str(&format!("\n\nLo que ya has vivido y viene al caso:{lines}"));
+            }
+            if let Ok(mem) = crate::shared_memory() {
+                if let Ok(hits) = mem.retrieve(&step, 3).await {
+                    let lines: String = hits
+                        .iter()
+                        .map(|h| format!("\n- {}", h.content.chars().take(140).collect::<String>()))
+                        .collect();
+                    if !lines.trim().is_empty() {
+                        grounding.push_str(&format!("\n\nHallazgos previos de tu memoria:{lines}"));
+                    }
+                }
+            }
+
             let prompt = format!(
                 "Persigues este objetivo: «{}». Trabaja AHORA, en concreto, este paso: «{step}». \
-                 Aporta un AVANCE real y conciso (un hallazgo, una decisión o el resultado del \
-                 paso) en 2-3 frases. Nada de relleno ni de repetir el paso.",
+                 Apóyate en lo que ya sabes (abajo) para no repetirte. Aporta un AVANCE real y \
+                 conciso (un hallazgo, una decisión o el resultado del paso) en 2-3 frases. Nada \
+                 de relleno ni de repetir el paso.{grounding}",
                 p.goal
             );
             let finding = engine
@@ -1039,46 +1105,130 @@ async fn advance_plan_once(engine: &OllamaEngine) -> (bool, String) {
                 .await
                 .map(|m| m.content.trim().to_string())
                 .unwrap_or_default();
-            if finding.chars().count() > 12 {
+
+            // --- AUTO-REVISIÓN: ¿el avance LOGRÓ el paso, o quedó BLOQUEADO? No marques `done`
+            // a ciegas: constátalo. Razonar sobre el propio progreso es el núcleo de la autonomía. ---
+            let advanced = plan_step_advanced(engine, &p.goal, &step, &finding).await;
+
+            if advanced {
+                if finding.chars().count() > 12 {
+                    if let Ok(mem) = crate::shared_memory() {
+                        let g: String = p.goal.chars().take(50).collect();
+                        let _ = mem.store(&format!("[plan: {g}] {finding}")).await;
+                    }
+                }
+                let complete = crate::plan::mark_step_done(idx);
+                let short: String = finding.chars().take(80).collect();
+                workspace::publish(workspace::StreamEvent::now(
+                    "vida",
+                    "pensamiento",
+                    &format!(
+                        "avancé mi plan «{}» (paso {}/{}): {short}",
+                        p.goal,
+                        idx + 1,
+                        p.steps.len()
+                    ),
+                ));
+                if complete {
+                    if let Ok(mem) = crate::shared_memory() {
+                        let _ = mem
+                            .store(&format!(
+                                "[plan completado] Logré mi objetivo: {}. (lo perseguí en {} pasos)",
+                                p.goal,
+                                p.steps.len()
+                            ))
+                            .await;
+                    }
+                    crate::plan::clear();
+                    return (true, format!("completé mi plan: {}", p.goal));
+                }
+                return (
+                    true,
+                    format!(
+                        "avancé mi plan «{}» (paso {}/{})",
+                        p.goal,
+                        idx + 1,
+                        p.steps.len()
+                    ),
+                );
+            }
+
+            // BLOQUEADO: deja el tropiezo en memoria (el próximo intento ya estará GROUNDED en él).
+            let blocker: String = finding.chars().take(140).collect();
+            if blocker.chars().count() > 12 {
                 if let Ok(mem) = crate::shared_memory() {
                     let g: String = p.goal.chars().take(50).collect();
-                    let _ = mem.store(&format!("[plan: {g}] {finding}")).await;
-                }
-            }
-            let complete = crate::plan::mark_step_done(idx);
-            let short: String = finding.chars().take(80).collect();
-            workspace::publish(workspace::StreamEvent::now(
-                "vida",
-                "pensamiento",
-                &format!(
-                    "avancé mi plan «{}» (paso {}/{}): {short}",
-                    p.goal,
-                    idx + 1,
-                    p.steps.len()
-                ),
-            ));
-            if complete {
-                if let Ok(mem) = crate::shared_memory() {
                     let _ = mem
                         .store(&format!(
-                            "[plan completado] Logré mi objetivo: {}. (lo perseguí en {} pasos)",
-                            p.goal,
-                            p.steps.len()
+                            "[plan bloqueado: {g}] me atasqué en «{step}»: {blocker}"
                         ))
                         .await;
                 }
-                crate::plan::clear();
-                return (true, format!("completé mi plan: {}", p.goal));
             }
-            return (
-                true,
-                format!(
-                    "avancé mi plan «{}» (paso {}/{})",
-                    p.goal,
-                    idx + 1,
-                    p.steps.len()
-                ),
-            );
+            let attempts = crate::plan::bump_attempt(idx);
+
+            // Aún con margen → reintentar en un tick futuro, ahora con lo aprendido en memoria.
+            if attempts < MAX_STEP_ATTEMPTS {
+                workspace::publish(workspace::StreamEvent::now(
+                    "vida",
+                    "pensamiento",
+                    &format!(
+                        "me atasqué en un paso de «{}»; lo reintentaré con lo aprendido",
+                        p.goal
+                    ),
+                ));
+                return (
+                    true,
+                    format!("me atasqué en un paso de «{}» (intento {attempts})", p.goal),
+                );
+            }
+
+            // Tope de intentos: REPLANIFICAR el resto (o abandonar si ya revisé demasiado).
+            if p.revisions >= MAX_REVISIONS {
+                if let Ok(mem) = crate::shared_memory() {
+                    let _ = mem
+                        .store(&format!(
+                            "[plan abandonado] Solté el objetivo «{}»: me atasqué en «{step}» y ya \
+                             lo había replanificado {} veces. A veces lo sabio es soltar.",
+                            p.goal, p.revisions
+                        ))
+                        .await;
+                }
+                workspace::publish(workspace::StreamEvent::now(
+                    "vida",
+                    "reflexión",
+                    &format!(
+                        "solté el plan «{}»: me atascaba y ya lo había revisado bastante",
+                        p.goal
+                    ),
+                ));
+                crate::plan::clear();
+                return (
+                    true,
+                    format!("abandoné un plan que se atascaba: {}", p.goal),
+                );
+            }
+
+            return match replan_remaining(engine, &p, &step, &blocker).await {
+                Some(new_steps) => match crate::plan::revise_pending(new_steps) {
+                    Some(rev) => {
+                        workspace::publish(workspace::StreamEvent::now(
+                            "vida",
+                            "reflexión",
+                            &format!(
+                                "replanifiqué «{}»: el camino no iba, busco otro (revisión {rev})",
+                                p.goal
+                            ),
+                        ));
+                        (
+                            true,
+                            format!("replanifiqué mi plan «{}» (revisión {rev})", p.goal),
+                        )
+                    }
+                    None => (false, "la replanificación no produjo pasos válidos".into()),
+                },
+                None => (false, "no logré replanificar".into()),
+            };
         }
         crate::plan::clear(); // plan sin pendientes: cerrar
     }
@@ -1151,6 +1301,85 @@ async fn advance_plan_once(engine: &OllamaEngine) -> (bool, String) {
     ));
     crate::plan::set(&plan);
     (true, format!("me tracé un plan nuevo: {}", plan.goal))
+}
+
+/// **¿El avance LOGRÓ el paso, o quedó bloqueado?** Juez barato: constatar el propio progreso
+/// (en vez de asumirlo) es lo que convierte "ejecutar pasos" en RAZONAR sobre un objetivo. Si el
+/// avance es vacío → bloqueo; si el juez falla, no castiga el progreso (fail-open a AVANCE).
+async fn plan_step_advanced(engine: &OllamaEngine, goal: &str, step: &str, finding: &str) -> bool {
+    if finding.chars().count() < 12 {
+        return false; // sin avance real que constatar
+    }
+    let prompt = format!(
+        "Objetivo: «{goal}». Paso: «{step}». Esto produjo AION al trabajarlo:\n«{}»\n\n¿Ese texto \
+         SUPONE un avance real del paso (un hallazgo, decisión o resultado concretos), o es \
+         relleno/evasiva/quedó bloqueado? Responde SOLO una palabra: AVANCE o BLOQUEO.",
+        finding.chars().take(400).collect::<String>()
+    );
+    let Ok(m) = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.0),
+            max_tokens: Some(6),
+        })
+        .await
+    else {
+        return true; // si el juez falla, no castigues el progreso
+    };
+    !m.content.to_uppercase().contains("BLOQUE")
+}
+
+/// **Replanificación**: dado el objetivo, lo ya logrado y QUÉ bloqueó, propone pasos NUEVOS y
+/// distintos que sorteen el atasco (otro camino al mismo objetivo). Es el salto de un plan
+/// rígido a uno que se adapta a la realidad. Devuelve los pasos, o `None` si no logró revisar.
+async fn replan_remaining(
+    engine: &OllamaEngine,
+    plan: &crate::plan::Plan,
+    blocked_step: &str,
+    blocker: &str,
+) -> Option<Vec<String>> {
+    let done: String = plan
+        .steps
+        .iter()
+        .filter(|s| s.done)
+        .map(|s| format!("\n- (hecho) {}", s.text))
+        .collect();
+    let prompt = format!(
+        "Persigues el objetivo: «{}». Ya lograste:{}\nPero te ATASCASTE en el paso «{blocked_step}» \
+         (motivo: {blocker}). Replanifica: propón 2-3 PASOS NUEVOS y distintos que sorteen ese \
+         bloqueo y te lleven al objetivo por otro camino. Responde SOLO JSON en una línea: \
+         {{\"steps\":[\"paso 1\",\"paso 2\"]}}. Sin más texto.",
+        plan.goal,
+        if done.is_empty() {
+            " (nada aún)".to_string()
+        } else {
+            done
+        }
+    );
+    let m = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.6),
+            max_tokens: Some(160),
+        })
+        .await
+        .ok()?;
+    let raw = m.content.trim();
+    let (s, e) = (raw.find('{')?, raw.rfind('}')?);
+    let json: serde_json::Value = serde_json::from_str(&raw[s..=e]).ok()?;
+    let steps: Vec<String> = json
+        .get("steps")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    if steps.is_empty() {
+        None
+    } else {
+        Some(steps)
+    }
 }
 
 /// **Maduración de la esencia**: el carácter EVOLUCIONA con lo vivido. Mirando su diario

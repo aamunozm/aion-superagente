@@ -22,6 +22,10 @@ pub struct PlanStep {
     pub text: String,
     #[serde(default)]
     pub done: bool,
+    /// Intentos que han quedado BLOQUEADOS sobre este paso. Decide reintentar vs replanificar:
+    /// avanzar no es marcar `done` a ciegas, sino constatar que el paso de verdad avanzó.
+    #[serde(default)]
+    pub attempts: u8,
 }
 
 /// Un PLAN: objetivo de varios pasos que AION persigue a través del tiempo.
@@ -33,6 +37,10 @@ pub struct Plan {
     pub steps: Vec<PlanStep>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Cuántas veces se ha REVISADO el plan (replanificación tras un bloqueo). Acotado para no
+    /// replanificar sin fin: pasado el tope, el plan se abandona honestamente.
+    #[serde(default)]
+    pub revisions: u8,
 }
 
 impl Plan {
@@ -47,10 +55,12 @@ impl Plan {
                 .map(|s| PlanStep {
                     text: s.trim().chars().take(200).collect(),
                     done: false,
+                    attempts: 0,
                 })
                 .collect(),
             created_at: now,
             updated_at: now,
+            revisions: 0,
         }
     }
     /// Índice del primer paso pendiente, o None si el plan está completo.
@@ -104,6 +114,56 @@ pub fn mark_step_done(idx: usize) -> bool {
         crate::write_atomic(&path(), &body);
     }
     complete
+}
+
+/// Suma un intento BLOQUEADO al paso `idx` y persiste. Devuelve cuántos intentos lleva tras
+/// sumar (para decidir: reintentar con lo aprendido, o replanificar).
+pub fn bump_attempt(idx: usize) -> u8 {
+    let _guard = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(mut plan) = active() else {
+        return 0;
+    };
+    let n = match plan.steps.get_mut(idx) {
+        Some(step) => {
+            step.attempts = step.attempts.saturating_add(1);
+            step.attempts
+        }
+        None => 0,
+    };
+    plan.updated_at = chrono::Utc::now().timestamp();
+    if let Ok(body) = serde_json::to_string_pretty(&plan) {
+        crate::write_atomic(&path(), &body);
+    }
+    n
+}
+
+/// **REVISA el plan** (replanificación): conserva los pasos ya LOGRADOS y reemplaza los
+/// pendientes por unos nuevos, tras un bloqueo. Suma 1 a `revisions`. Devuelve el nº de
+/// revisiones tras la revisión, o `None` si no hay plan o los pasos nuevos quedaron vacíos.
+pub fn revise_pending(new_steps: Vec<String>) -> Option<u8> {
+    let _guard = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut plan = active()?;
+    let fresh: Vec<PlanStep> = new_steps
+        .into_iter()
+        .filter(|s| s.trim().chars().count() >= 4)
+        .map(|s| PlanStep {
+            text: s.trim().chars().take(200).collect(),
+            done: false,
+            attempts: 0,
+        })
+        .collect();
+    if fresh.is_empty() {
+        return None;
+    }
+    plan.steps.retain(|s| s.done); // conserva lo ya logrado
+    plan.steps.extend(fresh);
+    plan.revisions = plan.revisions.saturating_add(1);
+    plan.updated_at = chrono::Utc::now().timestamp();
+    let n = plan.revisions;
+    if let Ok(body) = serde_json::to_string_pretty(&plan) {
+        crate::write_atomic(&path(), &body);
+    }
+    Some(n)
 }
 
 /// **RE-ENTRADA del plan** al prompt: AION sabe qué propósito persigue y por dónde va, para
