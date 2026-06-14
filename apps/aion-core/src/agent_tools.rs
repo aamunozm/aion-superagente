@@ -1200,20 +1200,57 @@ impl Tool for MakeNoteTool {
 
 /// Formatea una instantánea de accesibilidad para el LLM: texto visible + lista de
 /// elementos interactivos NUMERADOS (el agente actúa por número, no por selector CSS).
+/// Máx. de texto de página por snapshot. Sin esto, una página grande (p. ej. un README de
+/// GitHub) entra ENTERA en la observación, se re-inyecta en cada paso del ReAct y, con un LLM
+/// local lento, agota el timeout de pared → el agente «se queda atascado». Acotar el snapshot
+/// (texto + elementos) mantiene cada paso ligero; si hace falta más, el agente puede hacer
+/// scroll/find.
+const SNAPSHOT_MAX_TEXT: usize = 2000;
+/// Máx. de elementos interactivos listados. Se priorizan los ETIQUETADOS (los «(sin etiqueta)»
+/// —decenas en webs como GitHub— rara vez sirven al agente y solo inflan el contexto).
+const SNAPSHOT_MAX_ELEMENTS: usize = 20;
+
 fn format_snapshot(s: &aion_browser::Snapshot) -> String {
-    let mut out = format!("[{}] {}\n{}\n", s.view.title, s.view.url, s.view.text);
+    let full_len = s.view.text.chars().count();
+    let text: String = s.view.text.chars().take(SNAPSHOT_MAX_TEXT).collect();
+    let mut out = format!("[{}] {}\n{}", s.view.title, s.view.url, text);
+    if full_len > SNAPSHOT_MAX_TEXT {
+        out.push_str(&format!(
+            "\n…(+{} caracteres recortados; haz scroll o usa browser_find para ver más)",
+            full_len - SNAPSHOT_MAX_TEXT
+        ));
+    }
+    out.push('\n');
     if s.elements.is_empty() {
         out.push_str("\n(sin elementos interactivos detectados)");
         return out;
     }
+    // Prioriza elementos CON etiqueta; si casi ninguno la tiene, muestra todos (acotados).
+    let labeled: Vec<_> = s
+        .elements
+        .iter()
+        .filter(|e| !e.name.trim().is_empty())
+        .collect();
+    let chosen: Vec<_> = if labeled.len() >= 3 {
+        labeled
+    } else {
+        s.elements.iter().collect()
+    };
+    let shown = chosen.len().min(SNAPSHOT_MAX_ELEMENTS);
     out.push_str("\nElementos interactivos (usa el número con browser_click / browser_type):\n");
-    for e in &s.elements {
+    for e in chosen.iter().take(SNAPSHOT_MAX_ELEMENTS) {
         let name = if e.name.is_empty() {
             "(sin etiqueta)"
         } else {
             &e.name
         };
         out.push_str(&format!("[{}] {} «{}»\n", e.ref_id, e.kind, name));
+    }
+    if s.elements.len() > shown {
+        out.push_str(&format!(
+            "(+{} elementos más omitidos)\n",
+            s.elements.len() - shown
+        ));
     }
     out
 }

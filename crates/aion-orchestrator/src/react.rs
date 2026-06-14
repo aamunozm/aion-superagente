@@ -478,8 +478,20 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                 summary: observation.clone(),
             });
 
+            // DEFENSA EN PROFUNDIDAD: el scratchpad se re-envía ENTERO en cada paso, así que
+            // una observación enorme (página web, archivo grande) infla el prompt en cada
+            // vuelta y, con un LLM local lento, agota el timeout de pared. Se acota lo que
+            // entra al scratchpad —independiente de la herramienta— sin tocar lo publicado.
+            const MAX_OBS_CHARS: usize = 3000;
+            let obs_for_pad: String = if observation.chars().count() > MAX_OBS_CHARS {
+                let t: String = observation.chars().take(MAX_OBS_CHARS).collect();
+                format!("{t}\n…(observación recortada para no saturar)")
+            } else {
+                observation
+            };
+
             scratchpad.push_str(&format!(
-                "Thought: {}\nAction: {action}\nAction Input: {input}\nObservation: {observation}\n",
+                "Thought: {}\nAction: {action}\nAction Input: {input}\nObservation: {obs_for_pad}\n",
                 extract(&text, "Thought:").unwrap_or_default()
             ));
         }
