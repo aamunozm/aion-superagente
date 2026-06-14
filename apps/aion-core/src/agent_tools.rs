@@ -312,6 +312,55 @@ impl Default for FileReadTool {
     }
 }
 
+/// Subrutas dentro del HOME que NUNCA deben exponerse al agente ni a la ingesta,
+/// aunque caigan bajo el HOME: claves SSH/GPG, credenciales cloud, tokens, llaveros.
+/// La policy de gobernanza (`aion-computer`) ya las marcaba como protegidas; aquí se
+/// aplican en la herramienta REAL que lee del disco (antes solo se confiaba en el HOME).
+fn is_protected_subpath(canon: &std::path::Path, home: &std::path::Path) -> bool {
+    const DENY: &[&str] = &[
+        ".ssh",
+        ".aws",
+        ".gnupg",
+        ".config/gh",
+        ".kube",
+        ".docker/config.json",
+        ".netrc",
+        "Library/Keychains",
+    ];
+    DENY.iter().any(|rel| canon.starts_with(home.join(rel)))
+}
+
+/// Confina una ruta dada por el usuario/agente a su carpeta HOME y rechaza subrutas
+/// sensibles. Devuelve la ruta canónica si es segura (el archivo debe existir).
+/// **Fuente única de verdad** para todo acceso a disco por ruta (file_read + ingesta):
+/// canonicalizar resuelve `..` y symlinks, así que no se puede escapar del HOME.
+pub(crate) fn safe_home_path(raw: &str) -> Result<std::path::PathBuf, String> {
+    let home =
+        std::env::var("HOME").map_err(|_| "no encuentro tu carpeta de usuario".to_string())?;
+    let home = std::path::PathBuf::from(&home);
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("indica la ruta del archivo".into());
+    }
+    let p = if let Some(rest) = raw.strip_prefix("~/") {
+        home.join(rest)
+    } else {
+        std::path::PathBuf::from(raw)
+    };
+    let canon = p
+        .canonicalize()
+        .map_err(|_| format!("no encuentro el archivo «{raw}»"))?;
+    if !canon.starts_with(&home) {
+        return Err("por seguridad solo puedo acceder dentro de tu carpeta de usuario".into());
+    }
+    if is_protected_subpath(&canon, &home) {
+        return Err(
+            "esa ruta contiene datos sensibles (claves o credenciales) y está protegida".into(),
+        );
+    }
+    Ok(canon)
+}
+
 #[async_trait]
 impl Tool for FileReadTool {
     fn name(&self) -> &str {
@@ -323,24 +372,7 @@ impl Tool for FileReadTool {
          notas, código o documentos antes de responder."
     }
     async fn run(&self, input: &str) -> Result<String, String> {
-        let home =
-            std::env::var("HOME").map_err(|_| "no encuentro tu carpeta de usuario".to_string())?;
-        let home = std::path::PathBuf::from(&home);
-        let raw = input.trim();
-        if raw.is_empty() {
-            return Err("indica la ruta del archivo".into());
-        }
-        let p = if let Some(rest) = raw.strip_prefix("~/") {
-            home.join(rest)
-        } else {
-            std::path::PathBuf::from(raw)
-        };
-        let canon = p
-            .canonicalize()
-            .map_err(|_| format!("no encuentro el archivo «{raw}»"))?;
-        if !canon.starts_with(&home) {
-            return Err("por seguridad solo puedo leer dentro de tu carpeta de usuario".into());
-        }
+        let canon = safe_home_path(input)?;
         if !canon.is_file() {
             return Err("eso no es un archivo".into());
         }

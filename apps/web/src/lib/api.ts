@@ -210,6 +210,19 @@ export async function answerQuestion(id: string, text: string): Promise<void> {
 
 /** Lee un cuerpo SSE y entrega cada evento `data:` parseado a `onEvent`. */
 async function readSse<T>(res: Response, onEvent: (e: T) => void): Promise<void> {
+  // Si el backend respondió un error (modelo no listo, auth/CORS, 5xx…), el cuerpo
+  // NO es SSE: sin esta comprobación readSse drenaría el body sin emitir nada y
+  // resolvería en silencio → la UI se cuelga en una burbuja vacía sin error. Hacer
+  // throw aquí propaga el fallo al try/catch de quien llama (chat/agent/crew/mind/pull).
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = (await res.text()).slice(0, 200);
+    } catch {
+      /* sin cuerpo legible */
+    }
+    throw new Error(`backend ${res.status}${detail ? `: ${detail}` : ""}`);
+  }
   if (!res.body) throw new Error("sin cuerpo de respuesta");
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -245,6 +258,7 @@ export async function chatStream(
   onEvent: (e: ChatEvent) => void,
   convoId?: string,
   projectId?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch(`${BRIDGE_URL}/api/chat`, {
     method: "POST",
@@ -256,6 +270,7 @@ export async function chatStream(
       convo_id: convoId ?? "default",
       project_id: projectId,
     }),
+    signal,
   });
   await readSse(res, onEvent);
 }
@@ -344,11 +359,13 @@ export async function agentStream(
   task: string,
   onEvent: (e: AgentEvent) => void,
   context?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch(`${BRIDGE_URL}/api/agent`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ task, lang: lang(), context }),
+    signal,
   });
   await readSse(res, onEvent);
 }
@@ -358,11 +375,13 @@ export async function crewStream(
   task: string,
   onEvent: (e: AgentEvent) => void,
   context?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch(`${BRIDGE_URL}/api/crew`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ task, lang: lang(), context }),
+    signal,
   });
   await readSse(res, onEvent);
 }

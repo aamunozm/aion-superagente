@@ -116,6 +116,10 @@ export default function ChatPage() {
   // ¿Ariel ya habló en esta sesión? Si saludó él primero, el saludo automático
   // de apertura se descarta — saludar dos veces rompe la sensación de vida.
   const userSpokeRef = useRef(false);
+  // Aborta el stream SSE en curso al desmontar o al cambiar de conversación. Sin esto
+  // el fetch sigue vivo en background y sus callbacks escriben sobre los turnos de OTRA
+  // conversación (estado corrupto) o sobre un componente ya desmontado (warning de React).
+  const streamAbort = useRef<AbortController | null>(null);
 
   // Al montar: restaura la última conversación (o crea una). Arregla la pérdida del
   // chat al navegar entre menús.
@@ -129,6 +133,10 @@ export default function ChatPage() {
       setConvoId(newId());
     }
   }, []);
+
+  // Al desmontar: corta cualquier stream en vuelo (evita fetch zombie + setState tras
+  // desmontar). El cambio de conversación lo aborta `newChat`/`openConvo`.
+  useEffect(() => () => streamAbort.current?.abort(), []);
 
   // Persiste los turnos de la conversación actual + actualiza su título en la lista.
   useEffect(() => {
@@ -145,6 +153,7 @@ export default function ChatPage() {
   }, [turns, convoId]);
 
   function newChat() {
+    streamAbort.current?.abort();
     const id = newId();
     setConvoId(id);
     setTurns([]);
@@ -153,6 +162,7 @@ export default function ChatPage() {
   }
 
   function openConvo(id: string) {
+    streamAbort.current?.abort();
     setConvoId(id);
     setTurns(loadTurns(id));
     setShowHistory(false);
@@ -310,6 +320,11 @@ export default function ChatPage() {
     }
     setInput("");
     setBusy(true);
+    // Un controller por envío: aborta el anterior si quedó colgando y permite cortar
+    // este al desmontar/cambiar de conversación.
+    streamAbort.current?.abort();
+    const ctrl = new AbortController();
+    streamAbort.current = ctrl;
     const idx = turns.length;
     setTurns((t) => [...t, { prompt, mode, thinking: "", steps: [], answer: "" }]);
     const update = (patch: (t: Turn) => Turn) =>
@@ -326,7 +341,7 @@ export default function ChatPage() {
             update((t) => ({ ...t, meta: `${ev.tokens} tokens · ${ev.tps.toFixed(1)} tok/s` }));
           else if (ev.kind === "error") update((t) => ({ ...t, answer: `⚠️ ${ev.text}` }));
           scroll();
-        }, convoId);
+        }, convoId, undefined, ctrl.signal);
       } else {
         const stream = mode === "crew" ? crewStream : agentStream;
         // CONTEXTO RECIENTE para el agente: los últimos turnos viajan con la tarea.
@@ -357,11 +372,14 @@ export default function ChatPage() {
           else if (ev.kind === "ask") { setPendingAsk({ id: ev.id, text: ev.text }); setAskDraft(""); }
           else if (ev.kind === "error") update((t) => ({ ...t, answer: `⚠️ ${ev.text}` }));
           scroll();
-        }, context || undefined);
+        }, context || undefined, ctrl.signal);
       }
     } catch (err) {
+      // Abort por navegación/cambio de conversación: no es un fallo, no lo pintes.
+      if (err instanceof DOMException && err.name === "AbortError") return;
       update((t) => ({ ...t, answer: `⚠️ ${err instanceof Error ? err.message : "error"}` }));
     } finally {
+      if (streamAbort.current === ctrl) streamAbort.current = null;
       setBusy(false);
     }
   }
