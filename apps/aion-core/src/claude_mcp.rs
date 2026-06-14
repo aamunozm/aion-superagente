@@ -91,7 +91,8 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Json<Value> {
 // ---------------------------------------------------------------------------
 
 /// Comparación por hash (longitud constante): evita timing leaks del token.
-fn token_matches(provided: &str, expected: &str) -> bool {
+/// Reutilizada por la auth local de `/api/*` (ver `serve::require_api_token`).
+pub(crate) fn token_matches(provided: &str, expected: &str) -> bool {
     if expected.is_empty() {
         return false;
     }
@@ -121,8 +122,10 @@ fn audit_path() -> std::path::PathBuf {
     crate::app_data_dir().join("claude_code_audit.jsonl")
 }
 
-/// Una línea por tools/call: visible en la página Claude Code de la UI.
-pub fn audit(tool: &str, query: &str, result_chars: usize, ok: bool) {
+/// Una línea por tools/call: visible en la página Claude Code de la UI. `saved_chars` son
+/// los caracteres que la traducción ES→EN recortó en esa llamada (0 si no compactó) → se
+/// registran como `saved_tokens` para poder graficar el ahorro de la traducción.
+pub fn audit(tool: &str, query: &str, result_chars: usize, saved_chars: usize, ok: bool) {
     let q: String = query.chars().take(200).collect();
     let line = json!({
         "ts": chrono::Utc::now().to_rfc3339(),
@@ -130,6 +133,7 @@ pub fn audit(tool: &str, query: &str, result_chars: usize, ok: bool) {
         "query": q,
         "result_chars": result_chars,
         "est_tokens": result_chars / 4,
+        "saved_tokens": saved_chars / 4,
         "ok": ok,
     });
     let p = audit_path();
@@ -259,9 +263,13 @@ pub async fn mcp_post(headers: HeaderMap, Json(req): Json<Value>) -> Response {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            match call_tool(name, &args).await {
+            // Envuelto en `metered_scope` para capturar cuántos tokens ahorró la traducción
+            // ES→EN dentro de ESTA llamada (lo acumula `mcp_compact::compact_for_bridge`).
+            let (result, saved_chars) =
+                crate::mcp_compact::metered_scope(call_tool(name, &args)).await;
+            match result {
                 Ok(text) => {
-                    audit(name, &summary, text.chars().count(), true);
+                    audit(name, &summary, text.chars().count(), saved_chars, true);
                     rpc_result(
                         id,
                         json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
@@ -269,7 +277,7 @@ pub async fn mcp_post(headers: HeaderMap, Json(req): Json<Value>) -> Response {
                     .into_response()
                 }
                 Err(e) => {
-                    audit(name, &summary, e.chars().count(), false);
+                    audit(name, &summary, e.chars().count(), 0, false);
                     rpc_result(
                         id,
                         json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
@@ -375,6 +383,21 @@ fn tool_defs() -> Value {
             "name": "aion_brief",
             "description": "Resumen compacto del contexto de AION (~450 tokens): identidad, recuerdos recientes de-duplicados, proyectos, biblioteca Y resumen del grafo de conocimiento (conceptos, comunidades, temas). Úsalo UNA VEZ al empezar la sesión. Después de llamarlo NO necesitas aion_graph_query en modo global solo para orientarte; ya tienes los temas principales.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "aion_forget",
+            "description": "Borra recuerdos de AION PERMANENTEMENTE por id (en RAM y en disco; NO se puede deshacer). Operación DESTRUCTIVA: úsala solo para purgar recuerdos erróneos u obsoletos que el USUARIO te pida explícitamente. Requiere los ids EXACTOS (UUID); aion_memory_search no los devuelve, así que debe dártelos el usuario. Deja constancia en la Bandeja de AION.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Ids exactos (UUID) de los recuerdos a borrar. Máx. 50."
+                    }
+                },
+                "required": ["ids"]
+            }
         }
     ])
 }
@@ -445,7 +468,13 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             if grounding.is_empty() {
                 return Ok("La biblioteca no tiene pasajes relevantes para esa pregunta.".into());
             }
-            Ok(wrap_untrusted(&grounding))
+            // OPTIMIZACIÓN DE TOKENS DEL PUENTE (igual que aion_memory_search): Claude Code
+            // paga por token, así que se sirve la versión inglesa cacheada de cada pasaje
+            // cuando existe, conservando la estructura (fuente/tema). Fail-open a español y
+            // calentado en segundo plano. `library_grounding` se comparte con la ruta LOCAL de
+            // Gemma (tokens gratis) y por eso NO se toca allí: la compactación vive solo aquí.
+            let compact = crate::mcp_compact::compact_grounding(&grounding);
+            Ok(wrap_untrusted(&compact))
         }
         "aion_graph_query" => {
             let query = args
@@ -596,6 +625,45 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 Err(e) => tracing::warn!("no se pudo dejar constancia en la bandeja: {e}"),
             }
             Ok(format!("Recuerdo guardado en AION (id {id})."))
+        }
+        "aion_forget" => {
+            // DESTRUCTIVA y expuesta a un agente externo: solo por ids EXACTOS. Como
+            // aion_memory_search NO devuelve ids, una inyección en contenido recuperado no
+            // puede fabricar ids válidos → no puede borrar nada; los ids los aporta el humano.
+            let ids: Vec<String> = args
+                .get("ids")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if ids.is_empty() {
+                return Err("Falta `ids` (lista de ids exactos a borrar)".into());
+            }
+            if ids.len() > 50 {
+                return Err("Máx. 50 ids por llamada".into());
+            }
+            let mem = crate::shared_memory().map_err(|e| e.to_string())?;
+            let removed = mem.forget(&ids).map_err(|e| e.to_string())?;
+            // Una operación destructiva del agente externo NO debe ser muda: constancia en la
+            // Bandeja (además de la auditoría JSONL del puente que registra toda tools/call).
+            if removed > 0 {
+                if let Err(e) = crate::inbox::Inbox::open(crate::inbox_path()).and_then(|ibx| {
+                    ibx.push(
+                        "claude-code",
+                        &format!("Claude Code borró {removed} recuerdo(s) de la memoria."),
+                    )
+                }) {
+                    tracing::warn!("no se pudo dejar constancia del borrado en la bandeja: {e}");
+                }
+            }
+            Ok(format!(
+                "Borrados {removed} de {} id(s) solicitados.",
+                ids.len()
+            ))
         }
         "aion_brief" => Ok(crate::claude_code::build_brief().await),
         _ => Err(format!("Tool desconocida: {name}")),
