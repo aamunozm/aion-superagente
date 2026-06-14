@@ -749,7 +749,9 @@ fn entities(s: &str) -> std::collections::HashSet<String> {
         let has_upper = t.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
         let has_sym = t.contains('#') || t.contains('-') || t.contains('_');
         if has_digit || has_upper || has_sym {
-            Some(t.to_lowercase())
+            // Detección sobre el token ORIGINAL (mayúscula/dígito/símbolo), pero se guarda
+            // plegado para que "Milán"/"Milan" o "José"/"Jose" casen entre consulta y recuerdo.
+            Some(fold(t))
         } else {
             None
         }
@@ -768,11 +770,33 @@ fn entity_overlap(
     inter / (a.len() as f32).min(b.len() as f32)
 }
 
-/// Solapamiento léxico (Jaccard de palabras significativas, en minúsculas). Capta
+/// Pliega diacríticos latinos comunes (español **e italiano**) a su letra base y pasa a
+/// minúscula. Determinista y sin dependencias: une "decisión"/"decision", "está"/"esta",
+/// "città"/"citta", "Milán"/"Milan" en el matching léxico y de entidades → robustez a
+/// acentos y a typos DE ACENTO, gratis. NO corrige typos arbitrarios (eso lo cubre la señal
+/// semántica BGE-M3, que es robusta a ruido). Aplicado por igual a la consulta y al recuerdo
+/// en tiempo de comparación, así que NO requiere re-embeber ni migrar lo ya almacenado.
+fn fold(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' | 'ã' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' | 'õ' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            'ç' => 'c',
+            other => other,
+        })
+        .collect()
+}
+
+/// Solapamiento léxico (Jaccard de palabras significativas, normalizadas con `fold`). Capta
 /// coincidencias exactas (nombres, términos) que el embedding semántico puede diluir.
 fn lexical_overlap(a: &str, b: &str) -> f32 {
     fn words(s: &str) -> std::collections::HashSet<String> {
-        s.to_lowercase()
+        fold(s)
             .split(|c: char| !c.is_alphanumeric())
             .filter(|w| w.len() > 3) // ignora palabras muy cortas/funcionales
             .map(|w| w.to_string())
@@ -1116,6 +1140,26 @@ mod tests {
         let map = mem.origins_for(&[id_u.clone(), id_e.clone()]);
         assert_eq!(map.get(&id_u).map(String::as_str), Some(""));
         assert_eq!(map.get(&id_e).map(String::as_str), Some("claude-code"));
+    }
+
+    #[test]
+    fn fold_strips_es_and_it_diacritics() {
+        assert_eq!(
+            fold("Decisión Città Milán ñoño"),
+            "decision citta milan nono"
+        );
+    }
+
+    #[test]
+    fn lexical_overlap_is_accent_insensitive() {
+        // La misma frase con acentos y sin (typo de acento) debe casar fuerte: el plegado
+        // une "decisión"/"decision", "está"/"esta", "autenticación"/"autenticacion".
+        let con = "la decisión crítica está en la autenticación";
+        let sin = "la decision critica esta en la autenticacion";
+        assert!(
+            lexical_overlap(con, sin) > 0.9,
+            "los acentos deberían plegarse en la señal léxica"
+        );
     }
 
     #[test]
