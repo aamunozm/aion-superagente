@@ -383,6 +383,21 @@ fn tool_defs() -> Value {
             "name": "aion_brief",
             "description": "Resumen compacto del contexto de AION (~450 tokens): identidad, recuerdos recientes de-duplicados, proyectos, biblioteca Y resumen del grafo de conocimiento (conceptos, comunidades, temas). Úsalo UNA VEZ al empezar la sesión. Después de llamarlo NO necesitas aion_graph_query en modo global solo para orientarte; ya tienes los temas principales.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "aion_forget",
+            "description": "Borra recuerdos de AION PERMANENTEMENTE por id (en RAM y en disco; NO se puede deshacer). Operación DESTRUCTIVA: úsala solo para purgar recuerdos erróneos u obsoletos que el USUARIO te pida explícitamente. Requiere los ids EXACTOS (UUID); aion_memory_search no los devuelve, así que debe dártelos el usuario. Deja constancia en la Bandeja de AION.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Ids exactos (UUID) de los recuerdos a borrar. Máx. 50."
+                    }
+                },
+                "required": ["ids"]
+            }
         }
     ])
 }
@@ -610,6 +625,45 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 Err(e) => tracing::warn!("no se pudo dejar constancia en la bandeja: {e}"),
             }
             Ok(format!("Recuerdo guardado en AION (id {id})."))
+        }
+        "aion_forget" => {
+            // DESTRUCTIVA y expuesta a un agente externo: solo por ids EXACTOS. Como
+            // aion_memory_search NO devuelve ids, una inyección en contenido recuperado no
+            // puede fabricar ids válidos → no puede borrar nada; los ids los aporta el humano.
+            let ids: Vec<String> = args
+                .get("ids")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if ids.is_empty() {
+                return Err("Falta `ids` (lista de ids exactos a borrar)".into());
+            }
+            if ids.len() > 50 {
+                return Err("Máx. 50 ids por llamada".into());
+            }
+            let mem = crate::shared_memory().map_err(|e| e.to_string())?;
+            let removed = mem.forget(&ids).map_err(|e| e.to_string())?;
+            // Una operación destructiva del agente externo NO debe ser muda: constancia en la
+            // Bandeja (además de la auditoría JSONL del puente que registra toda tools/call).
+            if removed > 0 {
+                if let Err(e) = crate::inbox::Inbox::open(crate::inbox_path()).and_then(|ibx| {
+                    ibx.push(
+                        "claude-code",
+                        &format!("Claude Code borró {removed} recuerdo(s) de la memoria."),
+                    )
+                }) {
+                    tracing::warn!("no se pudo dejar constancia del borrado en la bandeja: {e}");
+                }
+            }
+            Ok(format!(
+                "Borrados {removed} de {} id(s) solicitados.",
+                ids.len()
+            ))
         }
         "aion_brief" => Ok(crate::claude_code::build_brief().await),
         _ => Err(format!("Tool desconocida: {name}")),
