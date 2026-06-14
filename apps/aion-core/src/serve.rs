@@ -3191,6 +3191,41 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         "naviga",
         "calcol",
     ];
+    // CHARLA FUERTE (gana sobre stems de herramienta incidentales): mensajes claramente
+    // RELACIONALES o META sobre AION mismo —su evolución, esencia, cómo ayudarle a mejorar—.
+    // Sin esto, un «estoy BUSCANDO qué mejoras agregarte» dispara el stem «busca» y se enruta
+    // como TAREA al bucle ReAct, que no tiene herramienta para eso y se atasca hasta el timeout.
+    const STRONG_CHAT: &[&str] = &[
+        "trabajando en ti",
+        "quiero que seas",
+        "que seas más",
+        "que seas mas",
+        "ayudarte a evolucionar",
+        "ayudarte a crecer",
+        "ayudarte a mejorar",
+        "ayudarte a ser",
+        "cómo puedo ayudarte",
+        "como puedo ayudarte",
+        "en qué puedo ayudarte",
+        "en que puedo ayudarte",
+        "qué mejoras",
+        "que mejoras",
+        "mejoras te puedo",
+        "tu esencia",
+        "tu ser",
+        "tu evolución",
+        "tu evolucion",
+        "evolucionar tu",
+        "evolucionar aún",
+        "evolucionar aun",
+        "te gustaría",
+        "te gustaria",
+        "cómo te sientes",
+        "como te sientes",
+    ];
+    if STRONG_CHAT.iter().any(|k| t.contains(k)) {
+        return TalkClass::Chat;
+    }
     let toolish = words
         .iter()
         .any(|w| *w == "red" || TOOLISH.iter().any(|s| w.starts_with(s)));
