@@ -41,11 +41,21 @@ def key(s: str) -> str:
 
 
 def has_spanish_signal(t: str) -> bool:
-    """Réplica laxa de language_detector.rs: acentos/ñ o ≥2 palabras función ES."""
-    if any(c in t for c in "áéíóúÁÉÍÓÚñÑ¡¿"):
+    """Réplica laxa de language_detector.rs: ¿vale la pena traducir? (español O italiano).
+
+    Mismo gate que `needs_english_translation`: acentos agudos/ñ/¿¡ (español) o graves
+    à è ì ò ù (italiano), o ≥2 palabras función de cualquiera de las dos lenguas.
+    """
+    if any(c in t for c in "áéíóúÁÉÍÓÚñÑ¡¿àèìòùÀÈÌÒÙ"):
         return True
-    fn = {"el", "la", "de", "que", "en", "por", "los", "las", "una", "con",
-          "para", "del", "se", "es", "su", "lo", "como", "más", "pero", "sin"}
+    fn = {
+        # español
+        "el", "la", "de", "que", "en", "por", "los", "las", "una", "con",
+        "para", "del", "se", "es", "su", "lo", "como", "más", "pero", "sin",
+        # italiano
+        "il", "lo", "gli", "le", "di", "che", "non", "per", "uno", "un",
+        "sono", "anche", "nel", "nella", "alla", "ma", "se", "ed", "e", "della",
+    }
     words = [w.strip(".,;:()[]").lower() for w in t.split()]
     return sum(1 for w in words if w in fn) >= 2
 

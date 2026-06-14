@@ -3,12 +3,13 @@
 //! AION es local-first: el chat con Gemma corre on-device y sus tokens son *gratis*.
 //! Pero cuando un agente externo (Claude Code) consulta la memoria de AION vía MCP
 //! (`aion_memory_search`, `aion_brief`…), ese texto entra en el contexto de un modelo
-//! de **pago por token**. La memoria de AION está en español, y el español cuesta
-//! ~40% más tokens que el mismo hecho en inglés (medido con tiktoken sobre recuerdos
-//! reales). Ese 40% es el único ahorro que importa, y solo aquí.
+//! de **pago por token**. La memoria de AION está en español o italiano (Ariel es chileno
+//! viviendo en Italia), y ambas lenguas cuestan ~40% más tokens que el mismo hecho en
+//! inglés (medido con tiktoken sobre recuerdos reales). Ese 40% es el único ahorro que
+//! importa, y solo aquí.
 //!
 //! **Diseño** (el idioma se ata al CONSUMIDOR, no al almacenamiento):
-//! - La memoria se guarda y se sirve a Gemma SIEMPRE en español (íntegra, sin tocar).
+//! - La memoria se guarda y se sirve a Gemma SIEMPRE en su idioma original (íntegra).
 //! - Solo el puente MCP recibe una versión **inglesa** equivalente.
 //! - La traduce **Gemma local** (gratis), fiel y literal — NO un quita-stopwords.
 //! - Se **precomputa y cachea** por hash de contenido; nunca se traduce en caliente
@@ -228,12 +229,12 @@ pub async fn ensure_english(content: &str) -> Option<String> {
         return Some(en);
     }
     let trimmed = content.trim();
-    // Saltar lo trivial y lo que NO tiene señal de español (ya está en inglés/código →
-    // traducirlo no ahorra nada). Gate sesgado a traducir: ver `has_spanish_signal`.
+    // Saltar lo trivial y lo que NO tiene señal de español/italiano (ya está en inglés/código
+    // → traducirlo no ahorra nada). Gate sesgado a traducir: ver `needs_english_translation`.
     if trimmed.chars().count() < 40 {
         return None;
     }
-    if !crate::language_detector::has_spanish_signal(trimmed) {
+    if !crate::language_detector::needs_english_translation(trimmed) {
         return None;
     }
     let (tag, body) = split_tag(trimmed);
@@ -264,7 +265,7 @@ pub async fn ensure_english(content: &str) -> Option<String> {
     let engine = local_engine()?;
     let req = GenerateRequest {
         messages: vec![Message::user(format!(
-            "Translate the following Spanish note into clear, faithful English. \
+            "Translate the following note (Spanish or Italian) into clear, faithful English. \
              Preserve EVERY fact, name, number, path and identifier exactly as-is. \
              Be concise but omit nothing. Output ONLY the English translation, with no \
              preamble, quotes or notes.\n\n{body}"
