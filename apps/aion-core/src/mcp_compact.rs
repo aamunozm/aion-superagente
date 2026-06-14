@@ -25,6 +25,33 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+tokio::task_local! {
+    /// Acumulador POR LLAMADA MCP de los CHARS que ahorró la traducción ES→EN servida en
+    /// esa llamada (0 si se sirvió español / cache miss). El handler envuelve cada
+    /// `tools/call` con `metered_scope` y al terminar lee el total para auditarlo, así el
+    /// ahorro de la traducción deja de ser invisible. Fuera de un scope `record_saved` es
+    /// no-op, así que la compactación sigue funcionando igual desde cualquier otro contexto.
+    static SAVED_CHARS: std::cell::Cell<usize>;
+}
+
+/// Ejecuta `fut` dentro de un ámbito de medición y devuelve `(salida, chars_ahorrados)`.
+/// El total son los chars que la traducción al inglés recortó en TODA la llamada (suma de
+/// cada `compact_for_bridge`, incluido el por-pasaje de `compact_grounding`).
+pub async fn metered_scope<F: std::future::Future>(fut: F) -> (F::Output, usize) {
+    SAVED_CHARS
+        .scope(std::cell::Cell::new(0), async move {
+            let out = fut.await;
+            let saved = SAVED_CHARS.with(|c| c.get());
+            (out, saved)
+        })
+        .await
+}
+
+/// Suma chars ahorrados al acumulador de la llamada en curso. No-op si no hay scope activo.
+fn record_saved(chars: usize) {
+    let _ = SAVED_CHARS.try_with(|c| c.set(c.get() + chars));
+}
+
 /// Caché persistente { hash_contenido → versión inglesa }. Se carga del disco una vez.
 fn cache() -> &'static Mutex<HashMap<String, String>> {
     static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
@@ -105,6 +132,9 @@ impl Drop for InflightGuard {
 /// el español original ESTA vez y calienta la traducción en segundo plano.
 pub fn compact_for_bridge(content: &str) -> String {
     if let Some(en) = english_for(content) {
+        // Mide lo ahorrado por servir inglés en vez del español original (clamp a 0 por si
+        // una traducción puntual saliera más larga). Lo recoge el scope de la llamada MCP.
+        record_saved(content.chars().count().saturating_sub(en.chars().count()));
         return en;
     }
     let owned = content.to_string();

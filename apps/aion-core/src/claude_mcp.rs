@@ -122,8 +122,10 @@ fn audit_path() -> std::path::PathBuf {
     crate::app_data_dir().join("claude_code_audit.jsonl")
 }
 
-/// Una línea por tools/call: visible en la página Claude Code de la UI.
-pub fn audit(tool: &str, query: &str, result_chars: usize, ok: bool) {
+/// Una línea por tools/call: visible en la página Claude Code de la UI. `saved_chars` son
+/// los caracteres que la traducción ES→EN recortó en esa llamada (0 si no compactó) → se
+/// registran como `saved_tokens` para poder graficar el ahorro de la traducción.
+pub fn audit(tool: &str, query: &str, result_chars: usize, saved_chars: usize, ok: bool) {
     let q: String = query.chars().take(200).collect();
     let line = json!({
         "ts": chrono::Utc::now().to_rfc3339(),
@@ -131,6 +133,7 @@ pub fn audit(tool: &str, query: &str, result_chars: usize, ok: bool) {
         "query": q,
         "result_chars": result_chars,
         "est_tokens": result_chars / 4,
+        "saved_tokens": saved_chars / 4,
         "ok": ok,
     });
     let p = audit_path();
@@ -260,9 +263,13 @@ pub async fn mcp_post(headers: HeaderMap, Json(req): Json<Value>) -> Response {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            match call_tool(name, &args).await {
+            // Envuelto en `metered_scope` para capturar cuántos tokens ahorró la traducción
+            // ES→EN dentro de ESTA llamada (lo acumula `mcp_compact::compact_for_bridge`).
+            let (result, saved_chars) =
+                crate::mcp_compact::metered_scope(call_tool(name, &args)).await;
+            match result {
                 Ok(text) => {
-                    audit(name, &summary, text.chars().count(), true);
+                    audit(name, &summary, text.chars().count(), saved_chars, true);
                     rpc_result(
                         id,
                         json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
@@ -270,7 +277,7 @@ pub async fn mcp_post(headers: HeaderMap, Json(req): Json<Value>) -> Response {
                     .into_response()
                 }
                 Err(e) => {
-                    audit(name, &summary, e.chars().count(), false);
+                    audit(name, &summary, e.chars().count(), 0, false);
                     rpc_result(
                         id,
                         json!({ "content": [{ "type": "text", "text": e }], "isError": true }),

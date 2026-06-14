@@ -5055,12 +5055,22 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
     let mut tokens_served: u64 = 0;
     let mut writes: u64 = 0;
     let mut errors: u64 = 0;
+    // Ahorro de la TRADUCCIÓN ES→EN (lo que recortó servir inglés cacheado al puente). Es
+    // distinto del ahorro del RAG (servir solo lo relevante) que mide `total_savings_est`.
+    let mut tokens_saved_tr: u64 = 0;
+    let mut by_tool_translation: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
     for e in &entries {
         let tool = e.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
         let tok = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let saved = e.get("saved_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
         *by_tool.entry(tool.to_string()).or_insert(0) += 1;
         *by_tool_tokens.entry(tool.to_string()).or_insert(0) += tok;
         tokens_served += tok;
+        tokens_saved_tr += saved;
+        if saved > 0 {
+            *by_tool_translation.entry(tool.to_string()).or_insert(0) += saved;
+        }
         if tool == "aion_remember" {
             writes += 1;
         }
@@ -5068,6 +5078,57 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
             errors += 1;
         }
     }
+    // % de ahorro de la traducción sobre el equivalente español de TODO lo servido
+    // (servido_EN + ahorrado): cuántos tokens menos viajaron gracias a traducir.
+    let translation_savings_pct: u64 = {
+        let es_equiv = tokens_served + tokens_saved_tr;
+        if es_equiv > 0 {
+            (tokens_saved_tr as f64 / es_equiv as f64 * 100.0).round() as u64
+        } else {
+            0
+        }
+    };
+    // SESIONES: agrupa las llamadas por cercanía temporal (un hueco > 30 min abre una sesión
+    // nueva). Claude Code no envía un id de sesión, así que se infiere del tiempo. Por sesión:
+    // inicio, nº de llamadas, tokens servidos y tokens ahorrados por la traducción.
+    let mut timeline: Vec<(chrono::DateTime<chrono::Utc>, u64, u64)> = entries
+        .iter()
+        .filter_map(|e| {
+            let ts = e
+                .get("ts")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())?
+                .with_timezone(&chrono::Utc);
+            let served = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let saved = e.get("saved_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            Some((ts, served, saved))
+        })
+        .collect();
+    timeline.sort_by_key(|(ts, _, _)| *ts);
+    const SESSION_GAP_SECS: i64 = 30 * 60;
+    let mut sessions: Vec<serde_json::Value> = Vec::new();
+    let mut i = 0usize;
+    while i < timeline.len() {
+        let start = timeline[i].0;
+        let (mut calls, mut served, mut saved) = (0u64, 0u64, 0u64);
+        let mut last = start;
+        while i < timeline.len() && (timeline[i].0 - last).num_seconds() <= SESSION_GAP_SECS {
+            calls += 1;
+            served += timeline[i].1;
+            saved += timeline[i].2;
+            last = timeline[i].0;
+            i += 1;
+        }
+        sessions.push(serde_json::json!({
+            "started_at": start.to_rfc3339(),
+            "calls": calls,
+            "tokens_served": served,
+            "tokens_saved": saved,
+        }));
+    }
+    // Solo las últimas 30 sesiones al cliente (el chart muestra una cola; acota el payload).
+    let sessions_tail: Vec<serde_json::Value> =
+        sessions.iter().rev().take(30).rev().cloned().collect();
     // Coste hipotético de volcar la memoria vigente completa en cada sesión.
     let (full_dump_tokens, memory_count) = crate::shared_memory()
         .map(|m| {
@@ -5121,6 +5182,10 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
         "graph_concepts": graph_concepts,
         "graph_communities": graph_communities,
         "last_activity": last,
+        "tokens_saved_translation": tokens_saved_tr,
+        "translation_savings_pct": translation_savings_pct,
+        "by_tool_translation": by_tool_translation,
+        "sessions": sessions_tail,
     }))
 }
 
