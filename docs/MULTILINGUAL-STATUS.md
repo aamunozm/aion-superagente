@@ -52,6 +52,13 @@ función de cualquiera). Medido: italiano→inglés ahorra ~23% (hasta 28% en pr
    la traducción en segundo plano (`tokio::spawn`) para la próxima. Si Ollama está
    cerrado o la traducción falla, simplemente se sirve español. Nunca bloquea ni corrompe.
 4. Preserva la etiqueta de procedencia (`[hecho]`, `[aprendizaje]`…) sin traducirla.
+5. **QE por back-translation** (Fase 2): tras traducir, se traduce de vuelta al idioma origen
+   y se compara con el original vía BGE-M3. Si la similitud cae bajo umbral (def. 0.50,
+   `AION_TRANSLATION_QE_MIN`; `AION_TRANSLATION_QE=0` desactiva), NO se confía: se cachea y
+   sirve el ORIGINAL (fiel) en vez del inglés. Red de seguridad GRUESA —calibrada con datos:
+   lo coloquial-correcto baja a ~0.67, un error catastrófico a ~0.34— atrapa desastres
+   (alucinación, tema cambiado), no errores sutiles (eso lo cubre el meaning-first). NO usa
+   auto-juicio del LLM (sobreestima); compara significados con embeddings.
 
 **Conectado**: `aion_memory_search` (coste repetido por consulta), `aion_brief`
 (~450 tok, coste GARANTIZADO una vez por sesión) y `aion_library_search` (pasajes de
