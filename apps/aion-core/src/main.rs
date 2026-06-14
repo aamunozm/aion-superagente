@@ -1467,15 +1467,19 @@ async fn resolve_once(engine: &OllamaEngine, p: &crate::pending::Pending) -> (bo
 async fn finish_resolved(p: &crate::pending::Pending, answer: &str) -> (bool, String) {
     crate::pending::resolve(&p.id);
     let short_q: String = p.task.chars().take(90).collect();
-    let short_a: String = answer.chars().take(300).collect();
+    // La respuesta a Ariel debe llegar COMPLETA: antes se truncaba a 300 chars y se cortaba a
+    // media frase («...un as»). Límite generoso (la respuesta entera para preguntas normales);
+    // solo se acota lo absurdo. La memoria guarda una versión compacta (un hecho, no un ensayo).
+    let full_a: String = answer.chars().take(2400).collect();
+    let mem_a: String = answer.chars().take(500).collect();
     if let Ok(mem) = crate::shared_memory() {
         let _ = mem
             .store(&format!(
-                "[resuelto] Ariel preguntó «{short_q}» y lo resolví después: {short_a}"
+                "[resuelto] Ariel preguntó «{short_q}» y lo resolví después: {mem_a}"
             ))
             .await;
     }
-    let note = format!("Lo que me preguntaste antes —«{short_q}»— ya lo tengo: {short_a}");
+    let note = format!("Lo que me preguntaste antes —«{short_q}»— ya lo tengo: {full_a}");
     if serve::may_reach_out(&note) {
         if let Ok(ibx) = inbox::Inbox::open(inbox_path()) {
             let _ = ibx.push("respuesta", &note);
@@ -1484,7 +1488,7 @@ async fn finish_resolved(p: &crate::pending::Pending, answer: &str) -> (bool, St
             notify_user("💡 Te debía una respuesta", &note);
         }
     }
-    (true, format!("deuda resuelta: {short_a}"))
+    (true, format!("deuda resuelta: {mem_a}"))
 }
 
 /// `crear`: BISOCIACIÓN — toma dos recuerdos LEJANOS entre sí y busca la idea

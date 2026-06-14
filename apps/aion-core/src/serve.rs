@@ -3368,7 +3368,9 @@ async fn conversational_reply(
         ],
         think: false,
         temperature: Some(0.85),
-        max_tokens: Some(450),
+        // Holgura para respuestas COMPLETAS y reflexivas (Ariel pide que sea "muy completo"):
+        // 450 cortaba pensamientos a media frase en respuestas detalladas.
+        max_tokens: Some(700),
     };
     // 🤔 RAZONAMIENTO DELIBERADO ADAPTATIVO (#3): solo en preguntas DIFÍCILES (reflexión,
     // análisis, "por qué"), self-consistency — generamos DOS candidatos y un juez elige el
