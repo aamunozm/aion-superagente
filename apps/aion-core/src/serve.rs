@@ -896,6 +896,36 @@ fn looks_like_question(prompt: &str) -> bool {
         "necesito saber",
         "me puedes decir",
         "puedes decirme",
+        // Italiano (Ariel vive en Italia; AION lo usarán también italianos).
+        "cosa",
+        "che cosa",
+        "quale",
+        "quali",
+        "quando",
+        "dove",
+        "chi ",
+        "come ",
+        "perché",
+        "perche",
+        "quanto",
+        "quanti",
+        "sai ",
+        "ricordi",
+        "dimmi",
+        "raccontami",
+        "spiegami",
+        "puoi dirmi",
+        // Inglés (Claude Code y equipos internacionales).
+        "what",
+        "which",
+        "when",
+        "where",
+        "who ",
+        "how ",
+        "why ",
+        "do you know",
+        "tell me",
+        "explain",
     ];
     STARTS.iter().any(|w| p.starts_with(w))
 }
@@ -2829,7 +2859,7 @@ fn classify_message_cheap(task: &str) -> TalkClass {
     // uno, es tarea (la vía rápida no tiene herramientas: un dato pedido ahí solo
     // saldría inventado). «red» va aparte como palabra exacta (red local) para no
     // disparar con «reducir», «redondo», etc.
-    const TOOLISH: [&str; 43] = [
+    const TOOLISH: &[&str] = &[
         "temperatura",
         "clima",
         "grados",
@@ -2873,6 +2903,26 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         "proyecto",
         "skill",
         "calcul",
+        // Italiano (stems): meteo/prezzo/invia/spegni/accendi/cancella/sposta/cartella/
+        // cerca/apri/esegui/scarica/installa/schermo/posta/naviga/calcol/previsioni.
+        "meteo",
+        "previsioni",
+        "prezzo",
+        "invia",
+        "spegni",
+        "accendi",
+        "cancella",
+        "sposta",
+        "cartella",
+        "cerca",
+        "apri",
+        "esegui",
+        "scarica",
+        "installa",
+        "schermo",
+        "posta",
+        "naviga",
+        "calcol",
     ];
     let toolish = words
         .iter()
@@ -2884,7 +2934,7 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         return TalkClass::Chat;
     }
     // Charla sobre sí mismo o casual.
-    const CONV: [&str; 16] = [
+    const CONV: &[&str] = &[
         "te llamas",
         "quién eres",
         "quien eres",
@@ -2901,13 +2951,22 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         "cuéntame de ti",
         "quién soy",
         "quien soy",
+        // Italiano
+        "come ti chiami",
+        "chi sei",
+        "cosa fai",
+        "come stai",
+        "come va",
+        "sogni",
+        "parlami di te",
+        "chi sono",
     ];
     if CONV.iter().any(|k| t.contains(k)) {
         return TalkClass::Chat;
     }
     // CHARLA NARRATIVA: Ariel COMPARTE algo de su día/vida ("te cuento que…", un relato
     // en primera persona y pasado). Puede ser LARGO, pero NO pide herramientas.
-    const SHARING: [&str; 21] = [
+    const SHARING: &[&str] = &[
         "te cuento",
         "te comento",
         "te quería contar",
@@ -2929,6 +2988,17 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         "estuvimos ",
         "me picaron",
         "me siento",
+        // Italiano
+        "ti racconto",
+        "ti dico",
+        "volevo dirti",
+        "sai che",
+        "indovina",
+        "mi è successo",
+        "mi e successo",
+        "sono andato",
+        "sono andata",
+        "mi sento",
     ];
     if SHARING.iter().any(|k| t.contains(k)) {
         return TalkClass::Chat;
@@ -3007,8 +3077,32 @@ async fn conversational_reply(
 fn is_trivial_query(prompt: &str) -> bool {
     let p = prompt.trim().to_lowercase();
     let words = p.split_whitespace().count();
-    const GREETINGS: [&str; 10] = [
-        "hola", "buenas", "hey", "gracias", "ok", "vale", "adios", "adiós", "chao", "saludos",
+    const GREETINGS: &[&str] = &[
+        // Español
+        "hola",
+        "buenas",
+        "hey",
+        "gracias",
+        "ok",
+        "vale",
+        "adios",
+        "adiós",
+        "chao",
+        "saludos",
+        // Italiano
+        "ciao",
+        "buongiorno",
+        "buonasera",
+        "salve",
+        "grazie",
+        "va bene",
+        "arrivederci",
+        // Inglés
+        "hi",
+        "hello",
+        "thanks",
+        "thank you",
+        "bye",
     ];
     if words <= 2 && GREETINGS.iter().any(|g| p.starts_with(g)) {
         return true;
@@ -5285,7 +5379,33 @@ mod guard_tests {
 
 #[cfg(test)]
 mod intent_tests {
-    use super::{classify_message_cheap, TalkClass};
+    use super::{classify_message_cheap, is_trivial_query, looks_like_question, TalkClass};
+
+    #[test]
+    fn italian_messages_classified_like_spanish() {
+        // Preguntas en italiano deben detectarse como tal (bloquean para comprensión).
+        assert!(looks_like_question("cosa sai del mio progetto AION?"));
+        assert!(looks_like_question("come stai"));
+        assert!(looks_like_question("perché si è bloccato"));
+        // Saludos italianos → triviales (charla).
+        assert!(is_trivial_query("ciao"));
+        assert!(is_trivial_query("grazie"));
+        // Tarea en italiano → Tool (antes caía a Chat por keywords solo-español).
+        assert_eq!(
+            classify_message_cheap("cerca su internet il prezzo del bitcoin"),
+            TalkClass::Tool
+        );
+        assert_eq!(
+            classify_message_cheap("apri il documento e crea un riassunto"),
+            TalkClass::Tool
+        );
+        // Charla italiana sobre sí mismo → Chat.
+        assert_eq!(classify_message_cheap("come ti chiami?"), TalkClass::Chat);
+        assert_eq!(
+            classify_message_cheap("ti racconto che sono andato a Milano oggi"),
+            TalkClass::Chat
+        );
+    }
 
     #[test]
     fn obvious_chat_is_chat() {
