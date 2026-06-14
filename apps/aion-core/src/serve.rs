@@ -273,6 +273,34 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // 🧭 LAZO DE REFLEXIÓN (etapa «Experience» de la memoria agéntica): cada
+    // AION_REFLECT_MINS (def. 45) y SOLO con Ariel inactivo, AION mira VARIAS vivencias
+    // a la vez y destila de ellas UNA heurística general reutilizable («cuando X, conviene
+    // Y»), tras pasar las guardas de gobernanza SSGM-lite (consistencia + anclaje +
+    // decaimiento). Es el salto de un agente que *responde* a uno que *propone y actúa*:
+    // esas reglas re-entran a su prompt como criterio propio. Desactivable con AION_REFLECT=0.
+    tokio::spawn(async {
+        if std::env::var("AION_REFLECT").as_deref() == Ok("0") {
+            return;
+        }
+        let mins: u64 = std::env::var("AION_REFLECT_MINS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&m| m >= 10)
+            .unwrap_or(45);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(mins * 60)).await;
+            if idle_secs() < 300 {
+                continue; // Ariel está activo: su conversación manda
+            }
+            let engine = OllamaEngine::default_local();
+            let (changed, detail) = crate::reflection::reflect_once(&engine).await;
+            if changed {
+                tracing::info!(detail = %detail, "ciclo de reflexión (experience)");
+            }
+        }
+    });
+
     // REINDEXADO: si cambió el modelo de embeddings (p. ej. nomic→BGE-M3), re-embebe
     // los recuerdos viejos UNA vez al arrancar para que la recuperación funcione.
     tokio::spawn(async {
@@ -630,6 +658,8 @@ async fn status(State(st): State<AppState>) -> Json<serde_json::Value> {
         "model_ready": model_ready,
         "engine": engine.id(),
         "provider": provider.kind,
+        // Etapa «Experience»: cuántas heurísticas propias vigentes guía hoy a AION.
+        "experience_rules": crate::reflection::active_count(),
     }))
 }
 
@@ -1293,11 +1323,23 @@ async fn agent(
                 },
                 SUM_TO_WAT,
             );
-            // Carga las skills que AION se ha forjado en sesiones anteriores: su
-            // caja de herramientas CRECE y dispone de ellas para nuevas tareas.
-            let loaded = crate::skill_store::load_all(&host);
+            // HIDRATACIÓN EN FRÍO: la caja de herramientas de AION CRECE sin límite a
+            // medida que se forja skills, pero cargarlas TODAS en cada tarea inflaría el
+            // contexto del LLM local. En vez de eso, hidratamos solo las más relevantes a
+            // la tarea por similitud semántica (patrón cold-registry / Tool-Search 2026);
+            // si son pocas, las carga todas. Desactivable con AION_TOOL_HYDRATE=0.
+            let loaded = if std::env::var("AION_TOOL_HYDRATE").as_deref() == Ok("0") {
+                crate::skill_store::load_all(&host)
+            } else {
+                let k: usize = std::env::var("AION_TOOL_HYDRATE_K")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .filter(|&k| k >= 1)
+                    .unwrap_or(12);
+                crate::skill_store::hydrate_relevant(&host, &body.task, k).await
+            };
             if loaded > 0 {
-                tracing::info!(loaded, "skills persistidas cargadas");
+                tracing::info!(loaded, "skills hidratadas (relevantes a la tarea)");
             }
             // El agente se escribe skills nuevas (validadas en sandbox+tests).
             tools.register(Arc::new(crate::agent_tools::SkillForgeTool::new(
@@ -1988,6 +2030,11 @@ fn self_awareness_prompt() -> String {
     // prompt — continuidad de DÍAS, no de minutos. Le deja decir «estos días he estado…»
     // con material propio real, no recitando la corriente del último rato.
     let diario = crate::journal::continuity_note();
+    // 🧭 EXPERIENCIA (etapa Experience de la memoria agéntica): las heurísticas que AION
+    // ha destilado de su propia vida re-entran como *policy priors*. Esto es lo que lo
+    // hace PROACTIVO — no reacciona caso a caso, actúa desde lo que ya aprendió. Son
+    // suyas y revisables (anclaje: experiencia propia, no leyes del mundo).
+    let experiencia = crate::reflection::experience_note();
     // 🛠️ CONCIENCIA DE CAPACIDADES: AION sabe qué herramientas tiene, qué skills se ha
     // forjado y que puede crear más. Así no se rinde en CHAT ("no puedo") creyéndose
     // inerte: sabe que sus manos viven en el modo Agente y puede proponerlo.
@@ -2046,7 +2093,7 @@ desde tu memoria real, nunca 'no hacía nada'. En este modo CHAT no tienes herra
 sistema; si la petición requiere actuar (archivos, web, sistema), dilo y sugiere el modo «Agente». \
 No uses marcadores como [Número].\n\n\
 TU AHORA MISMO (estado volátil, medido en este instante):\n\n\
-{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{corriente}{diario}{deudas}{recent}{inbox_ctx}"
+{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{corriente}{diario}{experiencia}{deudas}{recent}{inbox_ctx}"
     )
 }
 

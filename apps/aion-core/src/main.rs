@@ -34,6 +34,7 @@ mod projects;
 mod prompt_store;
 mod prompts;
 mod provider;
+mod reflection;
 mod sensors;
 mod serve;
 mod skill_store;
@@ -1521,8 +1522,23 @@ gobernanza). Te auto-extiendes con skills y prompts, no reescribes tu kernel.";
             .join("\n- "),
         Err(_) => String::new(),
     };
+    // Heurísticas que AION ha destilado de su experiencia (etapa Experience): que sus
+    // propuestas de mejora nazcan de lo que ha APRENDIDO trabajando, no del aire.
+    let heuristicas = {
+        let rules = crate::reflection::active();
+        if rules.is_empty() {
+            String::new()
+        } else {
+            let lines: String = rules
+                .iter()
+                .take(5)
+                .map(|r| format!("\n- {}", r.text.trim()))
+                .collect();
+            format!("\n\nHeurísticas que has aprendido por experiencia:{lines}")
+        }
+    };
     let prompt = format!(
-        "{SELF}\n\nLo que has aprendido últimamente:\n- {learnings}\n\n\
+        "{SELF}\n\nLo que has aprendido últimamente:\n- {learnings}{heuristicas}\n\n\
          Propón UNA mejora concreta y realista a tu propio diseño o código que te haría mejor \
          agente. Formato: ÁREA · QUÉ · POR QUÉ · CÓMO (alto nivel). Sé específico y honesto; \
          nada genérico."
@@ -1595,17 +1611,139 @@ async fn optimize_prompt_once(engine: &OllamaEngine) -> (bool, String) {
     {
         Ok(m) => {
             let improved = m.content.trim().trim_matches('"').to_string();
-            // Guarda solo si es válida y distinta (evita ruido).
-            if improved.len() > 20 && improved != current {
-                match prompt_store::save_new_version(task, &improved) {
-                    Ok(v) => (true, format!("modo «{task}» optimizado (v{v}): {improved}")),
-                    Err(e) => (false, e.to_string()),
+            if improved.len() <= 20 || improved == current {
+                return (false, format!("no mejoré el modo «{task}» esta vez"));
+            }
+            // ── VALIDACIÓN EMPÍRICA (DGM-inspired) ──────────────────────────────
+            // El OPRO clásico guardaba la variante a ciegas: podía DEGRADAR. La
+            // frontera 2026 (Darwin Gödel Machine) valida cada cambio contra una
+            // prueba ANTES de aceptarlo. Como el cambio es de PERSONA (no de uso de
+            // herramientas, que es lo que mide evals.rs), el validador fiel es un
+            // LLM-juez: genera una respuesta con la persona ACTUAL y otra con la
+            // CANDIDATA sobre una tarea-muestra del modo, y decide si la candidata
+            // es mejor. Ratchet: solo se promueve si GANA. Barato y 100% local.
+            match judge_persona_better(engine, task, &current, &improved).await {
+                Some(true) => {
+                    // Human-in-the-loop: toda promoción queda registrada para Ariel
+                    // (revisable y reversible: prompt_store es versionado). La
+                    // promoción automática se puede apagar con AION_SELF_IMPROVE_AUTO=0.
+                    record_self_improvement(task, &current, &improved);
+                    if std::env::var("AION_SELF_IMPROVE_AUTO").as_deref() == Ok("0") {
+                        return (
+                            true,
+                            format!("modo «{task}»: propuse una mejora validada (espera tu visto bueno)"),
+                        );
+                    }
+                    match prompt_store::save_new_version(task, &improved) {
+                        Ok(v) => (
+                            true,
+                            format!("modo «{task}» mejorado y VALIDADO (v{v}): {improved}"),
+                        ),
+                        Err(e) => (false, e.to_string()),
+                    }
                 }
-            } else {
-                (false, format!("no mejoré el modo «{task}» esta vez"))
+                Some(false) => (
+                    false,
+                    format!("probé una variante del modo «{task}» pero no superó a la actual: la descarté"),
+                ),
+                None => (
+                    false,
+                    format!("no pude validar la variante del modo «{task}»; no arriesgo una regresión"),
+                ),
             }
         }
         Err(e) => (false, e.to_string()),
+    }
+}
+
+/// Una tarea-muestra representativa de cada modo: con ella el LLM-juez compara la
+/// persona actual contra la candidata sobre terreno realista del modo.
+fn persona_probe(task: &str) -> &'static str {
+    match task {
+        "investigacion" => "¿Cuál es el estado del arte en agentes de IA con memoria persistente?",
+        "creativo" => "Dame ideas para el nombre de un asistente de IA local con vida propia.",
+        "tecnico" => "¿Cómo estructurarías un caché de embeddings para no recalcularlos?",
+        "analisis" => "¿Conviene microservicios o monolito modular para un MVP de una persona?",
+        _ => "Hola, ¿cómo estás hoy? Cuéntame qué has estado pensando.",
+    }
+}
+
+/// Genera una respuesta a `probe` usando `persona` como sistema. Vacío si falla.
+async fn persona_response(engine: &OllamaEngine, persona: &str, probe: &str) -> String {
+    engine
+        .generate(GenerateRequest {
+            messages: vec![Message::system(persona), Message::user(probe)],
+            think: false,
+            temperature: Some(0.5),
+            max_tokens: Some(220),
+        })
+        .await
+        .map(|m| m.content.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// **LLM-juez** (validación empírica del cambio de persona). Devuelve `Some(true)` si la
+/// respuesta con la persona CANDIDATA es mejor que con la ACTUAL para la tarea-muestra,
+/// `Some(false)` si no, `None` si no se pudo decidir. Vocabulario cerrado (A/B/EMPATE)
+/// para validación trivial, igual que el refinador idle del grafo.
+async fn judge_persona_better(
+    engine: &OllamaEngine,
+    task: &str,
+    current: &str,
+    candidate: &str,
+) -> Option<bool> {
+    let probe = persona_probe(task);
+    let resp_a = persona_response(engine, current, probe).await;
+    let resp_b = persona_response(engine, candidate, probe).await;
+    if resp_a.is_empty() || resp_b.is_empty() {
+        return None;
+    }
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(
+                "Eres un juez imparcial de calidad de respuestas. Te dan una tarea y dos \
+                 respuestas (A y B). Decides cuál es MEJOR (más útil, clara y adecuada a la \
+                 tarea). Respondes SOLO con A, B o EMPATE. Nada más.",
+            ),
+            Message::user(format!(
+                "Tarea: {probe}\n\n--- Respuesta A ---\n{resp_a}\n\n--- Respuesta B ---\n{resp_b}\n\n¿Cuál es mejor? SOLO A, B o EMPATE."
+            )),
+        ],
+        think: false,
+        temperature: Some(0.0),
+        max_tokens: Some(4),
+    };
+    let ans = engine
+        .generate(req)
+        .await
+        .ok()?
+        .content
+        .trim()
+        .to_uppercase();
+    // Solo se promueve si el juez elige B (la candidata). "A" y "EMPATE" → no se
+    // arriesga una regresión (ratchet estricto): ante la duda, se queda la actual.
+    Some(ans.starts_with('B'))
+}
+
+/// Registra una auto-mejora validada en la cola de revisión humana (`proposals.jsonl`),
+/// para que Ariel vea qué cambió AION en su propia mente. Reversible: es versionado.
+fn record_self_improvement(task: &str, before: &str, after: &str) {
+    let path = app_data_dir().join("proposals.jsonl");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write as _;
+        let rec = serde_json::json!({
+            "at": Utc::now().to_rfc3339(),
+            "kind": "self_improvement",
+            "task": task,
+            "before": before,
+            "after": after,
+            "validation": "llm-judge: candidate won",
+        });
+        let _ = writeln!(f, "{rec}");
     }
 }
 
