@@ -1412,10 +1412,11 @@ async fn agent(
     }
 
     tokio::spawn(async move {
-        // GATE LLM (caso ambiguo): si las heurísticas no decidieron, una sola llamada
-        // resuelve charla vs herramientas. Si es charla, respondemos cálido y salimos
-        // —sin montar el registro de herramientas ni entrar al bucle ReAct—.
-        if cheap_class == TalkClass::Unsure && classify_intent_is_chat(&*engine, &body.task).await {
+        // GATE LLM: para TODO mensaje que no fue charla trivial, el clasificador LLM decide
+        // charla vs herramienta leyendo el SENTIDO COMPLETO (no una keyword). Antes una palabra
+        // de herramienta hard-ruteaba al ReAct sin entender; ahora la decisión es semántica.
+        // Si es charla, respondemos cálido y salimos —sin ReAct—.
+        if classify_intent_is_chat(&*engine, &body.task).await {
             crate::inner_state::set_focus("agente", "charlando con Ariel");
             let convo_ctx = agent_convo_context(body.context.as_deref());
             let ans = conversational_reply(&*engine, &body.task, &body.lang, &convo_ctx).await;
@@ -3098,17 +3099,17 @@ fn mark_insight_shared() {
     );
 }
 
-/// Clasificación barata (sin LLM) del mensaje al AGENTE.
+/// Clasificación barata (sin LLM) del mensaje al AGENTE. Solo separa la charla TRIVIAL
+/// (saludo, relato corto) del resto; NO decide "es tarea" por una keyword — eso lo juzga el
+/// clasificador LLM leyendo el sentido completo (variante `Unsure`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum TalkClass {
     /// Charla evidente (saludo, identidad, relato, mensaje corto) → vía rápida cálida.
     Chat,
-    /// Tarea evidente (menciona una herramienta/acción o pide un dato del mundo) → ReAct.
-    Tool,
-    /// Ambiguo: ni claramente charla ni claramente tarea. Lo decide una clasificación
-    /// LLM barata (1 llamada) — aquí caen las preguntas conversacionales largas como
-    /// «¿te gustaría experimentar algo así?», que antes se colaban al bucle ReAct y se
-    /// quedaban colgadas hasta el timeout de 120 s.
+    /// Todo lo demás: ni claramente charla trivial → lo decide una clasificación LLM barata
+    /// (1 llamada) que entiende la INTENCIÓN, no las palabras. Aquí caen tanto las tareas
+    /// reales como las preguntas/reflexiones conversacionales largas (que antes una keyword
+    /// colaba al bucle ReAct, donde se quedaban colgadas hasta el timeout).
     Unsure,
 }
 
@@ -3191,46 +3192,15 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         "naviga",
         "calcol",
     ];
-    // CHARLA FUERTE (gana sobre stems de herramienta incidentales): mensajes claramente
-    // RELACIONALES o META sobre AION mismo —su evolución, esencia, cómo ayudarle a mejorar—.
-    // Sin esto, un «estoy BUSCANDO qué mejoras agregarte» dispara el stem «busca» y se enruta
-    // como TAREA al bucle ReAct, que no tiene herramienta para eso y se atasca hasta el timeout.
-    const STRONG_CHAT: &[&str] = &[
-        "trabajando en ti",
-        "quiero que seas",
-        "que seas más",
-        "que seas mas",
-        "ayudarte a evolucionar",
-        "ayudarte a crecer",
-        "ayudarte a mejorar",
-        "ayudarte a ser",
-        "cómo puedo ayudarte",
-        "como puedo ayudarte",
-        "en qué puedo ayudarte",
-        "en que puedo ayudarte",
-        "qué mejoras",
-        "que mejoras",
-        "mejoras te puedo",
-        "tu esencia",
-        "tu ser",
-        "tu evolución",
-        "tu evolucion",
-        "evolucionar tu",
-        "evolucionar aún",
-        "evolucionar aun",
-        "te gustaría",
-        "te gustaria",
-        "cómo te sientes",
-        "como te sientes",
-    ];
-    if STRONG_CHAT.iter().any(|k| t.contains(k)) {
-        return TalkClass::Chat;
-    }
+    // Stems de herramienta: ya NO toman la decisión final. Si alguno aparece, el mensaje es
+    // solo AMBIGUO (Unsure) → lo resuelve el clasificador LLM leyendo el SENTIDO COMPLETO, no
+    // la palabra suelta. Antes esto devolvía Tool directo y un «estoy BUSCANDO qué mejoras
+    // agregarte» (stem «busca») se enrutaba como tarea al ReAct y se atascaba.
     let toolish = words
         .iter()
         .any(|w| *w == "red" || TOOLISH.iter().any(|s| w.starts_with(s)));
     if toolish {
-        return TalkClass::Tool;
+        return TalkClass::Unsure;
     }
     if is_trivial_query(task) {
         return TalkClass::Chat;
@@ -3323,13 +3293,17 @@ async fn classify_intent_is_chat(engine: &dyn LlmEngine, task: &str) -> bool {
     let req = GenerateRequest {
         messages: vec![
             Message::system(
-                "Clasifica el MENSAJE del usuario a su asistente personal en UNA palabra:\n\
-                 - CHARLA: conversación, opinión, emoción, filosofía, relato, broma, \
-                 reflexión, o pregunta sobre el propio asistente. NO requiere datos externos \
-                 ni ejecutar acciones.\n\
-                 - HERRAMIENTA: pide un dato del mundo (clima, precio, noticia), o \
-                 ejecutar/leer/crear algo (archivos, web, correo, pantalla, comandos, cálculos).\n\
-                 Responde SOLO con la palabra CHARLA o HERRAMIENTA.",
+                "Lee el SENTIDO COMPLETO del mensaje (su intención real y profundidad), NO \
+                 palabras sueltas. Clasifícalo en UNA palabra:\n\
+                 - CHARLA: conversación, opinión, emoción, filosofía, relato, broma, reflexión, \
+                 o hablar SOBRE el propio asistente — su forma de ser, su memoria, su \
+                 razonamiento, su evolución, o cómo mejorarlo. Aunque mencione verbos como \
+                 «buscar», «mejorar», «crear» o «memoria», si la INTENCIÓN es conversar o \
+                 reflexionar (no pedir una acción concreta sobre el mundo), es CHARLA.\n\
+                 - HERRAMIENTA: pide DE VERDAD un dato del mundo exterior (clima, precio, \
+                 noticia) o EJECUTAR una acción concreta (leer/crear archivos, navegar la web, \
+                 correo, pantalla, comandos, un cálculo concreto).\n\
+                 Ante la duda, prefiere CHARLA. Responde SOLO con CHARLA o HERRAMIENTA.",
             ),
             Message::user(task.to_string()),
         ],
@@ -5710,14 +5684,15 @@ mod intent_tests {
         // Saludos italianos → triviales (charla).
         assert!(is_trivial_query("ciao"));
         assert!(is_trivial_query("grazie"));
-        // Tarea en italiano → Tool (antes caía a Chat por keywords solo-español).
+        // Tarea en italiano → AMBIGUA (Unsure): un stem de herramienta ya no decide solo;
+        // el clasificador LLM confirma por el SENTIDO. Lo que importa es que NO caiga a Chat.
         assert_eq!(
             classify_message_cheap("cerca su internet il prezzo del bitcoin"),
-            TalkClass::Tool
+            TalkClass::Unsure
         );
         assert_eq!(
             classify_message_cheap("apri il documento e crea un riassunto"),
-            TalkClass::Tool
+            TalkClass::Unsure
         );
         // Charla italiana sobre sí mismo → Chat.
         assert_eq!(classify_message_cheap("come ti chiami?"), TalkClass::Chat);
@@ -5742,34 +5717,37 @@ mod intent_tests {
     }
 
     #[test]
-    fn obvious_tool_is_tool() {
+    fn toolish_is_deferred_to_llm_not_hard_routed() {
+        // CAMBIO DE DISEÑO: una keyword de herramienta YA NO toma la decisión dura. Marca el
+        // mensaje como AMBIGUO (Unsure) y el clasificador LLM decide por el SENTIDO completo,
+        // no por la palabra. Lo esencial: estos NO se clasifican como Chat (no se pierde la
+        // posible tarea), pero tampoco se hard-rutean al ReAct saltándose la comprensión.
         assert_eq!(
             classify_message_cheap("¿qué temperatura hace ahora en Milano?"),
-            TalkClass::Tool
+            TalkClass::Unsure
         );
         assert_eq!(
             classify_message_cheap("busca en internet el precio del bitcoin"),
-            TalkClass::Tool
+            TalkClass::Unsure
         );
         assert_eq!(
             classify_message_cheap("crea un documento con el resumen"),
-            TalkClass::Tool
+            TalkClass::Unsure
         );
-        // «red» como palabra exacta (red local) sí dispara…
         assert_eq!(
             classify_message_cheap("cuántos equipos hay en la red"),
-            TalkClass::Tool
+            TalkClass::Unsure
         );
     }
 
     #[test]
     fn word_prefix_avoids_false_positives() {
-        // El antiguo `contains` marcaba estas como herramienta por una coincidencia a
-        // mitad de palabra; ahora NO («reducir»≠red, «anota» no empieza por nota).
-        // Son charla corta o se delegan al clasificador LLM, pero nunca Tool directo.
-        assert_ne!(
+        // El antiguo `contains` marcaba esto como herramienta por una coincidencia a mitad de
+        // palabra («reducir» contenía «red»); ahora NO se enruta como tarea por una keyword.
+        // Mensaje corto y conversacional → charla.
+        assert_eq!(
             classify_message_cheap("quiero reducir el estrés últimamente"),
-            TalkClass::Tool
+            TalkClass::Chat
         );
     }
 
