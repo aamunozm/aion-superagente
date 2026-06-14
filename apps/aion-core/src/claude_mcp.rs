@@ -402,18 +402,30 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 .unwrap_or(5)
                 .clamp(1, 8) as usize;
             let mem = crate::shared_memory().map_err(|e| e.to_string())?;
+            // Búsqueda DIRECTA por relevancia (hops=0, SIN expansión asociativa). El grafo
+            // GAAMA es para la cognición interna de AION (ruta de chat): expande a vecinos
+            // del grafo con score plano 0.6. Pero en una búsqueda EXPLÍCITA de un agente
+            // externo eso devuelve el MISMO clúster denso sea cual sea la consulta (medido:
+            // "qué modelo usa AION" y "recetas de cocina" daban los mismos 0.6) → ruido que
+            // infla el contexto y despista. Aquí solo lo que de verdad casa con la consulta.
             let hits = mem
-                .retrieve_associative(query, k, 1)
+                .retrieve_associative(query, k, 0)
                 .await
                 .map_err(|e| e.to_string())?;
-            if hits.is_empty() {
+            // Filtro de relevancia (mismo criterio probado que la ruta de chat): si ni el
+            // mejor hit destaca (>=0.30), no hay nada relevante; si no, conserva lo que está
+            // dentro del 75% del mejor (umbral absoluto 0.28). Recorta la cola débil.
+            let best = hits.first().map(|h| h.score).unwrap_or(0.0);
+            if hits.is_empty() || best < 0.30 {
                 return Ok("Sin recuerdos relevantes para esa consulta.".into());
             }
+            let cutoff = (best * 0.75).max(0.28);
+            let useful: Vec<_> = hits.into_iter().filter(|h| h.score >= cutoff).collect();
             // OPTIMIZACIÓN DE TOKENS DEL PUENTE: Claude Code paga por token, así que se
-            // sirve la versión inglesa cacheada (≈40% menos tokens que el español, medido)
-            // cuando existe; en miss se sirve el español original y se calienta la caché
-            // en segundo plano para la próxima. Fail-open: nunca bloquea ni corrompe.
-            let body = hits
+            // sirve la versión inglesa cacheada (≈14-40% menos tokens, medido) cuando existe;
+            // en miss se sirve el español original y se calienta la caché en segundo plano.
+            // Fail-open: nunca bloquea ni corrompe.
+            let body = useful
                 .iter()
                 .map(|h| {
                     let c: String = h.content.chars().take(300).collect();
