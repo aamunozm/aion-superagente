@@ -28,8 +28,13 @@ compresores. Lo que sobrevive: el enum `Language` y el detector heurístico.
 
 | Consumidor | Idioma servido | Por qué |
 |---|---|---|
-| **Gemma (chat local)** | Español íntegro | Tokens gratis; traducir solo degradaría |
+| **Gemma (chat local)** | Español/italiano íntegro | Tokens gratis; traducir solo degradaría |
 | **Claude Code (puente MCP)** | Inglés equivalente | Tokens de pago; inglés ≈ **40% menos** (medido con tiktoken sobre recuerdos reales) |
+
+**Idiomas de origen**: español **e italiano** (Ariel es chileno viviendo en Italia), ambos
+~40% más caros en tokens que el inglés. El gate `language_detector::needs_english_translation`
+detecta los dos (acentos agudos/ñ/¿¡ del español, graves à è ì ò ù del italiano, o ≥2 palabras
+función de cualquiera). Medido: italiano→inglés ahorra ~23% (hasta 28% en prosa limpia).
 
 **Cómo se genera el inglés** (`apps/aion-core/src/mcp_compact.rs`):
 
@@ -64,7 +69,7 @@ sesión sirve inglés**. Desactivable con `AION_MCP_WARM=0`; tamaño con `AION_M
 
 | Archivo | Qué hace | Estado |
 |---|---|---|
-| `apps/aion-core/src/language_detector.rs` | `has_spanish_signal()`: gate barato y robusto | ✅ 2 tests sobre datos reales |
+| `apps/aion-core/src/language_detector.rs` | `needs_english_translation()`: gate ES **e IT** | ✅ 3 tests sobre datos reales |
 | `apps/aion-core/src/mcp_compact.rs` | Traducción Gemma + caché SHA-256 + fail-open + `compact_grounding()` + `warm()` | ✅ 5 tests |
 | `apps/aion-core/src/claude_mcp.rs` | `aion_memory_search` y `aion_library_search` compactan | ✅ |
 | `apps/aion-core/src/claude_code.rs` | `build_brief` compacta sus líneas de memoria | ✅ |
