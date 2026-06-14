@@ -73,7 +73,21 @@ pub struct Comprension {
     pub directive: String,
 }
 
+/// Umbral por DEBAJO del cual la comprensión es demasiado incierta para asumir: AION
+/// PREGUNTA en vez de adivinar (clarification loop, Fase 5). Conservador a propósito: el
+/// modelo da ~0.9 cuando lo tiene claro, así que esto solo dispara en turnos genuinamente
+/// ambiguos (mensajes confusos, mezcla de idiomas, jerga densa, frases a medias). Por debajo
+/// de `should_store_facts` (0.55): entre 0.45–0.55 no se guarda pero tampoco se pregunta.
+const CLARIFY_BELOW: f32 = 0.45;
+
 impl Comprension {
+    /// ¿La interpretación es tan incierta que conviene PREGUNTAR antes de responder? Nunca en
+    /// Charla: un saludo no necesita aclaración aunque la confianza sea baja. Ataca la grieta
+    /// #1 de la auditoría (errores silenciosos): mejor una pregunta breve que asumir mal.
+    pub fn should_clarify(&self) -> bool {
+        self.confidence < CLARIFY_BELOW && self.intent != Intent::Charla
+    }
+
     /// ¿Esta comprensión implica guardar hechos en memoria?
     pub fn should_store_facts(&self) -> bool {
         !self.facts.is_empty()
@@ -92,6 +106,17 @@ impl Comprension {
     /// Bloque que se INYECTA al final del prompt de sistema para ESTE turno. Aquí la
     /// honestidad se vuelve contextual: solo se invoca la cautela cuando corresponde.
     pub fn system_directive(&self, grounding_empty: bool) -> String {
+        // CLARIFICATION LOOP (Fase 5): si la interpretación es muy incierta, NO se asume una
+        // intención (riesgo de error silencioso): se pide aclaración. Tiene prioridad sobre
+        // la directiva normal por-intención, porque esa intención es justo lo dudoso.
+        if self.should_clarify() {
+            return "COMPRENSIÓN DEL TURNO — NO estás seguro de qué te quiere decir Ariel \
+                 (interpretación AMBIGUA, baja confianza): puede ser un mensaje confuso, a \
+                 medias, con jerga o mezcla de idiomas. NO asumas ni inventes una intención y \
+                 NO respondas a ciegas: haz UNA sola pregunta breve, concreta y cálida para \
+                 aclarar qué necesita antes de continuar."
+                .to_string();
+        }
         let base = match self.intent {
             Intent::Comparte => {
                 "ESTE TURNO: Ariel te está COMPARTIENDO información, no preguntando. \
@@ -338,5 +363,44 @@ mod tests {
     fn json_invalido_es_fail_open() {
         assert!(parse("no hay json aquí").is_none());
         assert!(parse("").is_none());
+    }
+
+    #[test]
+    fn baja_confianza_dispara_aclaracion() {
+        // Interpretación ambigua (confianza < 0.45) en algo que NO es charla → preguntar.
+        let c = Comprension {
+            intent: Intent::Pregunta,
+            confidence: 0.3,
+            needs_grounding: false,
+            facts: vec![],
+            directive: "Responde directo".into(),
+        };
+        assert!(c.should_clarify());
+        let d = c.system_directive(true);
+        assert!(d.contains("AMBIGUA") && d.contains("pregunta"));
+        // La aclaración tiene prioridad: NO usa la directiva normal de la intención.
+        assert!(!d.contains("Responde directo"));
+    }
+
+    #[test]
+    fn charla_o_alta_confianza_no_pide_aclaracion() {
+        // Charla con baja confianza: un saludo no necesita aclararse.
+        let charla = Comprension {
+            intent: Intent::Charla,
+            confidence: 0.2,
+            needs_grounding: false,
+            facts: vec![],
+            directive: String::new(),
+        };
+        assert!(!charla.should_clarify());
+        // Pregunta con confianza alta: tampoco.
+        let segura = Comprension {
+            intent: Intent::Pregunta,
+            confidence: 0.9,
+            needs_grounding: false,
+            facts: vec![],
+            directive: String::new(),
+        };
+        assert!(!segura.should_clarify());
     }
 }
