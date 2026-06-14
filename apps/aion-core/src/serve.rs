@@ -245,7 +245,12 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                 continue; // llegó Ariel mientras esperaba el turno: cede
             }
             let engine = OllamaEngine::default_local();
-            let (ok, detail) = crate::work_project_once(&engine).await;
+            let (ok, detail) = tokio::time::timeout(
+                std::time::Duration::from_secs(240),
+                crate::work_project_once(&engine),
+            )
+            .await
+            .unwrap_or((false, "proyecto: se agotó el tiempo".into()));
             if ok {
                 tracing::info!(detail = %detail, "insight autónomo de proyecto");
             }
@@ -279,7 +284,13 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                 continue; // llegó Ariel mientras esperaba el turno: cede el LLM
             }
             let engine = OllamaEngine::default_local();
-            let (goal, ok, detail) = crate::life_tick(&engine).await;
+            // Timeout: un LLM colgado no debe retener el autonomous_gate indefinidamente.
+            let (goal, ok, detail) = tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                crate::life_tick(&engine),
+            )
+            .await
+            .unwrap_or_else(|_| ("?".into(), false, "vida: se agotó el tiempo".into()));
             tracing::info!(goal = %goal, ok, detail = %detail, "ciclo de vida autónoma");
         }
     });
@@ -320,7 +331,14 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
             // mataría la task entera y la etapa Experience quedaría muerta hasta reiniciar).
             let h = tokio::spawn(async {
                 let engine = OllamaEngine::default_local();
-                crate::reflection::reflect_once(&engine).await
+                // Timeout interno: un Ollama colgado no debe retener el autonomous_gate (ni la
+                // sub-tarea) para siempre. La sub-tarea SIEMPRE termina en ≤180s.
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(180),
+                    crate::reflection::reflect_once(&engine),
+                )
+                .await
+                .unwrap_or((false, "reflexión: se agotó el tiempo".into()))
             });
             match h.await {
                 Ok((changed, detail)) => {
@@ -1440,41 +1458,56 @@ async fn agent(
                      respuesta, dilo con franqueza.",
                     body.task
                 );
-                let ans = (*engine)
-                    .generate(GenerateRequest {
+                // Timeout propio: sin esto, una generación colgada deja la UI en «trabajando…»
+                // para siempre (el fast-path NO está bajo el salvavidas de pared del ReAct).
+                let gen = tokio::time::timeout(
+                    std::time::Duration::from_secs(90),
+                    (*engine).generate(GenerateRequest {
                         messages: vec![Message::user(prompt)],
                         think: false,
                         temperature: Some(0.3),
                         max_tokens: Some(500),
-                    })
-                    .await
-                    .map(|m| m.content.trim().to_string())
-                    .unwrap_or_default();
-                if !ans.is_empty() {
-                    crate::workspace::publish(crate::workspace::StreamEvent::now(
-                        "agente",
-                        "pensamiento",
-                        &format!("leí {url} y le respondí a Ariel"),
-                    ));
-                    crate::awareness::record_outcome(true);
-                    let _ = tx
-                        .send(
-                            Event::default().data(
-                                serde_json::json!({ "kind": "answer", "text": ans, "steps": 1 })
-                                    .to_string(),
-                            ),
-                        )
-                        .await;
-                    let _ = tx
-                        .send(
-                            Event::default()
-                                .data(serde_json::json!({ "kind": "done" }).to_string()),
-                        )
-                        .await;
-                    return;
-                }
+                    }),
+                )
+                .await;
+                let ans = match gen {
+                    Ok(Ok(m)) => m.content.trim().to_string(),
+                    _ => String::new(),
+                };
+                // Ya tenemos el contenido descargado: respondemos SIEMPRE desde aquí (no caemos
+                // al ReAct, que volvería a cargar el MISMO LLM —el cuello de botella— en vano).
+                let (text_out, ok) = if ans.is_empty() {
+                    (
+                        format!(
+                            "Leí {url}, pero no logré resumirlo ahora mismo (el modelo local \
+                             no respondió a tiempo). ¿Lo reintentamos?"
+                        ),
+                        false,
+                    )
+                } else {
+                    (ans, true)
+                };
+                crate::workspace::publish(crate::workspace::StreamEvent::now(
+                    "agente",
+                    "pensamiento",
+                    &format!("leí {url} y le respondí a Ariel"),
+                ));
+                crate::awareness::record_outcome(ok);
+                let _ = tx
+                    .send(
+                        Event::default().data(
+                            serde_json::json!({ "kind": "answer", "text": text_out, "steps": 1 })
+                                .to_string(),
+                        ),
+                    )
+                    .await;
+                let _ = tx
+                    .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                    .await;
+                return;
             }
-            // fetch falló o respuesta vacía → sigue al bucle ReAct normal (no return).
+            // El fetch FALLÓ (no la generación) → cae al bucle ReAct normal: quizá el
+            // navegador (con su fallback) o un reintento sí consigan la página.
         }
 
         let mut tools = ToolRegistry::new();

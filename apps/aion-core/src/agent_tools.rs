@@ -1293,7 +1293,7 @@ impl Tool for BrowserOpenTool {
         // Timeout propio: chromiumoxide puede colgarse al lanzar/navegar y, sin esto, se come
         // el presupuesto entero del agente (síntoma: «me quedé atascado»). Si excede, fallamos
         // rápido para que el agente caiga a web_fetch o responda con honestidad.
-        let snap = tokio::time::timeout(std::time::Duration::from_secs(35), async {
+        let snap = tokio::time::timeout(std::time::Duration::from_secs(25), async {
             self.driver
                 .open(input.trim())
                 .await
@@ -1301,24 +1301,29 @@ impl Tool for BrowserOpenTool {
             self.driver.snapshot().await.map_err(|e| e.to_string())
         })
         .await;
-        match snap {
-            Ok(Ok(s)) => Ok(format_snapshot(&s)),
-            // El navegador real falló o se colgó (chromiumoxide es frágil en algunos equipos).
-            // En vez de gastar el presupuesto del agente, caemos a una descarga HTTP simple
-            // (sin JS): para LEER/resumir basta. Así «abre/investiga esta URL» funciona elija
-            // lo que elija el agente, sin atascarse.
-            Ok(Err(_)) | Err(_) => match self.web.fetch_text(input.trim()).await {
-                Ok(text) => {
-                    let t: String = text.chars().take(2500).collect();
-                    Ok(format!(
-                        "(el navegador no respondió a tiempo; te doy el TEXTO PLANO de la \
-                         página vía HTTP, sin JavaScript ni elementos interactivos):\n{t}"
-                    ))
-                }
-                Err(e) => Err(format!(
-                    "no pude abrir la página ni con navegador ni por HTTP: {e}"
-                )),
-            },
+        let reason = match snap {
+            Ok(Ok(s)) => return Ok(format_snapshot(&s)),
+            // Conserva el motivo REAL (no lo traga): un timeout y un «Chrome no instalado»
+            // o un rechazo de URL son cosas distintas; el operador necesita verlo.
+            Ok(Err(e)) => format!("el navegador falló: {e}"),
+            Err(_) => "el navegador no respondió en 25s".to_string(),
+        };
+        // OBSERVABILIDAD: deja rastro del fallo real del navegador (si no, un chromiumoxide
+        // que se cuelga SIEMPRE quedaría invisible y nadie sabría por qué browser_click no va).
+        tracing::warn!(url = %input.trim(), reason = %reason, "browser_open falló; caigo a HTTP (web_fetch)");
+        // FALLBACK a descarga HTTP simple (sin JS): para LEER/resumir basta. Así «abre/investiga
+        // esta URL» funciona elija lo que elija el agente, sin atascarse.
+        match self.web.fetch_text(input.trim()).await {
+            Ok(text) => {
+                let t: String = text.chars().take(2500).collect();
+                Ok(format!(
+                    "({reason}; te doy el TEXTO PLANO de la página vía HTTP, sin JavaScript \
+                     ni elementos interactivos):\n{t}"
+                ))
+            }
+            Err(e) => Err(format!(
+                "no pude abrir la página ni con navegador ({reason}) ni por HTTP: {e}"
+            )),
         }
     }
 }
@@ -1342,9 +1347,9 @@ impl Tool for BrowserReadTool {
          numerados (úsalo tras browser_click o cuando la página cargó más contenido)."
     }
     async fn run(&self, _input: &str) -> Result<String, String> {
-        let s = tokio::time::timeout(std::time::Duration::from_secs(35), self.driver.snapshot())
+        let s = tokio::time::timeout(std::time::Duration::from_secs(25), self.driver.snapshot())
             .await
-            .map_err(|_| "el navegador tardó demasiado (>35s) al releer la página".to_string())?
+            .map_err(|_| "el navegador tardó demasiado (>25s) al releer la página".to_string())?
             .map_err(|e| e.to_string())?;
         Ok(format_snapshot(&s))
     }

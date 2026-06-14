@@ -68,9 +68,32 @@ fn save(items: &[Episode]) {
     crate::write_atomic(&path(), &body);
 }
 
-/// Cuántos episodios hay guardados (para el estado interno / UI).
+/// Cuántos episodios hay guardados (para el estado interno / UI). Cuenta LÍNEAS sin
+/// deserializar: `/api/status` la sondea en bucle y parsear ~12 MB de embeddings solo para
+/// devolver un número sería un derroche.
 pub fn count() -> usize {
-    all().len()
+    std::fs::read_to_string(path())
+        .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
+/// Añade UN episodio al final del archivo (append, sin reescribir todo). El caso común de
+/// `capture` cuando aún no toca podar: evita reescribir ~12 MB en cada turno.
+fn append_one(ep: &Episode) {
+    let Ok(line) = serde_json::to_string(ep) else {
+        return;
+    };
+    use std::io::Write as _;
+    if let Some(dir) = path().parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path())
+    {
+        let _ = writeln!(f, "{line}");
+    }
 }
 
 /// Estima cuán memorable es un detalle [0..1]. Heurística barata (sin LLM): premia detalles
@@ -143,32 +166,36 @@ pub async fn capture(topic: &str, detail: &str) {
     {
         return;
     }
-    items.push(Episode {
+    let ep = Episode {
         id: uuid::Uuid::new_v4().to_string(),
         at: chrono::Utc::now().timestamp(),
         topic: topic_s,
         detail: detail_s,
         salience,
         embedding: emb,
-    });
-    // Poda por VALOR: si nos pasamos del tope, caen los de menor (saliencia ponderada por
-    // recencia) — un detalle viejo y poco memorable es lo primero que se olvida.
-    if items.len() > MAX_EPISODES {
+    };
+    if items.len() + 1 > MAX_EPISODES {
+        // Toca PODAR por valor (saliencia ponderada por recencia): caen los detalles viejos y
+        // poco memorables. PROTEGE el episodio recién capturado —es el más probable de que
+        // Ariel pregunte luego «¿te acuerdas?»— podando solo entre los EXISTENTES.
         let now = chrono::Utc::now().timestamp();
         let score = |e: &Episode| -> f32 {
             let age_days = ((now - e.at).max(0) as f32) / 86_400.0;
-            e.salience * 0.985_f32.powf(age_days) // saliencia con leve decaimiento temporal
+            e.salience * 0.985_f32.powf(age_days)
         };
         items.sort_by(|a, b| {
             score(b)
                 .partial_cmp(&score(a))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        items.truncate(MAX_EPISODES);
-        // Reordenar cronológicamente para mantener el archivo legible y `recent()` correcto.
-        items.sort_by_key(|e| e.at);
+        items.truncate(MAX_EPISODES.saturating_sub(1));
+        items.push(ep);
+        items.sort_by_key(|e| e.at); // cronológico (archivo legible, `recent()` correcto)
+        save(&items); // reescritura completa solo al podar (raro)
+    } else {
+        // Caso común: NO reescribir todo, solo añadir una línea (barato).
+        append_one(&ep);
     }
-    save(&items);
 }
 
 /// Un episodio recuperado, con su relevancia y antigüedad (para mostrar bajo demanda).
@@ -228,9 +255,11 @@ pub async fn recall(query: &str, k: usize, days_back: i64) -> Vec<Recalled> {
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    scored.truncate(k.max(1));
-    // Descarta ruido: por debajo de un mínimo no es un recuerdo relevante, es un falso positivo.
+    // Descarta ruido PRIMERO (por debajo del mínimo es un falso positivo), y SOLO DESPUÉS
+    // recorta a k. Al revés (truncar y luego filtrar) se devolvían menos de k aciertos
+    // válidos cuando entre los primeros k había ruido, dejando fuera buenos más abajo.
     scored.retain(|r| r.score >= 0.20);
+    scored.truncate(k.max(1));
     scored
 }
 

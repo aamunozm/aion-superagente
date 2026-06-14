@@ -927,8 +927,16 @@ async fn detect_skill_need(engine: &OllamaEngine, owned: &[String]) -> Option<Sk
             Some((a.first()?.as_i64()?, a.get(1)?.as_i64()?))
         })
         .collect();
-    if name.is_empty() || description.len() < 4 || tests.len() < 2 {
-        return None; // especificación incompleta: no forjar a ciegas
+    // Exige ≥2 ENTRADAS DISTINTAS: dos tests idénticos (o con la misma entrada) no validan
+    // nada — un WAT degenerado que devuelve una constante los pasaría. La diversidad de
+    // entradas es lo que hace del test un oráculo real.
+    let distinct_inputs = tests
+        .iter()
+        .map(|(i, _)| *i)
+        .collect::<std::collections::HashSet<i64>>()
+        .len();
+    if name.is_empty() || description.chars().count() < 4 || distinct_inputs < 2 {
+        return None; // especificación incompleta o sin diversidad: no forjar a ciegas
     }
     Some(SkillSpec {
         name,
