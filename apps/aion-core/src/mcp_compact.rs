@@ -292,12 +292,83 @@ pub async fn ensure_english(content: &str) -> Option<String> {
     if en.is_empty() || en.chars().count() < body.chars().count() / 5 {
         return None;
     }
+    // QE POR BACK-TRANSLATION (Fase 2, sin referencia ni API de pago): verifica que la
+    // traducción "vuelve" a significar lo mismo. Atrapa errores GRAVES (alucinación, tema
+    // cambiado, hechos perdidos) que el meaning-first no garantiza. Si NO pasa, se cachea el
+    // ORIGINAL bajo esta clave → el puente sirve texto FIEL (sin ahorro, pero correcto) y no
+    // se reintenta. Es una red de seguridad GRUESA, no fina (ver umbral en la fn).
+    if !back_translation_faithful(&engine, body, &en).await {
+        tracing::warn!(
+            "mcp_compact: traducción rechazada por QE back-translation; se sirve el original"
+        );
+        store(&k, content);
+        return Some(content.to_string());
+    }
     let full = match tag {
         Some(t) => format!("{t} {en}"),
         None => en,
     };
     store(&k, &full);
     Some(full)
+}
+
+/// QE SIN REFERENCIA por **back-translation**: traduce `english` de vuelta al idioma del
+/// `original` y mide la similitud semántica (BGE-M3, el mismo embedder del retrieval) entre
+/// original y back-translation. `true` = fiel (≥ umbral) o no medible (fail-open).
+///
+/// Umbral CONSERVADOR (def. 0.50). Calibrado con datos: el round-trip de texto coloquial,
+/// con jerga o typos baja a ~0.67 AUNQUE la traducción sea correcta (la vuelta es estándar),
+/// mientras que un error catastrófico (tema equivocado) cae a ~0.34. Por eso esto SOLO
+/// rechaza desastres; lo sutil lo cubre el prompt meaning-first. NO confiar en el LLM
+/// juzgándose a sí mismo (sobreestima): por eso comparamos significados con embeddings.
+/// Config: `AION_TRANSLATION_QE=0` lo desactiva; `AION_TRANSLATION_QE_MIN` ajusta el corte.
+async fn back_translation_faithful(
+    engine: &Arc<dyn LlmEngine>,
+    original: &str,
+    english: &str,
+) -> bool {
+    if std::env::var("AION_TRANSLATION_QE").as_deref() == Ok("0") {
+        return true;
+    }
+    let min = std::env::var("AION_TRANSLATION_QE_MIN")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.50);
+    // Idioma destino de la vuelta: italiano solo si la señal es claramente IT (y no ES);
+    // por defecto español (la lengua principal de la memoria).
+    let lang = if crate::language_detector::has_italian_signal(original)
+        && !crate::language_detector::has_spanish_signal(original)
+    {
+        "Italian"
+    } else {
+        "Spanish"
+    };
+    let req = GenerateRequest {
+        messages: vec![Message::user(format!(
+            "Translate the following English text back into {lang}, faithfully and naturally, \
+             preserving all facts, names, numbers and paths. Output ONLY the {lang} \
+             translation, with no preamble or notes.\n\n{english}"
+        ))],
+        think: false,
+        temperature: Some(0.1),
+        max_tokens: Some(240),
+    };
+    // Si no se puede traducir de vuelta → no podemos medir → confiar (fail-open).
+    let Ok(out) = engine.generate(req).await else {
+        return true;
+    };
+    let back = out.content.trim();
+    if back.is_empty() {
+        return true;
+    }
+    // Comparación semántica con BGE-M3. Si el embedder falla → confiar (fail-open).
+    let embedder = aion_memory::OllamaEmbedder::default_local();
+    let (Ok(a), Ok(b)) = (embedder.embed(original).await, embedder.embed(back).await) else {
+        return true;
+    };
+    let sim = aion_memory::cosine(&a, &b);
+    tracing::debug!(sim, min, "mcp_compact: QE back-translation");
+    sim >= min
 }
 
 /// Caché máxima de traducciones. Generosa: la memoria del usuario crece despacio. Al
