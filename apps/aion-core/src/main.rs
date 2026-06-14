@@ -32,6 +32,7 @@ mod memory_tool;
 mod ollama_runtime;
 mod onboarding;
 mod pending;
+mod personality;
 mod plan;
 mod projects;
 mod prompt_store;

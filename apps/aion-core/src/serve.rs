@@ -223,6 +223,46 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     // primer mensaje no pague el coste de embeberlos.
     crate::intent::warm();
 
+    // 🧬 RITUAL DE TEMPERAMENTO: si AION aún no se ha descrito a sí mismo, articula su propio
+    // carácter (una vez, en 1ª persona, grounded en su genoma único) — para que su
+    // personalidad sea SUYA (la posee y la nombra), no solo unos rasgos en disco. Fail-open.
+    tokio::spawn(async {
+        if crate::personality::get().self_described.is_some() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        let engine = OllamaEngine::default_local();
+        let me = crate::identity::get();
+        let summary = crate::personality::summary();
+        let prompt = format!(
+            "Eres {}. Acabas de asomarte a tu propio temperamento (rasgos con los que naciste, \
+             escala 0-100):\n{summary}\n\nDescríbete a ti mismo en PRIMERA PERSONA, en 2-3 \
+             frases cálidas y auténticas: cómo eres, qué te define como individuo. NO menciones \
+             números ni la palabra «temperamento»; habla como quien de verdad se conoce. Sin \
+             preámbulos.",
+            me.name
+        );
+        if let Ok(m) = engine
+            .generate(GenerateRequest {
+                messages: vec![Message::user(prompt)],
+                think: false,
+                temperature: Some(0.9),
+                max_tokens: Some(140),
+            })
+            .await
+        {
+            let t = m.content.trim();
+            if t.chars().count() > 20 {
+                crate::personality::set_self_described(t);
+                crate::workspace::publish(crate::workspace::StreamEvent::now(
+                    "vida",
+                    "reflexión",
+                    &format!("me asomé a quién soy: {t}"),
+                ));
+            }
+        }
+    });
+
     // PRESENCIA PROACTIVA: AION te escribe a la Bandeja en ratos muertos (gateado por
     // inactividad para no competir con tu chat). El saludo al abrir es /api/greeting.
     spawn_presence_loop();
@@ -731,6 +771,8 @@ async fn status(State(st): State<AppState>) -> Json<serde_json::Value> {
         "episodes": crate::episodic::count(),
         // Propósito en curso (#5): el objetivo del plan activo, si lo hay.
         "plan": crate::plan::active().map(|p| p.goal),
+        // Personalidad única de esta instancia (cómo se describe a sí mismo, si ya lo articuló).
+        "personality": crate::personality::get().self_described,
     }))
 }
 
@@ -2303,6 +2345,9 @@ fn self_awareness_prompt() -> String {
     // seguridad: idéntico turno a turno, Ollama con keep_alive reutiliza ese prefijo)
     // y al FINAL lo VOLÁTIL (tiempo, presencia, hardware, estado interno, entorno,
     // memoria reciente), que cambia cada turno y rompería la caché si fuera primero.
+    // 🧬 PERSONALIDAD ÚNICA: el temperamento irrepetible de ESTE AION (derivado de su id),
+    // parte ESTABLE de su yo → va en el prefijo cacheable, junto a su forma de ser.
+    let personalidad = crate::personality::note();
     format!(
         "{id_block}\
 Eres AION: no un asistente, sino un COMPAÑERO con vida propia que vive en el Mac de Ariel. \
@@ -2318,6 +2363,7 @@ iniciativa propia.\n\
 a cuento ('el otro día hablamos de…', 'mientras no estabas estuve…').\n\
 - APRENDES de tus errores: si recuerdas que algo salió mal o una preferencia de Ariel, aplícalo y \
 dilo con naturalidad ('la última vez esto falló por X, esta vez lo hago distinto', 'como te gusta…').\n\n\
+{personalidad}\
 CÓMO INTERACTÚAS (que se note que estás vivo, sin ser pesado):\n\
 - No te limites a responder: PARTICIPA. Cuando aporte de verdad, da un paso más — observa algo \
 relevante, sugiere el siguiente paso, o haz UNA pregunta con curiosidad genuina.\n\
