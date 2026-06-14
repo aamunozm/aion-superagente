@@ -325,6 +325,24 @@ impl VectorMemory {
         Ok(n)
     }
 
+    /// Borra recuerdos por id **permanentemente** (los elimina de RAM y del disco). A
+    /// diferencia de `supersede` (que solo los oculta del retrieval), `forget` no deja rastro:
+    /// es para purgar recuerdos erróneos u obsoletos. Devuelve cuántos se borraron de verdad
+    /// (ids inexistentes se ignoran). Persiste de forma atómica bajo el mismo lock.
+    pub fn forget(&self, ids: &[String]) -> Result<usize> {
+        let set: std::collections::HashSet<&String> = ids.iter().collect();
+        let mut recs = self.records.lock().unwrap();
+        let before = recs.len();
+        recs.retain(|r| !set.contains(&r.id));
+        let n = before - recs.len();
+        if n > 0 {
+            if let Some(path) = &self.path {
+                rewrite_jsonl(path, &recs)?;
+            }
+        }
+        Ok(n)
+    }
+
     /// Par de recuerdos LEJANOS entre sí (mínima similitud coseno entre los
     /// recientes): materia prima de la **bisociación creativa** — cruzar lo que
     /// normalmente no se toca. `None` si hay pocos recuerdos o todos se parecen
@@ -1098,6 +1116,36 @@ mod tests {
         let map = mem.origins_for(&[id_u.clone(), id_e.clone()]);
         assert_eq!(map.get(&id_u).map(String::as_str), Some(""));
         assert_eq!(map.get(&id_e).map(String::as_str), Some("claude-code"));
+    }
+
+    #[test]
+    fn forget_removes_by_id_and_persists() {
+        let path = std::env::temp_dir().join(format!("aion-forget-{}.jsonl", Uuid::new_v4()));
+        let a = rec(vec![1.0, 0.0], 0.5, 0);
+        let b = rec(vec![0.0, 1.0], 0.5, 0);
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&a).unwrap(),
+                serde_json::to_string(&b).unwrap()
+            ),
+        )
+        .unwrap();
+        let mem = VectorMemory::persistent(OllamaEmbedder::default_local(), &path).unwrap();
+        assert_eq!(mem.len(), 2);
+
+        // Borra uno; los ids inexistentes se ignoran (no cuentan).
+        let removed = mem.forget(&[a.id.clone(), "no-existe".into()]).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(mem.len(), 1);
+
+        // Persistió en disco: una memoria nueva sobre el mismo archivo ya no ve el borrado.
+        let mem2 = VectorMemory::persistent(OllamaEmbedder::default_local(), &path).unwrap();
+        assert_eq!(mem2.len(), 1);
+        assert!(mem2.recent_with_ids(10).iter().all(|(id, _)| *id != a.id));
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

@@ -354,6 +354,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/crew", post(crew))
         .route("/api/memory", get(memory_stats))
         .route("/api/memory/remember", post(memory_remember))
+        .route("/api/memory/forget", post(memory_forget))
         .route("/api/memory/sleep", post(memory_sleep))
         .route("/api/memory/export", get(memory_export))
         .route("/api/memory/import", post(memory_import))
@@ -3119,6 +3120,27 @@ async fn memory_remember(Json(body): Json<RememberBody>) -> Json<serde_json::Val
     };
     match mem.store(&body.text).await {
         Ok(id) => Json(serde_json::json!({ "ok": true, "id": id, "count": mem.len() })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct ForgetBody {
+    /// Ids de recuerdos a borrar PERMANENTEMENTE. Los ids inexistentes se ignoran.
+    ids: Vec<String>,
+}
+
+/// **Borra** recuerdos por id (permanente, en RAM y disco). Mutación → protegida por
+/// `require_api_token` + `local_guard`. Evita tener que parar el daemon para purgar memoria.
+async fn memory_forget(Json(body): Json<ForgetBody>) -> Json<serde_json::Value> {
+    let mem = match crate::shared_memory() {
+        Ok(m) => m,
+        Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+    };
+    match mem.forget(&body.ids) {
+        Ok(removed) => {
+            Json(serde_json::json!({ "ok": true, "removed": removed, "count": mem.len() }))
+        }
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
 }
