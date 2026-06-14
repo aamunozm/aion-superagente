@@ -22,7 +22,10 @@ impl Tool for WebTool {
         "web_fetch"
     }
     fn description(&self) -> &str {
-        "Descarga una página web y devuelve su texto. Entrada: una URL http(s) completa."
+        "Lee el TEXTO de una página web. ÚSALA POR DEFECTO para investigar, leer o resumir \
+         una URL (es rápida, sin navegador). Entrada: una URL http(s) completa. Solo si la \
+         página necesita JavaScript o tienes que INTERACTUAR (clics/formularios), usa \
+         browser_open en su lugar."
     }
     async fn run(&self, input: &str) -> Result<String, String> {
         let text = self
