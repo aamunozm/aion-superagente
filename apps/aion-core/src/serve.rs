@@ -400,9 +400,14 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/claude-code/test", post(claude_code_test))
         .route("/api/claude-code/audit", get(claude_code_audit))
         .route("/api/claude-code/stats", get(claude_code_stats))
+        // Bootstrap del token local: la UI lo pide una vez al arrancar (GET, Origin local).
+        .route("/api/auth/token", get(api_auth_token))
         // Subidas grandes: documentos/PDF/Office pueden pesar (un PPTX ~20 MB). El
         // límite por defecto de axum (2 MB) cortaría la conexión; lo subimos a 64 MB.
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
+        // AUTH local de /api/* (P0-1 fase 2): exige Bearer en mutaciones. Va por DENTRO
+        // de local_guard (ambos deben pasar); el orden entre ellos es indiferente.
+        .layer(axum::middleware::from_fn(require_api_token))
         // GUARDIA local-first: rechaza Host no-local (DNS-rebinding) y Origin de webs
         // ajenas (drive-by/CSRF). Debe ir por DENTRO de CORS para que los preflight
         // OPTIONS los responda CORS antes de llegar aquí.
@@ -528,6 +533,48 @@ async fn local_guard(
                 )
                     .into_response();
             }
+        }
+    }
+    next.run(req).await
+}
+
+/// Token local de `/api/*` (P0-1 fase 2). Efímero: se genera al arrancar y vive solo en
+/// memoria (no se persiste a disco). La UI lo obtiene una vez vía `GET /api/auth/token`
+/// —que solo responde a Origin local (lo garantiza `local_guard`)— y lo adjunta como
+/// `Bearer` en cada mutación. Defensa frente a OTRA web local (p. ej. `localhost:5000`
+/// comprometida): pasa el Origin allowlist de fase 1, pero CORS le impide leer este token,
+/// así que no puede mutar `/api/*`. No protege de un proceso local con acceso al disco
+/// —inherente al modelo local-first— pero cierra el vector navegador-a-navegador.
+fn api_token() -> &'static str {
+    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOKEN.get_or_init(crate::claude_code::generate_token)
+}
+
+/// Bootstrap del token para la UI. GET (no muta) → exento de la exigencia de token;
+/// queda protegido por `local_guard` (Origin/Host local) y por CORS (solo orígenes
+/// locales pueden LEER la respuesta).
+async fn api_auth_token() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "token": api_token() }))
+}
+
+/// Exige el `Bearer` local en toda mutación de `/api/*`. Exenciones: métodos seguros
+/// (GET/HEAD), `/mcp` (Bearer propio de Claude Code) y el propio `/api/auth/token`
+/// (es como la UI obtiene el token). Comparación en tiempo constante (`token_matches`).
+async fn require_api_token(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path();
+    let needs = !req.method().is_safe() && path.starts_with("/api/") && path != "/api/auth/token";
+    if needs {
+        let provided = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .unwrap_or("");
+        if !crate::claude_mcp::token_matches(provided, api_token()) {
+            return (StatusCode::UNAUTHORIZED, "token local requerido").into_response();
         }
     }
     next.run(req).await

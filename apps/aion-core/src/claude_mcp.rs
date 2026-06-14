@@ -91,7 +91,8 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Json<Value> {
 // ---------------------------------------------------------------------------
 
 /// Comparación por hash (longitud constante): evita timing leaks del token.
-fn token_matches(provided: &str, expected: &str) -> bool {
+/// Reutilizada por la auth local de `/api/*` (ver `serve::require_api_token`).
+pub(crate) fn token_matches(provided: &str, expected: &str) -> bool {
     if expected.is_empty() {
         return false;
     }

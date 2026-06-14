@@ -5,6 +5,42 @@ export const CONTROL_URL =
 export const BRIDGE_URL =
   process.env.NEXT_PUBLIC_BRIDGE_URL ?? "http://127.0.0.1:8765";
 
+// ── Auth local del puente (P0-1 fase 2) ──────────────────────────────────────
+// El backend exige un Bearer local en toda mutación de /api/*. En vez de tocar ~30
+// call sites (y arriesgar olvidar uno → feature rota), se intercepta `fetch` UNA vez
+// para inyectar el token SOLO en peticiones al puente. El token se obtiene de
+// /api/auth/token (GET, sin auth, protegido por Origin local) y se cachea en memoria
+// (NO en localStorage: así otra web local no puede leerlo). Las lecturas (GET) no lo
+// necesitan, pero adjuntarlo es inocuo. Idempotente: solo parchea una vez en cliente.
+const TOKEN_PATH = "/api/auth/token";
+if (typeof window !== "undefined" && !(window as unknown as { __aionPatched?: boolean }).__aionPatched) {
+  (window as unknown as { __aionPatched?: boolean }).__aionPatched = true;
+  const rawFetch = window.fetch.bind(window);
+  let tokenPromise: Promise<string> | null = null;
+  const apiToken = (): Promise<string> => {
+    if (!tokenPromise) {
+      tokenPromise = rawFetch(`${BRIDGE_URL}${TOKEN_PATH}`)
+        .then((r) => (r.ok ? r.json() : { token: "" }))
+        .then((j: { token?: string }) => j.token ?? "")
+        .catch(() => "");
+    }
+    return tokenPromise;
+  };
+  window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    // Solo peticiones al puente, y nunca el propio bootstrap del token (evita recursión).
+    if (!url.startsWith(BRIDGE_URL) || url.includes(TOKEN_PATH)) return rawFetch(input, init);
+    const token = await apiToken();
+    if (!token) return rawFetch(input, init);
+    const headers = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    );
+    if (!headers.has("Authorization")) headers.set("Authorization", `Bearer ${token}`);
+    return rawFetch(input, { ...init, headers });
+  };
+}
+
 export type AuthResult = {
   id: string;
   email: string;
