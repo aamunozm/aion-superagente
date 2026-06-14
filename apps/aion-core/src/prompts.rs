@@ -54,6 +54,14 @@ pub async fn route(engine: &dyn LlmEngine, prompt: &str) -> String {
         "últimas noticias",
         "averigua",
         "fuentes",
+        // IT / EN
+        "cerca",
+        "indaga",
+        "ultime notizie",
+        "fonti",
+        "scopri",
+        "research",
+        "search the web",
     ]) {
         return "investigacion".into();
     }
@@ -66,6 +74,12 @@ pub async fn route(engine: &dyn LlmEngine, prompt: &str) -> String {
         "brainstorm",
         "propón ideas",
         "creativo",
+        // IT / EN
+        "immagina",
+        "progetta",
+        "proponi idee",
+        "inventa",
+        "brainstorming",
     ]) {
         return "creativo".into();
     }
@@ -79,6 +93,13 @@ pub async fn route(engine: &dyn LlmEngine, prompt: &str) -> String {
         "error",
         "implementa",
         "script",
+        // IT / EN
+        "codice",
+        "funzione",
+        "errore",
+        "implementa",
+        "code",
+        "function",
     ]) {
         return "tecnico".into();
     }
@@ -90,6 +111,15 @@ pub async fn route(engine: &dyn LlmEngine, prompt: &str) -> String {
         "evalua",
         "por qué",
         "por que",
+        // IT / EN
+        "analizza",
+        "confronta",
+        "pro e contro",
+        "valuta",
+        "perché",
+        "perche",
+        "analyze",
+        "compare",
     ]) {
         return "analisis".into();
     }

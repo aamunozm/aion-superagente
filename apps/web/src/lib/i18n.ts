@@ -141,6 +141,16 @@ const ES: Dict = {
   "cc.verdictWarn": "Se detectaron {n} errores ({pct}% de las llamadas). Revisa la conexión.",
   "cc.byToolTokens": "Tokens por herramienta",
   "cc.estLabel": "estimación",
+  "cc.tr.title": "Ahorro por traducción (ES→EN)",
+  "cc.tr.headline": "menos tokens enviados al traducir tu memoria al inglés para el puente",
+  "cc.tr.pctLabel": "menos tokens vía traducción",
+  "cc.tr.note": "Tu memoria está en español; AION la traduce a inglés (gratis, con Gemma local) solo para Claude Code, que paga por token. Fail-open: si no hay traducción cacheada, se sirve español.",
+  "cc.tr.bySession": "Ahorro por sesión",
+  "cc.tr.servedVsSaved": "Por cantidad de tokens",
+  "cc.tr.served": "servido (EN)",
+  "cc.tr.saved": "ahorrado",
+  "cc.tr.perTool": "Ahorro por herramienta",
+  "cc.tr.empty": "Aún sin ahorro medido — se acumula a medida que Claude Code consulta tu memoria en español.",
 };
 
 const IT: Dict = {
@@ -273,6 +283,16 @@ const IT: Dict = {
   "cc.verdictWarn": "Rilevati {n} errori ({pct}% delle chiamate). Controlla la connessione.",
   "cc.byToolTokens": "Token per strumento",
   "cc.estLabel": "stima",
+  "cc.tr.title": "Risparmio da traduzione (ES→EN)",
+  "cc.tr.headline": "token in meno inviati traducendo la tua memoria in inglese per il ponte",
+  "cc.tr.pctLabel": "token in meno via traduzione",
+  "cc.tr.note": "La tua memoria è in spagnolo; AION la traduce in inglese (gratis, con Gemma locale) solo per Claude Code, che paga a token. Fail-open: se non c'è traduzione in cache, si serve lo spagnolo.",
+  "cc.tr.bySession": "Risparmio per sessione",
+  "cc.tr.servedVsSaved": "Per quantità di token",
+  "cc.tr.served": "servito (EN)",
+  "cc.tr.saved": "risparmiato",
+  "cc.tr.perTool": "Risparmio per strumento",
+  "cc.tr.empty": "Ancora nessun risparmio misurato — si accumula man mano che Claude Code consulta la tua memoria in spagnolo.",
 };
 
 const EN: Dict = {
@@ -388,6 +408,16 @@ const EN: Dict = {
   "cc.byTool": "Usage by tool",
   "cc.settingsLink": "You can also manage the connection from Settings.",
   "cc.disconnectedHint": "Connect to get started: the activity panel will appear here.",
+  "cc.tr.title": "Translation savings (ES→EN)",
+  "cc.tr.headline": "fewer tokens sent by translating your memory to English for the bridge",
+  "cc.tr.pctLabel": "fewer tokens via translation",
+  "cc.tr.note": "Your memory is in Spanish; AION translates it to English (free, local Gemma) only for Claude Code, which pays per token. Fail-open: if no cached translation, Spanish is served.",
+  "cc.tr.bySession": "Savings per session",
+  "cc.tr.servedVsSaved": "By token amount",
+  "cc.tr.served": "served (EN)",
+  "cc.tr.saved": "saved",
+  "cc.tr.perTool": "Savings by tool",
+  "cc.tr.empty": "No savings measured yet — it accrues as Claude Code queries your Spanish memory.",
 };
 
 const DICTS: Record<Lang, Dict> = { es: ES, it: IT, en: EN };

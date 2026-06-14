@@ -13,20 +13,33 @@ import urllib.request
 OLLAMA = "http://127.0.0.1:11434/api/generate"
 MODEL = "gemma4-reason:latest"
 
-# El MISMO prompt de mcp_compact.rs::ensure_english (manténlos en sync).
+# El MISMO prompt de mcp_compact.rs::ensure_english (manténlos en sync) — meaning-first.
 PROMPT_TMPL = (
-    "Translate the following Spanish note into clear, faithful English. "
-    "Preserve EVERY fact, name, number, path and identifier exactly as-is. "
-    "Be concise but omit nothing. Output ONLY the English translation, with no "
-    "preamble, quotes or notes.\n\n{body}"
+    "You are translating a personal-memory note written in Spanish or Italian (it may "
+    "contain typos, slang or regional expressions) into English for another AI agent. "
+    "First understand what the author MEANS — silently fix obvious typos, interpret idioms "
+    "and regionalisms by their intended sense, and resolve ambiguity — then express that "
+    "meaning in clear, natural English. Translate the MEANING, not word-for-word. Preserve "
+    "EVERY fact, name, number, path and identifier EXACTLY as written; never invent or add "
+    "anything that is not in the note. Be concise but omit nothing. Output ONLY the English "
+    "translation, with no preamble, quotes or notes.\n\n{body}"
 )
 
-# Recuerdos reales estilo AION (español tal como se almacenan).
-SAMPLES = [
-    "Ariel decidió usar Rust para el núcleo de AION porque la seguridad de memoria y el rendimiento sin recolector de basura son críticos para un agente local que corre todo el día.",
-    "Cuando el agente entra en bucle de 8 vueltas y da timeout, suele ser por descripciones de herramientas recortadas que rompen las llamadas; revertir el recorte lo arregló.",
-    "El pendiente crítico no es el grafo sino la autenticación y el CORS de la API local en el puerto 8765, según la auditoría integral de junio de 2026.",
-]
+# Recuerdos reales estilo AION tal como se almacenan. AION lo usan tanto hispanohablantes
+# como italianos (Ariel vive en Italia): el ahorro en Claude Code debe darse en AMBAS lenguas,
+# así que se verifican las dos. El gate del backend (needs_english_translation) detecta ambas.
+SAMPLES = {
+    "ES": [
+        "Ariel decidió usar Rust para el núcleo de AION porque la seguridad de memoria y el rendimiento sin recolector de basura son críticos para un agente local que corre todo el día.",
+        "Cuando el agente entra en bucle de 8 vueltas y da timeout, suele ser por descripciones de herramientas recortadas que rompen las llamadas; revertir el recorte lo arregló.",
+        "El pendiente crítico no es el grafo sino la autenticación y el CORS de la API local en el puerto 8765, según la auditoría integral de junio de 2026.",
+    ],
+    "IT": [
+        "Ariel ha deciso di usare Rust per il nucleo di AION perché la sicurezza della memoria e le prestazioni senza garbage collector sono critiche per un agente locale che gira tutto il giorno.",
+        "Quando l'agente entra in un ciclo di 8 giri e va in timeout, di solito è per le descrizioni degli strumenti troncate che rompono le chiamate; ripristinare il taglio lo ha risolto.",
+        "Il punto critico non è il grafo ma l'autenticazione e il CORS dell'API locale sulla porta 8765, secondo l'audit completo di giugno 2026.",
+    ],
+}
 
 
 def ollama_up() -> bool:
@@ -71,20 +84,25 @@ def main() -> int:
         print("⚠️  tiktoken no instalado; mido por caracteres (proxy más burdo).")
         tok = len
 
-    tot_es = tot_en = 0
-    print(f"\n{'='*72}\nVERIFICACIÓN mcp_compact — traducción Gemma local + ahorro real\n{'='*72}")
-    for i, es in enumerate(SAMPLES, 1):
-        en = translate(es)
-        te, tn = tok(es), tok(en)
-        tot_es += te
-        tot_en += tn
-        print(f"\n— Recuerdo {i} —")
-        print(f"  ES ({te} tok): {es}")
-        print(f"  EN ({tn} tok): {en}")
-        print(f"  ahorro: {1 - tn/max(te,1):.0%}")
+    grand_src = grand_en = 0
+    print(f"\n{'='*72}\nVERIFICACIÓN mcp_compact — traducción Gemma local + ahorro real (ES + IT)\n{'='*72}")
+    for lang, samples in SAMPLES.items():
+        sub_src = sub_en = 0
+        for i, src in enumerate(samples, 1):
+            en = translate(src)
+            ts, tn = tok(src), tok(en)
+            sub_src += ts
+            sub_en += tn
+            print(f"\n— {lang} · recuerdo {i} —")
+            print(f"  {lang} ({ts} tok): {src}")
+            print(f"  EN ({tn} tok): {en}")
+            print(f"  ahorro: {1 - tn/max(ts,1):.0%}")
+        grand_src += sub_src
+        grand_en += sub_en
+        print(f"\n  ▸ subtotal {lang}: {sub_src}→{sub_en} tok  →  ahorro {1 - sub_en/max(sub_src,1):.0%}")
     print(f"\n{'-'*72}")
-    print(f"TOTAL  ES={tot_es} tok  EN={tot_en} tok  →  ahorro real: {1 - tot_en/max(tot_es,1):.0%}")
-    print("Revisa arriba que la traducción NO pierda hechos, nombres ni números.")
+    print(f"TOTAL  origen={grand_src} tok  EN={grand_en} tok  →  ahorro real: {1 - grand_en/max(grand_src,1):.0%}")
+    print("Revisa arriba que la traducción NO pierda hechos, nombres ni números (ES e IT).")
     return 0
 
 

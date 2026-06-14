@@ -158,6 +158,29 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // WARMER DE COMPACTACIÓN MCP: pre-traduce al inglés los recuerdos más recientes para que
+    // la PRIMERA consulta de Claude Code en la sesión (brief / aion_memory_search) ya sirva
+    // inglés y ahorre tokens — sin esto el ahorro es perezoso (el primer hit a un recuerdo aún
+    // sin traducir va en español). En segundo plano y detrás de la precarga del modelo; el gate
+    // interno (1 traducción a la vez) evita competir con el chat. Fail-open total. AION_MCP_WARM=0
+    // lo desactiva; AION_MCP_WARM_N ajusta cuántos recuerdos calienta (por defecto 40).
+    tokio::spawn(async {
+        if std::env::var("AION_MCP_WARM").as_deref() == Ok("0") {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(25)).await; // tras calentar el modelo
+        let n: usize = std::env::var("AION_MCP_WARM_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(40);
+        let contents: Vec<String> = match crate::shared_memory() {
+            Ok(mem) => mem.recent_with_ids(n).into_iter().map(|(_, c)| c).collect(),
+            Err(_) => return,
+        };
+        crate::mcp_compact::warm(contents).await;
+    });
+
     // RITUAL DE NOMBRE: si aún no eligió su nombre, AION elige UNO PROPIO (una vez).
     // Así cada agente tiene nombre + id únicos: un individuo, no "un AION cualquiera".
     tokio::spawn(async {
@@ -331,6 +354,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/crew", post(crew))
         .route("/api/memory", get(memory_stats))
         .route("/api/memory/remember", post(memory_remember))
+        .route("/api/memory/forget", post(memory_forget))
         .route("/api/memory/sleep", post(memory_sleep))
         .route("/api/memory/export", get(memory_export))
         .route("/api/memory/import", post(memory_import))
@@ -400,9 +424,14 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/claude-code/test", post(claude_code_test))
         .route("/api/claude-code/audit", get(claude_code_audit))
         .route("/api/claude-code/stats", get(claude_code_stats))
+        // Bootstrap del token local: la UI lo pide una vez al arrancar (GET, Origin local).
+        .route("/api/auth/token", get(api_auth_token))
         // Subidas grandes: documentos/PDF/Office pueden pesar (un PPTX ~20 MB). El
         // límite por defecto de axum (2 MB) cortaría la conexión; lo subimos a 64 MB.
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
+        // AUTH local de /api/* (P0-1 fase 2): exige Bearer en mutaciones. Va por DENTRO
+        // de local_guard (ambos deben pasar); el orden entre ellos es indiferente.
+        .layer(axum::middleware::from_fn(require_api_token))
         // GUARDIA local-first: rechaza Host no-local (DNS-rebinding) y Origin de webs
         // ajenas (drive-by/CSRF). Debe ir por DENTRO de CORS para que los preflight
         // OPTIONS los responda CORS antes de llegar aquí.
@@ -528,6 +557,48 @@ async fn local_guard(
                 )
                     .into_response();
             }
+        }
+    }
+    next.run(req).await
+}
+
+/// Token local de `/api/*` (P0-1 fase 2). Efímero: se genera al arrancar y vive solo en
+/// memoria (no se persiste a disco). La UI lo obtiene una vez vía `GET /api/auth/token`
+/// —que solo responde a Origin local (lo garantiza `local_guard`)— y lo adjunta como
+/// `Bearer` en cada mutación. Defensa frente a OTRA web local (p. ej. `localhost:5000`
+/// comprometida): pasa el Origin allowlist de fase 1, pero CORS le impide leer este token,
+/// así que no puede mutar `/api/*`. No protege de un proceso local con acceso al disco
+/// —inherente al modelo local-first— pero cierra el vector navegador-a-navegador.
+fn api_token() -> &'static str {
+    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOKEN.get_or_init(crate::claude_code::generate_token)
+}
+
+/// Bootstrap del token para la UI. GET (no muta) → exento de la exigencia de token;
+/// queda protegido por `local_guard` (Origin/Host local) y por CORS (solo orígenes
+/// locales pueden LEER la respuesta).
+async fn api_auth_token() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "token": api_token() }))
+}
+
+/// Exige el `Bearer` local en toda mutación de `/api/*`. Exenciones: métodos seguros
+/// (GET/HEAD), `/mcp` (Bearer propio de Claude Code) y el propio `/api/auth/token`
+/// (es como la UI obtiene el token). Comparación en tiempo constante (`token_matches`).
+async fn require_api_token(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path();
+    let needs = !req.method().is_safe() && path.starts_with("/api/") && path != "/api/auth/token";
+    if needs {
+        let provided = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .unwrap_or("");
+        if !crate::claude_mcp::token_matches(provided, api_token()) {
+            return (StatusCode::UNAUTHORIZED, "token local requerido").into_response();
         }
     }
     next.run(req).await
@@ -825,6 +896,36 @@ fn looks_like_question(prompt: &str) -> bool {
         "necesito saber",
         "me puedes decir",
         "puedes decirme",
+        // Italiano (Ariel vive en Italia; AION lo usarán también italianos).
+        "cosa",
+        "che cosa",
+        "quale",
+        "quali",
+        "quando",
+        "dove",
+        "chi ",
+        "come ",
+        "perché",
+        "perche",
+        "quanto",
+        "quanti",
+        "sai ",
+        "ricordi",
+        "dimmi",
+        "raccontami",
+        "spiegami",
+        "puoi dirmi",
+        // Inglés (Claude Code y equipos internacionales).
+        "what",
+        "which",
+        "when",
+        "where",
+        "who ",
+        "how ",
+        "why ",
+        "do you know",
+        "tell me",
+        "explain",
     ];
     STARTS.iter().any(|w| p.starts_with(w))
 }
@@ -2758,7 +2859,7 @@ fn classify_message_cheap(task: &str) -> TalkClass {
     // uno, es tarea (la vía rápida no tiene herramientas: un dato pedido ahí solo
     // saldría inventado). «red» va aparte como palabra exacta (red local) para no
     // disparar con «reducir», «redondo», etc.
-    const TOOLISH: [&str; 43] = [
+    const TOOLISH: &[&str] = &[
         "temperatura",
         "clima",
         "grados",
@@ -2802,6 +2903,26 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         "proyecto",
         "skill",
         "calcul",
+        // Italiano (stems): meteo/prezzo/invia/spegni/accendi/cancella/sposta/cartella/
+        // cerca/apri/esegui/scarica/installa/schermo/posta/naviga/calcol/previsioni.
+        "meteo",
+        "previsioni",
+        "prezzo",
+        "invia",
+        "spegni",
+        "accendi",
+        "cancella",
+        "sposta",
+        "cartella",
+        "cerca",
+        "apri",
+        "esegui",
+        "scarica",
+        "installa",
+        "schermo",
+        "posta",
+        "naviga",
+        "calcol",
     ];
     let toolish = words
         .iter()
@@ -2813,7 +2934,7 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         return TalkClass::Chat;
     }
     // Charla sobre sí mismo o casual.
-    const CONV: [&str; 16] = [
+    const CONV: &[&str] = &[
         "te llamas",
         "quién eres",
         "quien eres",
@@ -2830,13 +2951,22 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         "cuéntame de ti",
         "quién soy",
         "quien soy",
+        // Italiano
+        "come ti chiami",
+        "chi sei",
+        "cosa fai",
+        "come stai",
+        "come va",
+        "sogni",
+        "parlami di te",
+        "chi sono",
     ];
     if CONV.iter().any(|k| t.contains(k)) {
         return TalkClass::Chat;
     }
     // CHARLA NARRATIVA: Ariel COMPARTE algo de su día/vida ("te cuento que…", un relato
     // en primera persona y pasado). Puede ser LARGO, pero NO pide herramientas.
-    const SHARING: [&str; 21] = [
+    const SHARING: &[&str] = &[
         "te cuento",
         "te comento",
         "te quería contar",
@@ -2858,6 +2988,17 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         "estuvimos ",
         "me picaron",
         "me siento",
+        // Italiano
+        "ti racconto",
+        "ti dico",
+        "volevo dirti",
+        "sai che",
+        "indovina",
+        "mi è successo",
+        "mi e successo",
+        "sono andato",
+        "sono andata",
+        "mi sento",
     ];
     if SHARING.iter().any(|k| t.contains(k)) {
         return TalkClass::Chat;
@@ -2936,8 +3077,32 @@ async fn conversational_reply(
 fn is_trivial_query(prompt: &str) -> bool {
     let p = prompt.trim().to_lowercase();
     let words = p.split_whitespace().count();
-    const GREETINGS: [&str; 10] = [
-        "hola", "buenas", "hey", "gracias", "ok", "vale", "adios", "adiós", "chao", "saludos",
+    const GREETINGS: &[&str] = &[
+        // Español
+        "hola",
+        "buenas",
+        "hey",
+        "gracias",
+        "ok",
+        "vale",
+        "adios",
+        "adiós",
+        "chao",
+        "saludos",
+        // Italiano
+        "ciao",
+        "buongiorno",
+        "buonasera",
+        "salve",
+        "grazie",
+        "va bene",
+        "arrivederci",
+        // Inglés
+        "hi",
+        "hello",
+        "thanks",
+        "thank you",
+        "bye",
     ];
     if words <= 2 && GREETINGS.iter().any(|g| p.starts_with(g)) {
         return true;
@@ -3049,6 +3214,27 @@ async fn memory_remember(Json(body): Json<RememberBody>) -> Json<serde_json::Val
     };
     match mem.store(&body.text).await {
         Ok(id) => Json(serde_json::json!({ "ok": true, "id": id, "count": mem.len() })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct ForgetBody {
+    /// Ids de recuerdos a borrar PERMANENTEMENTE. Los ids inexistentes se ignoran.
+    ids: Vec<String>,
+}
+
+/// **Borra** recuerdos por id (permanente, en RAM y disco). Mutación → protegida por
+/// `require_api_token` + `local_guard`. Evita tener que parar el daemon para purgar memoria.
+async fn memory_forget(Json(body): Json<ForgetBody>) -> Json<serde_json::Value> {
+    let mem = match crate::shared_memory() {
+        Ok(m) => m,
+        Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+    };
+    match mem.forget(&body.ids) {
+        Ok(removed) => {
+            Json(serde_json::json!({ "ok": true, "removed": removed, "count": mem.len() }))
+        }
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
 }
@@ -4985,12 +5171,22 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
     let mut tokens_served: u64 = 0;
     let mut writes: u64 = 0;
     let mut errors: u64 = 0;
+    // Ahorro de la TRADUCCIÓN ES→EN (lo que recortó servir inglés cacheado al puente). Es
+    // distinto del ahorro del RAG (servir solo lo relevante) que mide `total_savings_est`.
+    let mut tokens_saved_tr: u64 = 0;
+    let mut by_tool_translation: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
     for e in &entries {
         let tool = e.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
         let tok = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let saved = e.get("saved_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
         *by_tool.entry(tool.to_string()).or_insert(0) += 1;
         *by_tool_tokens.entry(tool.to_string()).or_insert(0) += tok;
         tokens_served += tok;
+        tokens_saved_tr += saved;
+        if saved > 0 {
+            *by_tool_translation.entry(tool.to_string()).or_insert(0) += saved;
+        }
         if tool == "aion_remember" {
             writes += 1;
         }
@@ -4998,6 +5194,57 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
             errors += 1;
         }
     }
+    // % de ahorro de la traducción sobre el equivalente español de TODO lo servido
+    // (servido_EN + ahorrado): cuántos tokens menos viajaron gracias a traducir.
+    let translation_savings_pct: u64 = {
+        let es_equiv = tokens_served + tokens_saved_tr;
+        if es_equiv > 0 {
+            (tokens_saved_tr as f64 / es_equiv as f64 * 100.0).round() as u64
+        } else {
+            0
+        }
+    };
+    // SESIONES: agrupa las llamadas por cercanía temporal (un hueco > 30 min abre una sesión
+    // nueva). Claude Code no envía un id de sesión, así que se infiere del tiempo. Por sesión:
+    // inicio, nº de llamadas, tokens servidos y tokens ahorrados por la traducción.
+    let mut timeline: Vec<(chrono::DateTime<chrono::Utc>, u64, u64)> = entries
+        .iter()
+        .filter_map(|e| {
+            let ts = e
+                .get("ts")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())?
+                .with_timezone(&chrono::Utc);
+            let served = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let saved = e.get("saved_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            Some((ts, served, saved))
+        })
+        .collect();
+    timeline.sort_by_key(|(ts, _, _)| *ts);
+    const SESSION_GAP_SECS: i64 = 30 * 60;
+    let mut sessions: Vec<serde_json::Value> = Vec::new();
+    let mut i = 0usize;
+    while i < timeline.len() {
+        let start = timeline[i].0;
+        let (mut calls, mut served, mut saved) = (0u64, 0u64, 0u64);
+        let mut last = start;
+        while i < timeline.len() && (timeline[i].0 - last).num_seconds() <= SESSION_GAP_SECS {
+            calls += 1;
+            served += timeline[i].1;
+            saved += timeline[i].2;
+            last = timeline[i].0;
+            i += 1;
+        }
+        sessions.push(serde_json::json!({
+            "started_at": start.to_rfc3339(),
+            "calls": calls,
+            "tokens_served": served,
+            "tokens_saved": saved,
+        }));
+    }
+    // Solo las últimas 30 sesiones al cliente (el chart muestra una cola; acota el payload).
+    let sessions_tail: Vec<serde_json::Value> =
+        sessions.iter().rev().take(30).rev().cloned().collect();
     // Coste hipotético de volcar la memoria vigente completa en cada sesión.
     let (full_dump_tokens, memory_count) = crate::shared_memory()
         .map(|m| {
@@ -5051,6 +5298,10 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
         "graph_concepts": graph_concepts,
         "graph_communities": graph_communities,
         "last_activity": last,
+        "tokens_saved_translation": tokens_saved_tr,
+        "translation_savings_pct": translation_savings_pct,
+        "by_tool_translation": by_tool_translation,
+        "sessions": sessions_tail,
     }))
 }
 
@@ -5128,7 +5379,33 @@ mod guard_tests {
 
 #[cfg(test)]
 mod intent_tests {
-    use super::{classify_message_cheap, TalkClass};
+    use super::{classify_message_cheap, is_trivial_query, looks_like_question, TalkClass};
+
+    #[test]
+    fn italian_messages_classified_like_spanish() {
+        // Preguntas en italiano deben detectarse como tal (bloquean para comprensión).
+        assert!(looks_like_question("cosa sai del mio progetto AION?"));
+        assert!(looks_like_question("come stai"));
+        assert!(looks_like_question("perché si è bloccato"));
+        // Saludos italianos → triviales (charla).
+        assert!(is_trivial_query("ciao"));
+        assert!(is_trivial_query("grazie"));
+        // Tarea en italiano → Tool (antes caía a Chat por keywords solo-español).
+        assert_eq!(
+            classify_message_cheap("cerca su internet il prezzo del bitcoin"),
+            TalkClass::Tool
+        );
+        assert_eq!(
+            classify_message_cheap("apri il documento e crea un riassunto"),
+            TalkClass::Tool
+        );
+        // Charla italiana sobre sí mismo → Chat.
+        assert_eq!(classify_message_cheap("come ti chiami?"), TalkClass::Chat);
+        assert_eq!(
+            classify_message_cheap("ti racconto che sono andato a Milano oggi"),
+            TalkClass::Chat
+        );
+    }
 
     #[test]
     fn obvious_chat_is_chat() {

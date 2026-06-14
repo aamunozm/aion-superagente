@@ -325,6 +325,24 @@ impl VectorMemory {
         Ok(n)
     }
 
+    /// Borra recuerdos por id **permanentemente** (los elimina de RAM y del disco). A
+    /// diferencia de `supersede` (que solo los oculta del retrieval), `forget` no deja rastro:
+    /// es para purgar recuerdos erróneos u obsoletos. Devuelve cuántos se borraron de verdad
+    /// (ids inexistentes se ignoran). Persiste de forma atómica bajo el mismo lock.
+    pub fn forget(&self, ids: &[String]) -> Result<usize> {
+        let set: std::collections::HashSet<&String> = ids.iter().collect();
+        let mut recs = self.records.lock().unwrap();
+        let before = recs.len();
+        recs.retain(|r| !set.contains(&r.id));
+        let n = before - recs.len();
+        if n > 0 {
+            if let Some(path) = &self.path {
+                rewrite_jsonl(path, &recs)?;
+            }
+        }
+        Ok(n)
+    }
+
     /// Par de recuerdos LEJANOS entre sí (mínima similitud coseno entre los
     /// recientes): materia prima de la **bisociación creativa** — cruzar lo que
     /// normalmente no se toca. `None` si hay pocos recuerdos o todos se parecen
@@ -731,7 +749,9 @@ fn entities(s: &str) -> std::collections::HashSet<String> {
         let has_upper = t.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
         let has_sym = t.contains('#') || t.contains('-') || t.contains('_');
         if has_digit || has_upper || has_sym {
-            Some(t.to_lowercase())
+            // Detección sobre el token ORIGINAL (mayúscula/dígito/símbolo), pero se guarda
+            // plegado para que "Milán"/"Milan" o "José"/"Jose" casen entre consulta y recuerdo.
+            Some(fold(t))
         } else {
             None
         }
@@ -750,11 +770,33 @@ fn entity_overlap(
     inter / (a.len() as f32).min(b.len() as f32)
 }
 
-/// Solapamiento léxico (Jaccard de palabras significativas, en minúsculas). Capta
+/// Pliega diacríticos latinos comunes (español **e italiano**) a su letra base y pasa a
+/// minúscula. Determinista y sin dependencias: une "decisión"/"decision", "está"/"esta",
+/// "città"/"citta", "Milán"/"Milan" en el matching léxico y de entidades → robustez a
+/// acentos y a typos DE ACENTO, gratis. NO corrige typos arbitrarios (eso lo cubre la señal
+/// semántica BGE-M3, que es robusta a ruido). Aplicado por igual a la consulta y al recuerdo
+/// en tiempo de comparación, así que NO requiere re-embeber ni migrar lo ya almacenado.
+fn fold(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' | 'ã' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' | 'õ' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            'ç' => 'c',
+            other => other,
+        })
+        .collect()
+}
+
+/// Solapamiento léxico (Jaccard de palabras significativas, normalizadas con `fold`). Capta
 /// coincidencias exactas (nombres, términos) que el embedding semántico puede diluir.
 fn lexical_overlap(a: &str, b: &str) -> f32 {
     fn words(s: &str) -> std::collections::HashSet<String> {
-        s.to_lowercase()
+        fold(s)
             .split(|c: char| !c.is_alphanumeric())
             .filter(|w| w.len() > 3) // ignora palabras muy cortas/funcionales
             .map(|w| w.to_string())
@@ -1098,6 +1140,56 @@ mod tests {
         let map = mem.origins_for(&[id_u.clone(), id_e.clone()]);
         assert_eq!(map.get(&id_u).map(String::as_str), Some(""));
         assert_eq!(map.get(&id_e).map(String::as_str), Some("claude-code"));
+    }
+
+    #[test]
+    fn fold_strips_es_and_it_diacritics() {
+        assert_eq!(
+            fold("Decisión Città Milán ñoño"),
+            "decision citta milan nono"
+        );
+    }
+
+    #[test]
+    fn lexical_overlap_is_accent_insensitive() {
+        // La misma frase con acentos y sin (typo de acento) debe casar fuerte: el plegado
+        // une "decisión"/"decision", "está"/"esta", "autenticación"/"autenticacion".
+        let con = "la decisión crítica está en la autenticación";
+        let sin = "la decision critica esta en la autenticacion";
+        assert!(
+            lexical_overlap(con, sin) > 0.9,
+            "los acentos deberían plegarse en la señal léxica"
+        );
+    }
+
+    #[test]
+    fn forget_removes_by_id_and_persists() {
+        let path = std::env::temp_dir().join(format!("aion-forget-{}.jsonl", Uuid::new_v4()));
+        let a = rec(vec![1.0, 0.0], 0.5, 0);
+        let b = rec(vec![0.0, 1.0], 0.5, 0);
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&a).unwrap(),
+                serde_json::to_string(&b).unwrap()
+            ),
+        )
+        .unwrap();
+        let mem = VectorMemory::persistent(OllamaEmbedder::default_local(), &path).unwrap();
+        assert_eq!(mem.len(), 2);
+
+        // Borra uno; los ids inexistentes se ignoran (no cuentan).
+        let removed = mem.forget(&[a.id.clone(), "no-existe".into()]).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(mem.len(), 1);
+
+        // Persistió en disco: una memoria nueva sobre el mismo archivo ya no ve el borrado.
+        let mem2 = VectorMemory::persistent(OllamaEmbedder::default_local(), &path).unwrap();
+        assert_eq!(mem2.len(), 1);
+        assert!(mem2.recent_with_ids(10).iter().all(|(id, _)| *id != a.id));
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
