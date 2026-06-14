@@ -679,6 +679,8 @@ async fn status(State(st): State<AppState>) -> Json<serde_json::Value> {
         "provider": provider.kind,
         // Etapa «Experience»: cuántas heurísticas propias vigentes guía hoy a AION.
         "experience_rules": crate::reflection::active_count(),
+        // Biblioteca episódica: cuántos micromomentos guarda AION.
+        "episodes": crate::episodic::count(),
     }))
 }
 
@@ -1095,19 +1097,35 @@ async fn chat(
         Some(c) => format!("\n\n{}", c.system_directive(grounding.is_empty())),
         None => String::new(),
     };
+    // 📚 BIBLIOTECA EPISÓDICA bajo demanda: SOLO si Ariel pregunta por un recuerdo
+    // («¿te acuerdas de…?») vamos a buscar micromomentos concretos y los traemos al prompt.
+    // Si no pregunta, no se toca (no satura): es el «traer UN libro» en vez de leerlos todos.
+    let epi_block = if crate::episodic::is_recall_question(&body.prompt) {
+        let hits = crate::episodic::recall(&body.prompt, 4, 0).await;
+        let note = crate::episodic::recall_note(&hits);
+        if note.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{note}")
+        }
+    } else {
+        String::new()
+    };
     // Módulos coactivados en ESTE turno (memoria, biblioteca, proyecto): el chat
     // también integra — medirlo evita que el índice Φ ignore el modo principal.
     let chat_modules = usize::from(mem_hits > 0)
         + usize::from(!lib_block.is_empty())
-        + usize::from(!proj_block.is_empty());
+        + usize::from(!proj_block.is_empty())
+        + usize::from(!epi_block.is_empty());
     let self_ctx = format!(
-        "{}\n\n{}\n\n{}{}{}{}{}{}{}",
+        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}",
         self_awareness_prompt(),
         lang_directive(&body.lang),
         crate::prompts::persona(&mode),
         empathy_block,
         think_note,
         mem_block,
+        epi_block,
         proj_block,
         lib_block,
         comp_block,
@@ -1219,6 +1237,14 @@ async fn chat(
             };
             if !trace.is_trivial() {
                 let _ = crate::consciousness::record_task(&trace);
+                // 📚 MEMORIA EPISÓDICA: cada turno con sustancia se guarda como MICROMOMENTO
+                // granular en la "biblioteca" de Ariel. NO entra al prompt por defecto (no
+                // satura): se recupera bajo demanda (tool del agente, MCP, o cuando Ariel
+                // pregunta «¿te acuerdas de…?»). Barato (1 embedding) y en background.
+                let topic: String = prompt.chars().take(80).collect();
+                let a: String = answer.chars().take(280).collect();
+                let detail = format!("Ariel: {prompt} — yo: {a}");
+                crate::episodic::capture(&topic, &detail).await;
             }
         }
     });
@@ -1382,6 +1408,7 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
         tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
         tools.register(Arc::new(crate::agent_tools::GraphSearchTool::new()));
+        tools.register(Arc::new(crate::agent_tools::EpisodicRecallTool::new()));
         let browser: std::sync::Arc<dyn aion_browser::BrowserDriver> =
             std::sync::Arc::new(aion_browser::ChromiumoxideDriver);
         tools.register(Arc::new(crate::agent_tools::BrowserOpenTool::new(
@@ -1708,6 +1735,7 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
         tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
         tools.register(Arc::new(crate::agent_tools::GraphSearchTool::new()));
+        tools.register(Arc::new(crate::agent_tools::EpisodicRecallTool::new()));
         let browser: std::sync::Arc<dyn aion_browser::BrowserDriver> =
             std::sync::Arc::new(aion_browser::ChromiumoxideDriver);
         tools.register(Arc::new(crate::agent_tools::BrowserOpenTool::new(

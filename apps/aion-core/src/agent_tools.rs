@@ -1766,6 +1766,63 @@ impl Tool for SkillForgeTool {
 // ── 3) Invocar skill: usar una skill (semilla o forjada) ────────────────────
 
 /// Invoca una skill registrada (incluidas las que el agente acaba de forjar).
+/// Herramienta de RECUERDO EPISÓDICO: deja al agente «ir a la biblioteca y traer un libro
+/// concreto» — buscar micromomentos específicos de conversaciones pasadas bajo demanda, sin
+/// cargar toda la memoria. Complementa a memory_search (hechos destilados) con el DETALLE.
+pub struct EpisodicRecallTool;
+
+impl EpisodicRecallTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for EpisodicRecallTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for EpisodicRecallTool {
+    fn name(&self) -> &str {
+        "episodic_recall"
+    }
+    fn description(&self) -> &str {
+        "Recuerda MICROMOMENTOS concretos de conversaciones pasadas con Ariel (detalles \
+         específicos: qué dijo, cuándo, sobre qué) — como ir a una biblioteca y traer UN \
+         libro concreto. Entrada: lo que quieres recordar, opcionalmente seguido de \
+         ' :: días' para limitar a los últimos N días (p. ej. «qué opinó del color azul :: 30»). \
+         Úsala cuando necesites un detalle exacto del pasado; para hechos/preferencias \
+         destilados usa memory_search."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let (query, days) = match input.rsplit_once("::") {
+            Some((q, d)) if d.trim().parse::<i64>().is_ok() => {
+                (q.trim(), d.trim().parse::<i64>().unwrap_or(0).max(0))
+            }
+            _ => (input.trim(), 0),
+        };
+        if query.is_empty() {
+            return Err("dame qué quieres recordar, p. ej. «qué dijo de su viaje :: 14»".into());
+        }
+        let hits = crate::episodic::recall(query, 5, days).await;
+        if hits.is_empty() {
+            return Ok("(no encuentro micromomentos sobre eso en mi biblioteca episódica)".into());
+        }
+        let now = chrono::Utc::now().timestamp();
+        let mut out = String::from("Micromomentos que recuerdo:\n");
+        for h in hits {
+            out.push_str(&format!(
+                "- hace {}: {}\n",
+                crate::awareness::humanize_secs(now - h.at),
+                h.detail.trim()
+            ));
+        }
+        Ok(out)
+    }
+}
+
 pub struct SkillInvokeTool {
     host: Arc<WasmSkillHost>,
 }

@@ -15,6 +15,7 @@ mod comprehension;
 mod consciousness;
 mod credentials;
 mod empathy;
+mod episodic;
 mod evals;
 mod graph;
 mod identity;
@@ -840,30 +841,144 @@ async fn agent_once(engine: &OllamaEngine, task: &str) -> (bool, String) {
 /// Auto-evolución con reintentos (hasta 3): el LLM escribe la skill 'square' y
 /// pasa por las puertas (sandbox + tests). El LLM local no siempre genera WAT
 /// válido a la primera; reintentar sube la tasa de éxito sin relajar el gating.
+/// Especificación de una skill numérica a forjar (la decide AION según su necesidad).
+struct SkillSpec {
+    name: String,
+    description: String,
+    tests: Vec<(i64, i64)>,
+}
+
+/// **Detector de demanda**: AION mira su vida reciente (micromomentos episódicos +
+/// aprendizajes) y decide si hay una OPERACIÓN NUMÉRICA (i64→i64) que se REPITE y que le
+/// convendría tener como skill reutilizable —y que aún NO tiene—. El LLM hace de detector
+/// de repetición sobre la ventana de memoria. Devuelve la especificación, o None si nada
+/// recurrente lo amerita (abstención honesta: no se forjan skills inútiles).
+async fn detect_skill_need(engine: &OllamaEngine, owned: &[String]) -> Option<SkillSpec> {
+    // Material reciente con sesgo a lo numérico/cálculo.
+    let mut ctx = String::new();
+    for r in crate::episodic::recall(
+        "cálculo número operación calcular cuántos suma resta multiplica divide potencia",
+        8,
+        0,
+    )
+    .await
+    {
+        ctx.push_str(&format!(
+            "- {}\n",
+            r.detail.chars().take(160).collect::<String>()
+        ));
+    }
+    if let Ok(mem) = crate::shared_memory() {
+        for (_, c) in mem.recent_with_ids(30) {
+            let low = c.to_lowercase();
+            if low.contains("[aprendizaje]") || c.chars().any(|ch| ch.is_ascii_digit()) {
+                ctx.push_str(&format!("- {}\n", c.chars().take(160).collect::<String>()));
+            }
+        }
+    }
+    if ctx.trim().chars().count() < 40 {
+        return None; // aún no hay vida suficiente para detectar repetición
+    }
+    let owned_list = if owned.is_empty() {
+        "(ninguna todavía)".to_string()
+    } else {
+        owned.join(", ")
+    };
+    let prompt = format!(
+        "Eres AION. Estas son tus interacciones recientes:\n{ctx}\n\
+         Skills numéricas que YA tienes: {owned_list}.\n\n\
+         ¿Hay alguna OPERACIÓN NUMÉRICA pura (entra UN entero, sale UN entero) que se REPITA \
+         en tus interacciones y que te convendría forjar como skill reutilizable, y que NO \
+         tengas ya? Si la hay, responde SOLO un JSON en una línea: \
+         {{\"name\":\"nombre_corto\",\"description\":\"qué calcula\",\"tests\":[[entrada,salida],[entrada,salida],[entrada,salida]]}} \
+         con 3 tests CORRECTOS y verificables. Si no hay ninguna operación recurrente que lo \
+         amerite, responde EXACTAMENTE NONE. Sin explicación."
+    );
+    let msg = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.2),
+            max_tokens: Some(160),
+        })
+        .await
+        .ok()?;
+    let raw = msg.content.trim();
+    if raw.to_uppercase().contains("NONE") && !raw.contains('{') {
+        return None;
+    }
+    // Extrae el primer objeto JSON balanceado de la respuesta.
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    let json: serde_json::Value = serde_json::from_str(raw.get(start..=end)?).ok()?;
+    let name = json.get("name")?.as_str()?.trim().to_lowercase();
+    let name: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(32)
+        .collect();
+    let description = json.get("description")?.as_str()?.trim().to_string();
+    let tests: Vec<(i64, i64)> = json
+        .get("tests")?
+        .as_array()?
+        .iter()
+        .filter_map(|t| {
+            let a = t.as_array()?;
+            Some((a.first()?.as_i64()?, a.get(1)?.as_i64()?))
+        })
+        .collect();
+    if name.is_empty() || description.len() < 4 || tests.len() < 2 {
+        return None; // especificación incompleta: no forjar a ciegas
+    }
+    Some(SkillSpec {
+        name,
+        description,
+        tests,
+    })
+}
+
+/// `evolucionar`: AION **forja una skill nueva por su cuenta cuando detecta una necesidad
+/// recurrente** (antes estaba hardcodeado a "square"). Detecta la demanda, comprueba que no
+/// la tenga ya, genera el WAT (3 intentos con auto-corrección), lo valida en sandbox + tests
+/// (EvolutionEngine), aplica el RATCHET y lo persiste en su caja de herramientas. Gated y
+/// seguro por construcción: una candidata mala nunca toca el host vivo.
 async fn self_evolve_once(engine: &OllamaEngine) -> (bool, String) {
     use aion_evolution::{Candidate, EvolutionEngine};
     use aion_skills::{SkillManifest, WasmSkillHost};
     use std::sync::Arc;
 
-    // Prompt explícito: el cuerpo DEBE multiplicar n por sí mismo. El ejemplo de
-    // sintaxis usa otra operación (suma) para no inducir a copiarlo.
-    let base = "Escribe un módulo WebAssembly en formato WAT que exporte una función `run` \
-        que reciba un i64 `n` y devuelva n AL CUADRADO, es decir n multiplicado por sí mismo. \
-        Debes usar `i64.mul` con `(local.get $n)` DOS veces (no por una constante). \
-        Sintaxis (ejemplo de OTRA operación, NO lo copies): \
-        (module (func (export \"run\") (param $n i64) (result i64) (i64.add (local.get $n) (local.get $n)))). \
-        Responde SOLO el módulo WAT, sin explicación ni markdown.";
+    // 1) ¿Qué necesidad numérica recurrente merece una skill? (dedup contra lo ya forjado).
+    let owned: Vec<String> = crate::skill_store::catalog()
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let Some(spec) = detect_skill_need(engine, &owned).await else {
+        return (
+            false,
+            "no detecté ninguna operación numérica recurrente que forjar".into(),
+        );
+    };
+    if owned.iter().any(|n| n.eq_ignore_ascii_case(&spec.name)) {
+        return (false, format!("ya tengo la skill «{}»", spec.name));
+    }
 
+    // 2) Forjar el WAT para esa necesidad (auto-corrección entre intentos).
+    let base = format!(
+        "Escribe un módulo WebAssembly en formato WAT que exporte una función `run` que \
+         reciba un i64 `n` y devuelva (i64) el resultado de: {}. \
+         Sintaxis (ejemplo de OTRA operación, NO lo copies): \
+         (module (func (export \"run\") (param $n i64) (result i64) (i64.add (local.get $n) (local.get $n)))). \
+         Responde SOLO el módulo WAT, sin explicación ni markdown.",
+        spec.description
+    );
     let mut last = "sin intentos".to_string();
     let mut prev_code: Option<String> = None;
     for _ in 0..3 {
-        // Auto-corrección: si el intento anterior falló, mostrarle su error.
         let prompt = match &prev_code {
             Some(c) => format!(
-                "{base}\n\nTu intento anterior fue:\n{c}\nResultó INCORRECTO ({last}). \
-                 Recuerda: el cuerpo debe ser (i64.mul (local.get $n) (local.get $n)). Corrígelo."
+                "{base}\n\nTu intento anterior fue:\n{c}\nResultó INCORRECTO ({last}). Corrígelo."
             ),
-            None => base.to_string(),
+            None => base.clone(),
         };
         let msg = match engine
             .generate(GenerateRequest {
@@ -892,20 +1007,42 @@ async fn self_evolve_once(engine: &OllamaEngine) -> (bool, String) {
         match evo
             .propose(Candidate {
                 manifest: SkillManifest {
-                    name: "square".into(),
-                    description: "n*n".into(),
+                    name: spec.name.clone(),
+                    description: spec.description.clone(),
                 },
-                code,
-                tests: vec![(2, 4), (3, 9), (5, 25)],
+                code: code.clone(),
+                tests: spec.tests.clone(),
             })
             .await
         {
-            Ok(r) if r.accepted => return (true, r.reason),
+            Ok(r) if r.accepted => {
+                // RATCHET + persistencia: la skill entra en su caja de herramientas y
+                // sobrevive a reinicios (hydrate_relevant la cargará cuando sea relevante).
+                if r.passed >= crate::skill_store::best_passed(&spec.name) {
+                    let _ =
+                        crate::skill_store::save(&spec.name, &spec.description, &code, r.passed);
+                }
+                crate::workspace::publish(crate::workspace::StreamEvent::now(
+                    "evolución",
+                    "reflexión",
+                    &format!(
+                        "forjé una skill nueva por mi cuenta: «{}» ({})",
+                        spec.name, spec.description
+                    ),
+                ));
+                return (
+                    true,
+                    format!("forjé «{}» ({} tests OK)", spec.name, r.passed),
+                );
+            }
             Ok(r) => last = r.reason,
             Err(e) => last = e.to_string(),
         }
     }
-    (false, format!("{last} (tras 3 intentos)"))
+    (
+        false,
+        format!("intenté forjar «{}» pero no lo logré: {last}", spec.name),
+    )
 }
 
 /// Genera un insight de auto-mejora y lo guarda en memoria; devuelve (éxito, insight).

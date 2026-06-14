@@ -398,6 +398,19 @@ fn tool_defs() -> Value {
                 },
                 "required": ["ids"]
             }
+        },
+        {
+            "name": "aion_episodic_recall",
+            "description": "Recupera MICROMOMENTOS concretos de las conversaciones de AION con el usuario (detalles específicos: qué se dijo, cuándo, sobre qué) — la 'biblioteca episódica'. Distinto de aion_memory_search (hechos/preferencias destilados): esto trae el DETALLE exacto de un momento pasado, bajo demanda. Útil cuando necesitas un dato puntual de una charla previa.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Qué micromomento recordar (tema, detalle, entidad)" },
+                    "k": { "type": "integer", "description": "Máx. resultados (1-8, por defecto 5)" },
+                    "days_back": { "type": "integer", "description": "Limitar a los últimos N días (opcional; 0 o ausente = sin límite)" }
+                },
+                "required": ["query"]
+            }
         }
     ])
 }
@@ -664,6 +677,33 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 "Borrados {removed} de {} id(s) solicitados.",
                 ids.len()
             ))
+        }
+        "aion_episodic_recall" => {
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or("Falta `query`")?;
+            let k = args
+                .get("k")
+                .and_then(|v| v.as_u64())
+                .map(|n| (n as usize).clamp(1, 8))
+                .unwrap_or(5);
+            let days_back = args.get("days_back").and_then(|v| v.as_i64()).unwrap_or(0);
+            let hits = crate::episodic::recall(query, k, days_back).await;
+            if hits.is_empty() {
+                return Ok("(sin micromomentos relevantes en la biblioteca episódica)".into());
+            }
+            let now = chrono::Utc::now().timestamp();
+            let mut out = String::new();
+            for h in hits {
+                out.push_str(&format!(
+                    "- hace {} (relevancia {:.2}): {}\n",
+                    crate::awareness::humanize_secs(now - h.at),
+                    h.score,
+                    h.detail.trim()
+                ));
+            }
+            Ok(out)
         }
         "aion_brief" => Ok(crate::claude_code::build_brief().await),
         _ => Err(format!("Tool desconocida: {name}")),
