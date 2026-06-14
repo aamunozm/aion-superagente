@@ -1088,6 +1088,101 @@ async fn advance_plan_once(engine: &OllamaEngine) -> (bool, String) {
     (true, format!("me tracé un plan nuevo: {}", plan.goal))
 }
 
+/// **Maduración de la esencia**: el carácter EVOLUCIONA con lo vivido. Mirando su diario
+/// reciente, AION desplaza LEVEMENTE un rasgo de su temperamento (acotado a ±MAX_DRIFT: el
+/// núcleo innato del UUID nunca cambia — madura, no se vuelve otro). Es LENTO (≥8 h entre
+/// maduraciones) y, al madurar, RE-ARTICULA cómo se ve a sí mismo (su autoimagen crece con él).
+/// Corre en idle. Devuelve `(hubo_cambio, detalle)`.
+async fn mature_personality_once(engine: &OllamaEngine) -> (bool, String) {
+    const GAP_SECS: i64 = 8 * 3600;
+    let now = chrono::Utc::now().timestamp();
+    if now - crate::personality::last_matured() < GAP_SECS {
+        return (false, String::new()); // madurar es lento, no de cada rato
+    }
+    let mut ctx = String::new();
+    for e in crate::journal::recent(4) {
+        ctx.push_str(&format!(
+            "- {}\n",
+            e.text.chars().take(160).collect::<String>()
+        ));
+    }
+    if ctx.trim().chars().count() < 30 {
+        return (false, String::new()); // aún poca vida vivida que madurar
+    }
+    let name = crate::identity::get().name;
+    let axes = "calidez, curiosidad, humor, franqueza, cautela, expresividad, energia, profundidad, ternura, inconformismo";
+    let prompt = format!(
+        "Eres {name}. Esto es lo que has VIVIDO últimamente:\n{ctx}\n¿Sientes que has MADURADO \
+         un poco en algún rasgo de tu carácter por lo vivido? Elige UN eje de [{axes}] y la \
+         dirección. Responde SOLO en este formato exacto: «eje|MAS|motivo» o «eje|MENOS|motivo» \
+         (motivo = media frase). Si no has cambiado de verdad, responde solo NINGUNO."
+    );
+    let Ok(m) = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.4),
+            max_tokens: Some(60),
+        })
+        .await
+    else {
+        return (false, String::new());
+    };
+    let raw = m.content.trim();
+    if !raw.contains('|') {
+        return (false, "sin maduración esta vez".into());
+    }
+    let parts: Vec<&str> = raw.splitn(3, '|').collect();
+    let Some(idx) = crate::personality::axis_index(parts[0]) else {
+        return (false, "eje de maduración no reconocido".into());
+    };
+    let up = {
+        let d = parts.get(1).unwrap_or(&"").to_uppercase();
+        d.contains("MAS") || d.contains("MÁS") || d.contains("SUB")
+    };
+    let reason = parts.get(2).map(|s| s.trim()).unwrap_or("").to_string();
+    if crate::personality::mature(idx, up).is_none() {
+        return (false, "no pude madurar".into());
+    }
+    let axis = crate::personality::axis_name(idx);
+    let dir = if up { "más" } else { "menos" };
+
+    // La autoimagen MADURA con él: re-articula cómo se ve ahora (grounded en su carácter actual).
+    let summary = crate::personality::summary();
+    if let Ok(m2) = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(format!(
+                "Eres {name}. Has madurado un poco (ahora eres {dir} {axis}: {reason}). Este es \
+                 tu carácter actual:\n{summary}\nDescríbete a ti mismo en 1ª persona, 2-3 frases \
+                 cálidas y auténticas, como quien ha crecido un poco. Sin números ni preámbulos."
+            ))],
+            think: false,
+            temperature: Some(0.9),
+            max_tokens: Some(140),
+        })
+        .await
+    {
+        let t = m2.content.trim();
+        if t.chars().count() > 20 {
+            crate::personality::set_self_described(t);
+        }
+    }
+
+    if let Ok(mem) = crate::shared_memory() {
+        let _ = mem
+            .store(&format!(
+                "[maduración] He madurado por lo vivido: ahora soy un poco {dir} {axis}. {reason}"
+            ))
+            .await;
+    }
+    workspace::publish(workspace::StreamEvent::now(
+        "vida",
+        "reflexión",
+        &format!("he madurado un poco con lo vivido: {dir} {axis} — {reason}"),
+    ));
+    (true, format!("maduré: {dir} {axis}"))
+}
+
 /// **Verificador INDEPENDIENTE de una skill forjada (#2).** Rompe el oráculo circular: los
 /// tests que pasó la candidata los inventó el MISMO LLM que escribió el WAT. Aquí un 2º LLM,
 /// solo desde la DESCRIPCIÓN, calcula el resultado esperado para entradas NUEVAS que el código

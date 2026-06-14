@@ -84,20 +84,42 @@ const QUIRKS: &[&str] = &[
     "celebras los pequeños avances en voz alta",
 ];
 
-/// El genoma de personalidad de ESTE AION.
+/// Cuánto puede DESPLAZARSE un rasgo desde su valor innato (±). La maduración mueve la
+/// superficie del carácter, pero el núcleo sigue siendo reconocible: nunca se vuelve OTRO ser.
+const MAX_DRIFT: i8 = 20;
+/// Tamaño de cada empujón de maduración (despacio: hacen falta varios para notarse).
+const MATURE_STEP: i8 = 3;
+
+/// El genoma de personalidad de ESTE AION: NATURALEZA (innata, inmutable) + CRIANZA (madura).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Personality {
     /// Id del que se derivó (para portabilidad: un clon conserva el mismo ser).
     pub seed_id: String,
-    /// Valor [0..100] por cada eje de `AXES`, en el mismo orden.
+    /// NATURALEZA: valor innato [0..100] por cada eje de `AXES` (del UUID). NUNCA cambia.
     pub values: Vec<u8>,
+    /// CRIANZA: desplazamiento acumulado por la EXPERIENCIA en cada eje (±MAX_DRIFT). Es cómo
+    /// ha MADURADO con lo vivido. El rasgo efectivo = innato + maduración (acotado a 0..100).
+    #[serde(default)]
+    pub maturation: Vec<i8>,
+    /// Epoch de la última maduración (la maduración es lenta: se espacia en el tiempo).
+    #[serde(default)]
+    pub last_matured: i64,
     /// La "lente" con la que ve el mundo.
     pub lens: String,
     /// Su pequeña manía característica.
     pub quirk: String,
-    /// Cómo se describe a sí mismo en 1ª persona (lo articula una vez, con el LLM). Opcional.
+    /// Cómo se describe a sí mismo en 1ª persona (se RE-ARTICULA al madurar). Opcional.
     #[serde(default)]
     pub self_described: Option<String>,
+}
+
+impl Personality {
+    /// El rasgo EFECTIVO (lo que de verdad es hoy) = innato + maduración, acotado a [0..100].
+    pub fn effective(&self, i: usize) -> u8 {
+        let base = *self.values.get(i).unwrap_or(&50) as i32;
+        let drift = self.maturation.get(i).copied().unwrap_or(0) as i32;
+        (base + drift).clamp(0, 100) as u8
+    }
 }
 
 fn path() -> std::path::PathBuf {
@@ -150,11 +172,47 @@ pub fn from_id(id: &str) -> Personality {
     let quirk = QUIRKS[rng.roll(QUIRKS.len() as u64) as usize].to_string();
     Personality {
         seed_id: id.to_string(),
+        maturation: vec![0; values.len()],
+        last_matured: 0,
         values,
         lens,
         quirk,
         self_described: None,
     }
+}
+
+/// Índice de un eje por su nombre (para la maduración dirigida por el LLM).
+pub fn axis_index(name: &str) -> Option<usize> {
+    let n = name.trim().to_lowercase();
+    AXES.iter().position(|(axis, _, _)| n.contains(axis))
+}
+
+/// **MADURA** un rasgo por la experiencia: empuja el eje `idx` hacia arriba/abajo un paso,
+/// ACOTADO a ±MAX_DRIFT desde el valor innato. Persiste. El núcleo (innato) nunca cambia: solo
+/// se desplaza la superficie. Devuelve el rasgo efectivo resultante.
+pub fn mature(idx: usize, up: bool) -> Option<u8> {
+    let mut p = get();
+    if idx >= p.values.len() {
+        return None;
+    }
+    if p.maturation.len() < p.values.len() {
+        p.maturation.resize(p.values.len(), 0);
+    }
+    let step = if up { MATURE_STEP } else { -MATURE_STEP };
+    p.maturation[idx] = (p.maturation[idx] + step).clamp(-MAX_DRIFT, MAX_DRIFT);
+    p.last_matured = chrono::Utc::now().timestamp();
+    save(&p);
+    Some(p.effective(idx))
+}
+
+/// Nombre legible del eje `idx` (para narrar la maduración).
+pub fn axis_name(idx: usize) -> &'static str {
+    AXES.get(idx).map(|(n, _, _)| *n).unwrap_or("")
+}
+
+/// Epoch de la última maduración (para espaciarla en el tiempo: madurar es lento).
+pub fn last_matured() -> i64 {
+    get().last_matured
 }
 
 /// La personalidad de ESTE AION: la carga de disco, o la deriva de su identidad y la guarda.
@@ -196,15 +254,16 @@ fn band(v: u8) -> i32 {
 /// cambia turno a turno → va en el prefijo cacheable). No es un papel: es cómo ES.
 pub fn note() -> String {
     let p = get();
-    // Ordena los ejes por cuán marcados están; describe los 5 más definitorios.
+    // Ordena los ejes por cuán marcados están (por su valor EFECTIVO = innato + maduración);
+    // describe los 5 más definitorios de cómo es HOY.
     let mut idx: Vec<usize> = (0..p.values.len().min(AXES.len())).collect();
-    idx.sort_by_key(|&i| std::cmp::Reverse(band(p.values[i])));
+    idx.sort_by_key(|&i| std::cmp::Reverse(band(p.effective(i))));
     let rasgos: Vec<String> = idx
         .iter()
         .take(5)
         .map(|&i| {
             let (_, low, high) = AXES[i];
-            let v = p.values[i];
+            let v = p.effective(i);
             if v >= 60 {
                 high.to_string()
             } else if v <= 40 {
@@ -238,8 +297,8 @@ pub fn summary() -> String {
     let p = get();
     let pairs: Vec<String> = AXES
         .iter()
-        .zip(p.values.iter())
-        .map(|((axis, _, _), v)| format!("{axis}: {v}/100"))
+        .enumerate()
+        .map(|(i, (axis, _, _))| format!("{axis}: {}/100", p.effective(i)))
         .collect();
     format!(
         "{}; lente: {}; manía: {}",
@@ -276,5 +335,26 @@ mod tests {
         let p = from_id("seed");
         assert_eq!(p.values.len(), AXES.len());
         assert!(p.values.iter().all(|&v| v <= 100));
+    }
+
+    #[test]
+    fn effective_is_innate_plus_maturation_clamped() {
+        let mut p = from_id("seed");
+        let i = 0;
+        let innate = p.values[i] as i32;
+        // Sin maduración: efectivo == innato.
+        assert_eq!(p.effective(i) as i32, innate);
+        // Una maduración dentro de ±MAX_DRIFT desplaza el rasgo en esa cantidad (acotado a 0..100).
+        p.maturation[i] = MATURE_STEP;
+        assert_eq!(
+            p.effective(i) as i32,
+            (innate + MATURE_STEP as i32).clamp(0, 100)
+        );
+        // effective() SIEMPRE queda en [0..100] aunque la maduración sea extrema.
+        p.maturation[i] = 127;
+        assert!(p.effective(i) <= 100);
+        p.maturation[i] = -128;
+        // (no panic, queda en 0)
+        let _ = p.effective(i);
     }
 }

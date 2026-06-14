@@ -393,6 +393,16 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                 {
                     tracing::info!(fact = %fact, "consolidación episódica → memoria durable");
                 }
+                // 🧬 MADURACIÓN DE LA ESENCIA: el carácter evoluciona con lo vivido (lento,
+                // acotado: el núcleo innato no cambia). Auto-gateado (≥8h entre maduraciones).
+                if let Ok((true, d)) = tokio::time::timeout(
+                    std::time::Duration::from_secs(120),
+                    crate::mature_personality_once(&engine),
+                )
+                .await
+                {
+                    tracing::info!(detail = %d, "maduración de la personalidad");
+                }
                 r
             });
             match h.await {
