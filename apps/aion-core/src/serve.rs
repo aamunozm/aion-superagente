@@ -490,21 +490,44 @@ fn is_local_host(host: &str) -> bool {
 
 /// Defensa local-first del puente (escucha solo en loopback, pero el navegador del
 /// usuario puede apuntarle desde una web ajena): rechaza `Host` no-local y `Origin`
-/// fuera de la allowlist. Los clientes no-navegador (CLI de Claude, curl) no envían
-/// `Origin` y pasan; su control de acceso a `/mcp` es el Bearer propio.
+/// fuera de la allowlist.
+///
+/// **Origin obligatorio en mutaciones** (P0-1, fase 1): un navegador SIEMPRE manda
+/// `Origin` en peticiones que cambian estado (POST/PUT/PATCH/DELETE). Su ausencia en
+/// una mutación delata a un cliente no-navegador (curl, script, otro proceso local),
+/// que hasta ahora podía conducir al agente, leer credenciales o borrar la memoria sin
+/// credencial alguna. Aquí se le exige `Origin` local; sin él, la mutación se rechaza.
+/// **Excepción `/mcp`**: Claude Code (no-navegador) postea sin `Origin` y se autentica
+/// con su propio Bearer — esa ruta queda exenta de esta regla. Las lecturas (GET/HEAD)
+/// no la requieren. Fase 2 (token local en todos los `/api/*`) endurece aún más esto.
 async fn local_guard(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    // `/mcp` tiene su propio Bearer; queda fuera de la exigencia de Origin.
+    let is_mcp = req.uri().path() == "/mcp";
+    // Mutación = método no seguro (POST/PUT/PATCH/DELETE). GET/HEAD/OPTIONS son seguros.
+    let is_mutation = !req.method().is_safe();
     let headers = req.headers();
     if let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) {
         if !is_local_host(host) {
             return (StatusCode::FORBIDDEN, "host no local").into_response();
         }
     }
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        if !is_local_origin(origin) {
-            return (StatusCode::FORBIDDEN, "origen no permitido").into_response();
+    match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        Some(origin) => {
+            if !is_local_origin(origin) {
+                return (StatusCode::FORBIDDEN, "origen no permitido").into_response();
+            }
+        }
+        None => {
+            if is_mutation && !is_mcp {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "origen requerido para operaciones que cambian estado",
+                )
+                    .into_response();
+            }
         }
     }
     next.run(req).await
@@ -2291,6 +2314,52 @@ async fn relevant_knowledge(prompt: &str) -> (String, usize, usize) {
     (s, n, cross)
 }
 
+/// Caché de SOLO LECTURA de la Biblioteca para la ruta caliente (corre por cada turno
+/// de chat). Reabrir de disco —parsear todos los pasajes con su embedding BGE-M3 de 1024
+/// f32— en cada turno era el mayor coste del path. Aquí se cachea un `Arc<Library>` y se
+/// RECARGA solo si cambió el `mtime` del archivo: una ingesta nueva reescribe el fichero
+/// → mtime mayor → recarga automática en el siguiente turno. Las rutas que MUTAN siguen
+/// usando `Library::open` directo (no tocan esta caché). Mismo espíritu que `shared_memory`.
+/// Celda de caché por `mtime`: el `mtime` con el que se cargó + el `Arc` cacheado.
+type MtimeCache<T> = std::sync::Mutex<Option<(Option<std::time::SystemTime>, std::sync::Arc<T>)>>;
+
+fn shared_library() -> std::sync::Arc<crate::library::Library> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<MtimeCache<crate::library::Library>> = OnceLock::new();
+    let path = crate::knowledge_path();
+    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached, lib)) = guard.as_ref() {
+        if *cached == mtime {
+            return lib.clone();
+        }
+    }
+    let lib = Arc::new(crate::library::Library::open(&path));
+    *guard = Some((mtime, lib.clone()));
+    lib
+}
+
+/// Caché de SOLO LECTURA del Grafo de conocimiento, análoga a `shared_library`: el grafo
+/// también carga nodos con embeddings y reconstruye índices en cada `open`. Recarga por
+/// `mtime`. Solo para lecturas del path caliente; las mutaciones reabren directo.
+fn shared_graph() -> std::sync::Arc<crate::graph::KnowledgeGraph> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<MtimeCache<crate::graph::KnowledgeGraph>> = OnceLock::new();
+    let path = crate::graph_path();
+    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached, g)) = guard.as_ref() {
+        if *cached == mtime {
+            return g.clone();
+        }
+    }
+    let g = Arc::new(crate::graph::KnowledgeGraph::open(&path));
+    *guard = Some((mtime, g.clone()));
+    g
+}
+
 /// Aterrizaje DUAL en la BIBLIOTECA + GRAFO de conocimiento (LightRAG-style):
 /// **local** = búsqueda clásica por coseno UNIDA a los pasajes que el grafo alcanza
 /// vía conceptos (incluye multi-salto: conexiones que el coseno directo no ve);
@@ -2301,7 +2370,7 @@ pub(crate) async fn library_grounding(prompt: &str) -> String {
         return String::new();
     }
     let t0 = std::time::Instant::now();
-    let lib = crate::library::Library::open(crate::knowledge_path());
+    let lib = shared_library();
     if lib.total_chunks() == 0 {
         return String::new();
     }
@@ -2322,7 +2391,7 @@ pub(crate) async fn library_grounding(prompt: &str) -> String {
     // Nivel LOCAL — grafo: pasajes alcanzados vía conceptos (1 salto). Se re-puntúan
     // con SU embedding (ya en RAM) y pasan el mismo umbral: el grafo solo APORTA
     // pasajes que el coseno directo dejó fuera del top, nunca baja el listón.
-    let g = crate::graph::KnowledgeGraph::open(crate::graph_path());
+    let g = shared_graph();
     if g.node_count() > 0 {
         for hit in g.local_candidates(&q, prompt, 6, 1).into_iter().take(12) {
             let Some(c) = lib.chunk_by_id(&hit.chunk_id) else {
@@ -3006,8 +3075,15 @@ struct IngestBody {
 
 /// Ingesta un archivo del equipo en la biblioteca, bajo un dominio.
 async fn library_ingest(Json(body): Json<IngestBody>) -> Json<serde_json::Value> {
+    // Confina la ruta al HOME y rechaza subrutas sensibles (claves/credenciales):
+    // sin esto, un cliente podía ingerir /etc/passwd o ~/.ssh/id_rsa y luego
+    // exfiltrarlo vía búsqueda en la biblioteca. `library_upload` (base64) es la
+    // vía segura por defecto; esta queda confinada con la misma regla que file_read.
+    let p = match crate::agent_tools::safe_home_path(&body.path) {
+        Ok(c) => c,
+        Err(e) => return Json(serde_json::json!({ "error": e })),
+    };
     let mut lib = crate::library::Library::open(crate::knowledge_path());
-    let p = std::path::PathBuf::from(&body.path);
     match lib.ingest_file(&body.domain, &p).await {
         Ok(n) => {
             // El grafo se actualiza en segundo plano: la respuesta no espera.

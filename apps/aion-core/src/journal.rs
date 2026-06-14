@@ -13,6 +13,13 @@
 //! entrada la hace `main::journal_once` con el modelo LOCAL, fail-open.
 
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+
+/// Serializa el ciclo leer→modificar→escribir del diario. El cierre de jornada corre
+/// en background (`main::journal_once`) y, aunque es de baja frecuencia, dos cierres
+/// coincidentes harían `all()` → `push` → `write_atomic` pisándose. Mismo patrón que
+/// `ingest_queue::QLOCK` y `pending::QLOCK`.
+static QLOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -73,6 +80,7 @@ pub fn push(text: &str, dominant: &str, debts: u32) {
     if t.chars().count() < 12 {
         return; // una jornada sin nada que contar no es una entrada
     }
+    let _guard = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut items = all();
     items.push(Entry {
         id: uuid::Uuid::new_v4().to_string(),

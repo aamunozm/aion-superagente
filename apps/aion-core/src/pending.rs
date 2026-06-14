@@ -5,6 +5,13 @@
 //! el fallo no se evapora — se convierte en la próxima cosa que AION hace por ti.
 
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+
+/// Serializa el ciclo leer→modificar→escribir del archivo de deudas. Sin esto, un
+/// handler HTTP y el bucle de vida autónoma pueden pisarse: ambos hacen `all()` →
+/// mutan en RAM → `save()`, y el que escribe segundo borra el cambio del primero
+/// (deuda perdida o reintento no contado). Mismo patrón que `ingest_queue::QLOCK`.
+static QLOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pending {
@@ -56,6 +63,7 @@ pub fn push(task: &str, why: &str) {
     if t.chars().count() < 8 {
         return;
     }
+    let _guard = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut items = all();
     if items
         .iter()
@@ -92,6 +100,7 @@ pub fn next_due() -> Option<Pending> {
 }
 
 pub fn note_attempt(id: &str) {
+    let _guard = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut items = all();
     for p in items.iter_mut() {
         if p.id == id {
@@ -103,6 +112,7 @@ pub fn note_attempt(id: &str) {
 }
 
 pub fn resolve(id: &str) {
+    let _guard = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut items = all();
     for p in items.iter_mut() {
         if p.id == id {

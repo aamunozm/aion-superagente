@@ -244,13 +244,19 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
         let mut executed: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
 
+        // El system prompt (con `tools.describe()`, ~3 KB) es IDÉNTICO en cada paso:
+        // no depende del scratchpad. Construirlo una sola vez evita reformatearlo y
+        // recorrer todas las herramientas hasta `max_steps` veces, y mantiene el
+        // prefijo estable → mejor reutilización del KV-cache de Ollama (prefill barato).
+        let system_msg = Message::system(self.system_prompt());
+
         for step in 0..self.max_steps {
             let user = format!(
                 "Tarea: {task}\n\n{scratchpad}\n\
                  Escribe el siguiente paso (Thought + Action/Action Input, o Thought + Final Answer):"
             );
             let req = GenerateRequest {
-                messages: vec![Message::system(self.system_prompt()), Message::user(user)],
+                messages: vec![system_msg.clone(), Message::user(user)],
                 think: false,
                 temperature: Some(0.2),
                 max_tokens: Some(400),
