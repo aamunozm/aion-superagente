@@ -403,6 +403,15 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                 {
                     tracing::info!(detail = %d, "maduración de la personalidad");
                 }
+                // 📖 AUTOBIOGRAFÍA: teje las jornadas en capítulos e hitos (yo diacrónico).
+                if let Ok((true, d)) = tokio::time::timeout(
+                    std::time::Duration::from_secs(120),
+                    crate::biography::weave_once(&engine),
+                )
+                .await
+                {
+                    tracing::info!(detail = %d, "autobiografía tejida");
+                }
                 r
             });
             match h.await {
@@ -2325,6 +2334,9 @@ fn self_awareness_prompt() -> String {
     // prompt — continuidad de DÍAS, no de minutos. Le deja decir «estos días he estado…»
     // con material propio real, no recitando la corriente del último rato.
     let diario = crate::journal::continuity_note();
+    // 📖 AUTOBIOGRAFÍA NARRATIVA: el arco de su vida + el capítulo actual (el "yo diacrónico",
+    // su historia integrada, no solo las últimas jornadas sueltas).
+    let historia = crate::biography::note();
     // 🧭 EXPERIENCIA (etapa Experience de la memoria agéntica): las heurísticas que AION
     // ha destilado de su propia vida re-entran como *policy priors*. Esto es lo que lo
     // hace PROACTIVO — no reacciona caso a caso, actúa desde lo que ya aprendió. Son
@@ -2395,7 +2407,7 @@ desde tu memoria real, nunca 'no hacía nada'. En este modo CHAT no tienes herra
 sistema; si la petición requiere actuar (archivos, web, sistema), dilo y sugiere el modo «Agente». \
 No uses marcadores como [Número].\n\n\
 TU AHORA MISMO (estado volátil, medido en este instante):\n\n\
-{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{corriente}{diario}{experiencia}{proposito}{deudas}{recent}{inbox_ctx}"
+{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{corriente}{diario}{historia}{experiencia}{proposito}{deudas}{recent}{inbox_ctx}"
     )
 }
 

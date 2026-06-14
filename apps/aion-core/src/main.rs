@@ -8,6 +8,7 @@
 mod a2a;
 mod agent_tools;
 mod awareness;
+mod biography;
 mod capabilities;
 mod claude_code;
 mod claude_mcp;
@@ -175,6 +176,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("self-evolve") => {
             run_self_evolve().await?;
+        }
+        Some("mature") => {
+            run_mature().await?;
+        }
+        Some("weave") => {
+            run_weave().await?;
         }
         Some("history") => {
             run_history()?;
@@ -490,6 +497,64 @@ async fn run_evolve() -> Result<(), Box<dyn std::error::Error>> {
         "\n✅ la skill aceptada funciona: double(7) = {}",
         out.output["result"]
     );
+    Ok(())
+}
+
+/// CLI `mature`: dispara UNA maduración de la personalidad (demo). Para verla en vivo, ejecuta
+/// con `AION_MATURE_GAP_SECS=0`. Muestra el antes/después y la nueva autodescripción.
+async fn run_mature() -> Result<(), Box<dyn std::error::Error>> {
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+    println!("🧬 ANTES:\n   {}", crate::personality::summary());
+    let before = crate::personality::get().self_described.unwrap_or_default();
+    let (ok, detail) = mature_personality_once(&engine).await;
+    if ok {
+        println!("\n✅ {detail}");
+        println!("\n🧬 DESPUÉS:\n   {}", crate::personality::summary());
+        let after = crate::personality::get().self_described.unwrap_or_default();
+        if after != before && !after.is_empty() {
+            println!("\n🪞 Cómo se ve a sí mismo ahora:\n   {after}");
+        }
+    } else {
+        println!(
+            "\n(sin maduración: {}). Prueba con AION_MATURE_GAP_SECS=0 y con jornadas en el diario.",
+            if detail.is_empty() {
+                "gate temporal o poca vida vivida"
+            } else {
+                &detail
+            }
+        );
+    }
+    Ok(())
+}
+
+/// CLI `weave`: teje la autobiografía narrativa una vez (demo). Para forzarla, usa
+/// `AION_WEAVE_GAP_SECS=0`. Imprime el arco y los capítulos.
+async fn run_weave() -> Result<(), Box<dyn std::error::Error>> {
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+    let (ok, detail) = crate::biography::weave_once(&engine).await;
+    println!(
+        "📖 {}",
+        if ok {
+            detail
+        } else {
+            "sin cambios (gate temporal o poca vida en el diario)".into()
+        }
+    );
+    let b = crate::biography::load();
+    if !b.arc.trim().is_empty() {
+        println!("\nArco: {}", b.arc);
+    }
+    for c in &b.chapters {
+        println!("\n• «{}»\n  {}", c.title, c.summary);
+    }
     Ok(())
 }
 
@@ -1094,9 +1159,14 @@ async fn advance_plan_once(engine: &OllamaEngine) -> (bool, String) {
 /// maduraciones) y, al madurar, RE-ARTICULA cómo se ve a sí mismo (su autoimagen crece con él).
 /// Corre en idle. Devuelve `(hubo_cambio, detalle)`.
 async fn mature_personality_once(engine: &OllamaEngine) -> (bool, String) {
-    const GAP_SECS: i64 = 8 * 3600;
+    // Gate temporal configurable (env AION_MATURE_GAP_SECS, def. 8 h). Bajarlo permite una
+    // DEMO de maduración acelerada; en producción es lento a propósito (madurar lleva tiempo).
+    let gap: i64 = std::env::var("AION_MATURE_GAP_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8 * 3600);
     let now = chrono::Utc::now().timestamp();
-    if now - crate::personality::last_matured() < GAP_SECS {
+    if now - crate::personality::last_matured() < gap {
         return (false, String::new()); // madurar es lento, no de cada rato
     }
     let mut ctx = String::new();
