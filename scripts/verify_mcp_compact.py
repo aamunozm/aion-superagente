@@ -13,12 +13,16 @@ import urllib.request
 OLLAMA = "http://127.0.0.1:11434/api/generate"
 MODEL = "gemma4-reason:latest"
 
-# El MISMO prompt de mcp_compact.rs::ensure_english (manténlos en sync).
+# El MISMO prompt de mcp_compact.rs::ensure_english (manténlos en sync) — meaning-first.
 PROMPT_TMPL = (
-    "Translate the following Spanish note into clear, faithful English. "
-    "Preserve EVERY fact, name, number, path and identifier exactly as-is. "
-    "Be concise but omit nothing. Output ONLY the English translation, with no "
-    "preamble, quotes or notes.\n\n{body}"
+    "You are translating a personal-memory note written in Spanish or Italian (it may "
+    "contain typos, slang or regional expressions) into English for another AI agent. "
+    "First understand what the author MEANS — silently fix obvious typos, interpret idioms "
+    "and regionalisms by their intended sense, and resolve ambiguity — then express that "
+    "meaning in clear, natural English. Translate the MEANING, not word-for-word. Preserve "
+    "EVERY fact, name, number, path and identifier EXACTLY as written; never invent or add "
+    "anything that is not in the note. Be concise but omit nothing. Output ONLY the English "
+    "translation, with no preamble, quotes or notes.\n\n{body}"
 )
 
 # Recuerdos reales estilo AION tal como se almacenan. AION lo usan tanto hispanohablantes

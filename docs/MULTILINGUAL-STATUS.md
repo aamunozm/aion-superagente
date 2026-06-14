@@ -38,8 +38,13 @@ función de cualquiera). Medido: italiano→inglés ahorra ~23% (hasta 28% en pr
 
 **Cómo se genera el inglés** (`apps/aion-core/src/mcp_compact.rs`):
 
-1. Lo traduce **Gemma local** (gratis), fiel y literal (`temp 0.1`), preservando
-   hechos/nombres/números/rutas. NO resume agresivo: el 40% ya viene de la tokenización.
+1. Lo traduce un **modelo local** (gratis), **meaning-first** (`temp 0.1`): primero entiende
+   la INTENCIÓN —resuelve typos, jerga/regionalismos e idioms por su sentido— y luego la
+   expresa en inglés, sin traducir palabra por palabra, preservando hechos/nombres/números/
+   rutas tal cual (mini-MAPS, arXiv 2305.04118; ver `docs/auditoria-interpretacion-*`). NO
+   resume agresivo: el 40% ya viene de la tokenización. El modelo es **configurable**
+   (`provider.translation_model` o env `AION_TRANSLATION_MODEL`): por defecto cae al de fondo,
+   pero puedes enchufar un traductor especializado (TranslateGemma/GemmaX2) sin tocar código.
 2. **Precomputado y cacheado** por SHA-256 del contenido en
    `~/Library/Application Support/AION/mcp_compact_en.json`. Nunca se traduce en caliente
    dentro de la llamada MCP (eso metería latencia de Gemma a cada búsqueda).

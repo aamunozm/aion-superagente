@@ -34,6 +34,13 @@ pub struct ProviderConfig {
     /// en uno modesto, todo ligero. Vacío → las tareas de fondo usan `local_model`.
     #[serde(default)]
     pub utility_model: String,
+    /// Modelo LOCAL especializado en TRADUCCIÓN, OPCIONAL (p. ej. "translategemma:12b" o
+    /// "gemmax2"). Solo lo usa la compactación ES/IT→EN del puente MCP (`mcp_compact`). Un
+    /// modelo afinado para traducción interpreta mejor la INTENCIÓN que el genérico (ver
+    /// auditoría de interpretación). Vacío → cae a `utility_model`/`local_model`. El override
+    /// por env `AION_TRANSLATION_MODEL` tiene prioridad (para probar sin tocar el archivo).
+    #[serde(default)]
+    pub translation_model: String,
     /// Runtime de inferencia LOCAL: "ollama" (por defecto). Costura para futuros motores
     /// (MLX, mistral.rs…). Vacío se trata como "ollama". Ver crate::local_runtime.
     #[serde(default)]
@@ -50,6 +57,7 @@ impl Default for ProviderConfig {
             local_model: "gemma4-reason".into(),
             ext_model: String::new(),
             utility_model: String::new(),
+            translation_model: String::new(),
             runtime: "ollama".into(),
         }
     }
@@ -72,6 +80,24 @@ impl ProviderConfig {
             return util.to_string();
         }
         self.local_model.trim().to_string()
+    }
+
+    /// Modelo LOCAL para TRADUCIR (puente MCP). Prioridad: env `AION_TRANSLATION_MODEL` >
+    /// `translation_model` configurado > `background_model()`. Así un traductor especializado
+    /// (TranslateGemma/GemmaX2) es un cambio de CONFIG, no de código, con fallback seguro: si
+    /// no hay nada especializado, traduce con el de fondo de siempre (fail-open conservado).
+    pub fn translation_model(&self) -> String {
+        if let Ok(env) = std::env::var("AION_TRANSLATION_MODEL") {
+            let env = env.trim();
+            if !env.is_empty() {
+                return env.to_string();
+            }
+        }
+        let tm = self.translation_model.trim();
+        if !tm.is_empty() {
+            return tm.to_string();
+        }
+        self.background_model()
     }
 }
 
@@ -130,6 +156,10 @@ pub fn merge(incoming: ProviderConfig) -> ProviderConfig {
     // se conserva el previo (no se pierde al alternar local↔API).
     if out.utility_model.trim().is_empty() {
         out.utility_model = prev.utility_model.clone();
+    }
+    // El modelo de traducción también es independiente del motor activo: se conserva.
+    if out.translation_model.trim().is_empty() {
+        out.translation_model = prev.translation_model.clone();
     }
     // Igual con el runtime local elegido.
     if out.runtime.trim().is_empty() {
