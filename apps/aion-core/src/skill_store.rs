@@ -96,10 +96,17 @@ fn emb_cache_path() -> PathBuf {
     crate::app_data_dir().join("skills_emb.jsonl")
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct SkillEmb {
     name: String,
     embedding: Vec<f32>,
+}
+
+/// Variante prestada para serializar SIN clonar (escritura del cache en caliente).
+#[derive(Serialize)]
+struct SkillEmbRef<'a> {
+    name: &'a str,
+    embedding: &'a [f32],
 }
 
 fn load_emb_cache() -> std::collections::HashMap<String, Vec<f32>> {
@@ -117,15 +124,25 @@ fn save_emb_cache(map: &std::collections::HashMap<String, Vec<f32>>) {
     let body: String = map
         .iter()
         .filter_map(|(name, embedding)| {
-            serde_json::to_string(&SkillEmb {
-                name: name.clone(),
-                embedding: embedding.clone(),
-            })
-            .ok()
+            serde_json::to_string(&SkillEmbRef { name, embedding }).ok()
         })
         .map(|l| l + "\n")
         .collect();
     crate::write_atomic(&emb_cache_path(), &body);
+}
+
+/// Funde embeddings nuevos en el cache con un read-merge-write: re-lee lo último de disco
+/// antes de escribir, así dos hidrataciones concurrentes no se pisan los inserts (mitiga el
+/// lost-update sin un lock; el peor caso residual es re-embeber una skill, auto-sanable).
+fn merge_emb_cache(fresh: Vec<(String, Vec<f32>)>) {
+    if fresh.is_empty() {
+        return;
+    }
+    let mut cache = load_emb_cache();
+    for (name, emb) in fresh {
+        cache.insert(name, emb);
+    }
+    save_emb_cache(&cache);
 }
 
 /// **Hidratación en frío** (cold registry → on-demand semantic hydration). En vez de
@@ -145,29 +162,41 @@ pub async fn hydrate_relevant(host: &WasmSkillHost, task: &str, k: usize) -> usi
     let Ok(q) = embedder.embed(task).await else {
         return load_all(host);
     };
-    let mut cache = load_emb_cache();
-    let mut dirty = false;
+    let cache = load_emb_cache();
+    let mut fresh: Vec<(String, Vec<f32>)> = Vec::new();
     let mut scored: Vec<(f32, StoredSkill)> = Vec::new();
+    let mut fails = 0usize;
     for s in records {
-        let emb = match cache.get(&s.name) {
-            Some(e) if !e.is_empty() => e.clone(),
-            _ => {
+        // Dim-check: una entrada cacheada de OTRO modelo de embeddings (dimensión distinta)
+        // no es comparable → se re-embebe en vez de dar un coseno basura (auto-sana si
+        // cambió AION_EMBED_MODEL sin invalidar el cache).
+        let cached = cache.get(&s.name).filter(|e| e.len() == q.len());
+        let score = match cached {
+            Some(e) => aion_memory::cosine(&q, e), // sin clonar: cosine toma &[f32]
+            None => {
                 let text = format!("{} — {}", s.name, s.description);
                 match embedder.embed(&text).await {
                     Ok(e) => {
-                        cache.insert(s.name.clone(), e.clone());
-                        dirty = true;
-                        e
+                        let sc = aion_memory::cosine(&q, &e);
+                        fresh.push((s.name.clone(), e));
+                        sc
                     }
-                    Err(_) => continue,
+                    Err(_) => {
+                        fails += 1;
+                        continue;
+                    }
                 }
             }
         };
-        scored.push((aion_memory::cosine(&q, &emb), s));
+        scored.push((score, s));
     }
-    if dirty {
-        save_emb_cache(&cache);
+    // Si el embedder falló a mitad en demasiadas, el top-k estaría sesgado por exclusión
+    // SILENCIOSA (una skill clave podría no registrarse nunca). Mejor caer al fallback
+    // completo que hidratar un subconjunto arbitrario creyendo que elegimos las mejores.
+    if fails > 0 && scored.len() < HYDRATE_FLOOR.max(k) {
+        return load_all(host);
     }
+    merge_emb_cache(fresh); // read-merge-write (tolera concurrencia)
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let mut n = 0;
     for (_, s) in scored.into_iter().take(k) {

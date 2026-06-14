@@ -81,18 +81,25 @@ fn path() -> std::path::PathBuf {
 }
 
 // ── Parámetros de gobernanza ────────────────────────────────────────────────
-/// Confianza inicial de una regla nueva: es una hipótesis, no una certeza.
-const BASE_CONFIDENCE: f32 = 0.45;
+/// Confianza inicial de una regla nueva. **CUARENTENA**: está por DEBAJO de `ACTIVE_FLOOR`
+/// a propósito — una hipótesis destilada de una sola corrida NO debe guiar el comportamiento
+/// hasta que la experiencia la reconfirme al menos una vez (un refuerzo la lleva a 0.37 ≥ 0.30).
+const BASE_CONFIDENCE: f32 = 0.25;
 /// Refuerzo al re-confirmar un patrón ya conocido (asimétrico con el decaimiento).
 const REINFORCE_STEP: f32 = 0.12;
 /// Por debajo de esta confianza una regla no entra al prompt ni se considera vigente.
 const ACTIVE_FLOOR: f32 = 0.30;
 /// Por debajo de esto, y si ya es vieja, se retira (poda darwiniana).
 const RETIRE_FLOOR: f32 = 0.18;
-/// ≥ esto = la regla candidata YA existe (dedup): se refuerza la vieja, no se añade.
+/// ≥ esto = la regla candidata es un DUPLICADO casi exacto (dedup): se refuerza, no se añade.
 const DEDUP_SIM: f32 = 0.90;
-/// Banda en la que dos reglas son "vecinas": posible refinamiento o contradicción.
+/// Entre vecindad y dedup: una REFORMULACIÓN del mismo patrón → refuerza la vigente (amplía
+/// el refuerzo más allá del duplicado literal y frena la acumulación de cuasi-sinónimos).
+const REINFORCE_SIM: f32 = 0.85;
+/// Banda en la que dos reglas son "vecinas": posible refinamiento, refuerzo o contradicción.
 const NEIGHBOR_SIM: f32 = 0.78;
+/// Cuántas vecinas más próximas se comprueban por contradicción (presupuesto de LLM por ciclo).
+const MAX_NEIGHBOR_CHECKS: usize = 3;
 /// Tope de reglas guardadas: la experiencia útil es un puñado de heurísticas, no un saco.
 const MAX_RULES: usize = 80;
 
@@ -170,116 +177,147 @@ async fn embed(text: &str) -> Vec<f32> {
         .unwrap_or_default()
 }
 
-/// Resultado de pasar una regla candidata por las guardas de gobernanza.
+/// Resultado de pasar una regla candidata por las guardas de gobernanza. Los índices
+/// apuntan al Vec de reglas que `reflect_once` mantiene en memoria (un único RMW por ciclo).
 enum Verdict {
-    /// Es nueva y consistente: persistir como regla con confianza base.
+    /// Es nueva y distinta: persistir como regla en cuarentena (confianza base).
     Insert,
-    /// Ya existía una casi igual (id): reforzarla en vez de duplicar (MDL).
-    Reinforce(String),
-    /// Contradice una vigente más fuerte: descartar (anclaje a lo estable).
+    /// Reconfirma una vigente (idx): reforzarla en vez de duplicar (MDL + refuerzo ampliado).
+    Reinforce(usize),
+    /// Contradice una vigente consolidada: descartar (anclaje a lo estable).
     Reject,
-    /// Contradice una vigente MÁS DÉBIL (id a retirar): la nueva la reemplaza.
-    Supersede(String),
+    /// Contradice una vigente MÁS DÉBIL (idx a retirar): la nueva la reemplaza.
+    Supersede(usize),
 }
 
-/// **Guardas SSGM-lite**, evaluadas ANTES de consolidar. `engine` solo se usa para el
-/// chequeo de contradicción de una vecina (presupuesto: ≤1 llamada LLM acotada).
-async fn govern(candidate: &str, cand_emb: &[f32], engine: &OllamaEngine) -> Verdict {
-    if cand_emb.is_empty() {
-        return Verdict::Insert; // sin embedding no podemos comparar; entra con confianza base
-    }
-    let existing = all();
-    let mut best: Option<(usize, f32)> = None;
-    for (i, r) in existing.iter().enumerate() {
-        if r.retired || r.embedding.is_empty() {
-            continue;
-        }
-        let s = aion_memory::cosine(cand_emb, &r.embedding);
-        if best.map(|(_, bs)| s > bs).unwrap_or(true) {
-            best = Some((i, s));
-        }
-    }
-    let Some((idx, sim)) = best else {
-        return Verdict::Insert;
+/// ¿Las dos heurísticas se CONTRADICEN? Una sola pregunta de vocabulario cerrado (SI/NO).
+/// Ante fallo del modelo devuelve `false`: el peor caso es un duplicado, no una pérdida.
+async fn contradicts(engine: &OllamaEngine, a: &str, b: &str) -> bool {
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(
+                "Decides si dos heurísticas se CONTRADICEN (una dice lo contrario de la \
+                 otra). Respondes SOLO con SI o NO. Nada más.",
+            ),
+            Message::user(format!(
+                "Heurística A (vigente): «{a}»\nHeurística B (nueva): «{b}»\n¿Se contradicen? SOLO SI o NO."
+            )),
+        ],
+        think: false,
+        temperature: Some(0.0),
+        max_tokens: Some(4),
     };
-    // 1) Dedup (consistencia): la misma heurística otra vez → reforzar, no duplicar.
-    if sim >= DEDUP_SIM {
-        return Verdict::Reinforce(existing[idx].id.clone());
-    }
-    // 2) Vecina: ¿la refina o la CONTRADICE? Una sola pregunta de vocabulario cerrado.
-    if sim >= NEIGHBOR_SIM {
-        let req = GenerateRequest {
-            messages: vec![
-                Message::system(
-                    "Decides si dos heurísticas se CONTRADICEN (una dice lo contrario de \
-                     la otra). Respondes SOLO con SI o NO. Nada más.",
-                ),
-                Message::user(format!(
-                    "Heurística A (vigente): «{}»\nHeurística B (nueva): «{}»\n¿Se contradicen? SOLO SI o NO.",
-                    existing[idx].text, candidate
-                )),
-            ],
-            think: false,
-            temperature: Some(0.0),
-            max_tokens: Some(4),
-        };
-        if let Ok(m) = engine.generate(req).await {
+    match engine.generate(req).await {
+        Ok(m) => {
             let ans = m.content.trim().to_lowercase();
-            if ans.starts_with("si") || ans.starts_with("sí") {
-                // Anclaje a lo estable: la vigente con más confianza gana.
-                if existing[idx].confidence >= BASE_CONFIDENCE {
-                    return Verdict::Reject;
-                }
-                return Verdict::Supersede(existing[idx].id.clone());
-            }
+            ans.starts_with("si") || ans.starts_with("sí")
         }
+        Err(_) => false,
     }
-    Verdict::Insert
 }
 
-/// Refuerza una regla por id: sube confianza (saturada en 1.0), cuenta el uso y renueva
-/// la marca de confirmación (resetea su decaimiento). Es la confirmación cross-trajectory:
-/// si la vida vuelve a toparse con el patrón, la heurística se fortalece.
-pub fn reinforce(id: &str) {
-    let _guard = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut items = all();
-    let now = chrono::Utc::now().timestamp();
-    for r in items.iter_mut() {
-        if r.id == id {
-            r.confidence = (r.confidence + REINFORCE_STEP).min(1.0);
-            r.uses += 1;
-            r.last_confirmed = now;
-            r.last_decay = now; // resetea el reloj de decaimiento: acaba de confirmarse
-            r.retired = false;
+/// **Guardas SSGM-lite**, sobre las reglas YA cargadas en memoria (sin tocar disco).
+/// Mejoras frente a la primera versión: (1) refuerzo AMPLIADO — toda reconfirmación
+/// (sim ≥ REINFORCE_SIM), no solo el duplicado literal ≥ 0.90; (2) contradicción comprobada
+/// contra VARIAS vecinas, no solo la más próxima; (3) dim-check — si cambió el modelo de
+/// embeddings, las reglas viejas no son comparables y se ignoran (en vez de dar coseno falso).
+async fn govern(
+    items: &[Rule],
+    cand_emb: &[f32],
+    candidate: &str,
+    engine: &OllamaEngine,
+) -> Verdict {
+    if cand_emb.is_empty() {
+        return Verdict::Insert;
+    }
+    let mut neigh: Vec<(usize, f32)> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| !r.retired && r.embedding.len() == cand_emb.len())
+        .map(|(i, r)| (i, aion_memory::cosine(cand_emb, &r.embedding)))
+        .filter(|(_, s)| *s >= NEIGHBOR_SIM)
+        .collect();
+    neigh.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let Some(&(best_idx, best_sim)) = neigh.first() else {
+        return Verdict::Insert; // sin vecinas: heurística genuinamente nueva
+    };
+    // Duplicado casi exacto → reforzar.
+    if best_sim >= DEDUP_SIM {
+        return Verdict::Reinforce(best_idx);
+    }
+    // ¿Contradice a alguna de las vecinas más próximas? (no solo la primera).
+    for &(idx, _) in neigh.iter().take(MAX_NEIGHBOR_CHECKS) {
+        if contradicts(engine, &items[idx].text, candidate).await {
+            // Anclaje: la vigente consolidada gana; si es débil (cuarentena/decaída), la nueva la reemplaza.
+            return if items[idx].confidence >= BASE_CONFIDENCE {
+                Verdict::Reject
+            } else {
+                Verdict::Supersede(idx)
+            };
         }
     }
-    save(&items);
+    // Sin contradicción: si es muy parecida, es una reformulación → refuerza.
+    if best_sim >= REINFORCE_SIM {
+        Verdict::Reinforce(best_idx)
+    } else {
+        Verdict::Insert // relacionada pero distinta: entra como regla nueva en cuarentena
+    }
+}
+
+/// Aplica refuerzo a la regla `idx` (in-memory): sube confianza, cuenta el uso, renueva la
+/// confirmación y resetea su reloj de decaimiento. Es la confirmación cross-trajectory.
+fn apply_reinforce(items: &mut [Rule], idx: usize, now: i64) {
+    let r = &mut items[idx];
+    r.confidence = (r.confidence + REINFORCE_STEP).min(1.0);
+    r.uses += 1;
+    r.last_confirmed = now;
+    r.last_decay = now;
+    r.retired = false;
+}
+
+/// Inserta una regla nueva (in-memory) en CUARENTENA (BASE_CONFIDENCE < ACTIVE_FLOOR: no
+/// guía el comportamiento hasta reconfirmarse). Hace CONVERGER el tope `MAX_RULES` retirando
+/// las vivas más débiles (un `while`, no un solo retiro, por si hubo resurrecciones).
+fn apply_insert(items: &mut Vec<Rule>, text: &str, embedding: Vec<f32>, now: i64) {
+    items.push(Rule {
+        id: uuid::Uuid::new_v4().to_string(),
+        at: now,
+        text: text.chars().take(280).collect(),
+        confidence: BASE_CONFIDENCE,
+        uses: 0,
+        last_confirmed: now,
+        last_decay: now,
+        embedding,
+        retired: false,
+    });
+    while items.iter().filter(|r| !r.retired).count() > MAX_RULES {
+        let Some(weak) = items.iter_mut().filter(|r| !r.retired).min_by(|a, b| {
+            a.confidence
+                .partial_cmp(&b.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) else {
+            break;
+        };
+        weak.retired = true;
+    }
 }
 
 /// Cuántas reglas RETIRADAS conservar como historia antes de compactar el archivo.
 const MAX_RETIRED: usize = 40;
 
-/// **Decaimiento temporal + poda darwiniana** (SSGM): una heurística que no se vuelve a
-/// confirmar envejece y, si cae por debajo del suelo siendo vieja, se retira. Evita que
-/// un patrón captado una sola vez contamine el prompt para siempre. Determinista, sin LLM.
-///
-/// El decaimiento es INCREMENTAL (sobre el tiempo desde `last_decay`), no sobre la edad
-/// total: así correr el lazo cada 45 min no re-aplica el mismo decaimiento repetidamente.
-/// Solo persiste si algo cambió (evita reescribir el JSONL en vano).
-pub fn decay_and_prune() -> usize {
-    let _guard = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut items = all();
+/// **Decaimiento temporal + poda darwiniana** (SSGM) sobre el Vec en memoria. Devuelve
+/// `(nº retiradas en esta pasada, hubo_cambio)`. Decaimiento INCREMENTAL (desde `last_decay`)
+/// para no re-aplicar el mismo decaimiento en cada ciclo. Determinista, sin LLM.
+fn decay_prune_inplace(items: &mut Vec<Rule>, now: i64) -> (usize, bool) {
     if items.is_empty() {
-        return 0;
+        return (0, false);
     }
-    let now = chrono::Utc::now().timestamp();
     let mut retired = 0usize;
     let mut changed = false;
     for r in items.iter_mut() {
         if r.retired {
             continue;
         }
-        // Decaimiento incremental: tiempo transcurrido DESDE el último decaimiento.
         let from = if r.last_decay > 0 {
             r.last_decay
         } else if r.last_confirmed > 0 {
@@ -298,7 +336,6 @@ pub fn decay_and_prune() -> usize {
                 changed = true;
             }
         }
-        // Edad para la poda: tiempo desde la última confirmación (o creación).
         let anchor = if r.last_confirmed > 0 {
             r.last_confirmed
         } else {
@@ -311,68 +348,42 @@ pub fn decay_and_prune() -> usize {
             changed = true;
         }
     }
-    // Compactación: si las retiradas (historia) crecieron demasiado, suelta las más viejas.
-    let retired_now = items.iter().filter(|r| r.retired).count();
-    if retired_now > MAX_RETIRED {
-        let drop = retired_now - MAX_RETIRED;
-        let mut dropped = 0usize;
-        items.retain(|r| {
-            if r.retired && dropped < drop {
-                dropped += 1;
-                false
+    // Compactación: conserva las MAX_RETIRED retiradas MÁS RECIENTES y suelta las más viejas
+    // por TIEMPO (last_confirmed/at), no por posición en el archivo.
+    let retired_count = items.iter().filter(|r| r.retired).count();
+    if retired_count > MAX_RETIRED {
+        let drop_n = retired_count - MAX_RETIRED;
+        let mut retired_idx: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.retired)
+            .map(|(i, _)| i)
+            .collect();
+        retired_idx.sort_by_key(|&i| {
+            let r = &items[i];
+            if r.last_confirmed > 0 {
+                r.last_confirmed
             } else {
-                true
+                r.at
             }
+        });
+        let to_drop: std::collections::HashSet<usize> =
+            retired_idx.into_iter().take(drop_n).collect();
+        let mut k = 0usize;
+        items.retain(|_| {
+            let keep = !to_drop.contains(&k);
+            k += 1;
+            keep
         });
         changed = true;
     }
-    if changed {
-        save(&items);
-    }
-    retired
+    (retired, changed)
 }
 
-/// Persiste una regla nueva tras pasar las guardas. Tope suave (`MAX_RULES`): cuando se
-/// llena, cae la de menor confianza (poda por aptitud). QLOCK protege todo el RMW.
-fn insert(text: &str, embedding: Vec<f32>) {
+/// Escribe el almacén bajo QLOCK (único punto de escritura por ciclo).
+fn save_locked(items: &[Rule]) {
     let _guard = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let now = chrono::Utc::now().timestamp();
-    let mut items = all();
-    items.push(Rule {
-        id: uuid::Uuid::new_v4().to_string(),
-        at: now,
-        text: text.chars().take(280).collect(),
-        confidence: BASE_CONFIDENCE,
-        uses: 0,
-        last_confirmed: now,
-        last_decay: now,
-        embedding,
-        retired: false,
-    });
-    // Tope: si nos pasamos, retira la regla viva de menor confianza (no la borra: historia).
-    let live = items.iter().filter(|r| !r.retired).count();
-    if live > MAX_RULES {
-        if let Some(weak) = items.iter_mut().filter(|r| !r.retired).min_by(|a, b| {
-            a.confidence
-                .partial_cmp(&b.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }) {
-            weak.retired = true;
-        }
-    }
-    save(&items);
-}
-
-/// Marca una regla como retirada por id (usado cuando una nueva la supera en contradicción).
-fn retire(id: &str) {
-    let _guard = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut items = all();
-    for r in items.iter_mut() {
-        if r.id == id {
-            r.retired = true;
-        }
-    }
-    save(&items);
+    save(items);
 }
 
 /// Reúne material cross-trajectory reciente: las lecciones `[aprendizaje]`/`[reflexión]`
@@ -414,12 +425,19 @@ async fn gather_trajectories() -> String {
 /// UNA regla generalizada (o «NINGUNA»), la pasa por las guardas de gobernanza y la
 /// consolida (o refuerza/descarta). Devuelve `(hubo_cambio, detalle)` como `life_tick`.
 pub async fn reflect_once(engine: &OllamaEngine) -> (bool, String) {
-    // 0) Mantenimiento barato primero: envejecer y podar (sin LLM).
-    let pruned = decay_and_prune();
+    let now = chrono::Utc::now().timestamp();
+    // UN SOLO RMW por ciclo: cargar una vez, mutar en memoria (decaimiento + veredicto) y
+    // guardar una sola vez al final. Evita las ~5 lecturas + 3 escrituras del JSONL que hacía
+    // la versión anterior, encoge la ventana de carrera y hace el Supersede ATÓMICO.
+    let mut items = all();
+    let (pruned, changed) = decay_prune_inplace(&mut items, now);
 
     let ctx = gather_trajectories().await;
     if ctx.trim().chars().count() < 40 {
-        // Aún no hay vida suficiente que generalizar: abstenerse barato.
+        // Aún no hay vida suficiente que generalizar: abstenerse (pero persistir el decaimiento).
+        if changed {
+            save_locked(&items);
+        }
         return (
             pruned > 0,
             if pruned > 0 {
@@ -450,15 +468,27 @@ pub async fn reflect_once(engine: &OllamaEngine) -> (bool, String) {
         max_tokens: Some(80),
     };
     let Ok(m) = engine.generate(req).await else {
-        return (pruned > 0, "el modelo local no respondió".into());
+        if changed {
+            save_locked(&items);
+        }
+        return (pruned > 0 || changed, "el modelo local no respondió".into());
     };
     let rule = m
         .content
         .trim()
-        .trim_matches(['«', '»', '"', '.'])
+        .trim_matches(['«', '»', '"', '.', ' '])
         .trim()
         .to_string();
-    if rule.is_empty() || rule.to_lowercase().starts_with("ninguna") || rule.chars().count() < 15 {
+    // Detección robusta de la abstención: "NINGUNA" aunque venga con preámbulo corto.
+    let low = rule.to_lowercase();
+    let is_none = low == "ninguna"
+        || low.starts_with("ninguna")
+        || low.ends_with("ninguna")
+        || (low.contains("ninguna") && rule.chars().count() < 30);
+    if rule.is_empty() || is_none || rule.chars().count() < 15 {
+        if changed {
+            save_locked(&items);
+        }
         return (
             pruned > 0,
             if pruned > 0 {
@@ -469,44 +499,40 @@ pub async fn reflect_once(engine: &OllamaEngine) -> (bool, String) {
         );
     }
 
-    // 2) Guardas de gobernanza ANTES de consolidar.
+    // 2) Guardas de gobernanza (in-memory, sobre `items`).
     let cand_emb = embed(&rule).await;
-    let verdict = govern(&rule, &cand_emb, engine).await;
-    let detail = match verdict {
-        Verdict::Reinforce(id) => {
-            reinforce(&id);
-            format!(
-                "reforcé una heurística que la experiencia confirma: «{}»",
-                rule.chars().take(80).collect::<String>()
-            )
+    let short: String = rule.chars().take(80).collect();
+    let detail = match govern(&items, &cand_emb, &rule, engine).await {
+        Verdict::Reinforce(idx) => {
+            apply_reinforce(&mut items, idx, now);
+            format!("reforcé una heurística que la experiencia confirma: «{short}»")
         }
         Verdict::Reject => {
+            if changed {
+                save_locked(&items);
+            }
             return (
-                pruned > 0,
+                pruned > 0 || changed,
                 format!(
-                    "descarté una idea que contradecía algo que ya sé y confío: «{}»",
+                    "descarté una idea que contradecía algo que ya sé: «{}»",
                     rule.chars().take(60).collect::<String>()
                 ),
             );
         }
-        Verdict::Supersede(old) => {
-            retire(&old);
-            insert(&rule, cand_emb);
-            format!(
-                "revisé una heurística vieja por una mejor: «{}»",
-                rule.chars().take(80).collect::<String>()
-            )
+        Verdict::Supersede(idx) => {
+            items[idx].retired = true;
+            apply_insert(&mut items, &rule, cand_emb, now);
+            format!("revisé una heurística vieja por una mejor: «{short}»")
         }
         Verdict::Insert => {
-            insert(&rule, cand_emb);
-            format!(
-                "aprendí una heurística nueva sobre cómo trabajar: «{}»",
-                rule.chars().take(80).collect::<String>()
-            )
+            apply_insert(&mut items, &rule, cand_emb, now);
+            format!("aprendí una heurística nueva (en cuarentena hasta reconfirmarse): «{short}»")
         }
     };
+    // Un único guardado atómico de todo el ciclo (siempre hubo mutación: refuerzo/inserción).
+    save_locked(&items);
 
-    // 3) Re-entrada GWT: lo que aprendo se publica en el tablón (y vuelve a mi prompt).
+    // Re-entrada GWT: lo que aprendo se publica en el tablón (y vuelve a mi prompt).
     crate::workspace::publish(crate::workspace::StreamEvent::now(
         "experiencia",
         "reflexión",
@@ -563,6 +589,22 @@ mod tests {
             .collect();
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].id, "a");
+    }
+
+    #[test]
+    fn newborn_rule_starts_in_quarantine() {
+        // Invariante clave: una regla recién nacida NO entra al prompt (cuarentena).
+        assert!(
+            BASE_CONFIDENCE < ACTIVE_FLOOR,
+            "una regla nueva no debe guiar el comportamiento hasta reconfirmarse"
+        );
+        // Pero un único refuerzo debe bastar para activarla (si no, nunca actuaría).
+        assert!(
+            BASE_CONFIDENCE + REINFORCE_STEP >= ACTIVE_FLOOR,
+            "un refuerzo debe sacar la regla de la cuarentena"
+        );
+        // El refuerzo se amplía a reformulaciones, no solo a duplicados literales.
+        assert!(REINFORCE_SIM < DEDUP_SIM && REINFORCE_SIM >= NEIGHBOR_SIM);
     }
 
     #[test]

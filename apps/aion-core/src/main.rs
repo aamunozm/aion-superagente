@@ -1586,11 +1586,12 @@ async fn optimize_prompt_once(engine: &OllamaEngine) -> (bool, String) {
         "tecnico",
         "analisis",
     ];
-    let task = tasks
-        .iter()
-        .min_by_key(|t| prompt_store::current_version(t))
-        .copied()
-        .unwrap_or("conversacion");
+    // Rotación ROUND-ROBIN entre los modos. Antes se elegía `min_by_key(version)`, que
+    // re-elegía siempre el modo de menor versión: si uno nunca lograba promoverse (empates
+    // del juez), se quedaba en v0 y monopolizaba los intentos, dejando a los demás sin
+    // optimizar (inanición). Rotar garantiza que TODOS reciben intentos periódicos.
+    static OPT_RR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let task = tasks[OPT_RR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % tasks.len()];
     let current = prompts::persona(task);
 
     let prompt = format!(
@@ -1624,21 +1625,35 @@ async fn optimize_prompt_once(engine: &OllamaEngine) -> (bool, String) {
             // es mejor. Ratchet: solo se promueve si GANA. Barato y 100% local.
             match judge_persona_better(engine, task, &current, &improved).await {
                 Some(true) => {
-                    // Human-in-the-loop: toda promoción queda registrada para Ariel
-                    // (revisable y reversible: prompt_store es versionado). La
-                    // promoción automática se puede apagar con AION_SELF_IMPROVE_AUTO=0.
-                    record_self_improvement(task, &current, &improved);
+                    // Human-in-the-loop + reversible (prompt_store es versionado). Si la
+                    // promoción automática está apagada, solo se PROPONE (no se persiste).
                     if std::env::var("AION_SELF_IMPROVE_AUTO").as_deref() == Ok("0") {
+                        record_self_improvement(
+                            task,
+                            &current,
+                            &improved,
+                            "propuesta (pendiente de tu visto bueno)",
+                        );
                         return (
                             true,
                             format!("modo «{task}»: propuse una mejora validada (espera tu visto bueno)"),
                         );
                     }
+                    // Persistir PRIMERO; registrar solo si el guardado tuvo éxito (el
+                    // rastro de proposals.jsonl coincide con el estado real del prompt_store).
                     match prompt_store::save_new_version(task, &improved) {
-                        Ok(v) => (
-                            true,
-                            format!("modo «{task}» mejorado y VALIDADO (v{v}): {improved}"),
-                        ),
+                        Ok(v) => {
+                            record_self_improvement(
+                                task,
+                                &current,
+                                &improved,
+                                &format!("promovida a v{v}"),
+                            );
+                            (
+                                true,
+                                format!("modo «{task}» mejorado y VALIDADO (v{v}): {improved}"),
+                            )
+                        }
                         Err(e) => (false, e.to_string()),
                     }
                 }
@@ -1693,19 +1708,26 @@ async fn judge_persona_better(
     candidate: &str,
 ) -> Option<bool> {
     let probe = persona_probe(task);
-    let resp_cur = persona_response(engine, current, probe).await;
-    let resp_cand = persona_response(engine, candidate, probe).await;
+    // Las dos respuestas-muestra son independientes → en paralelo (overlapa I/O; si Ollama
+    // tuviera >1 slot, también la inferencia).
+    let (resp_cur, resp_cand) = tokio::join!(
+        persona_response(engine, current, probe),
+        persona_response(engine, candidate, probe),
+    );
     if resp_cur.is_empty() || resp_cand.is_empty() {
         return None;
     }
     // DOBLE ORDEN: los LLM-juez tienen sesgo posicional (tienden a preferir una posición
     // fija). Preguntamos en los dos órdenes y solo promovemos si la CANDIDATA gana en
-    // AMBOS — así el sesgo se cancela y el ratchet es estricto de verdad.
+    // AMBOS — así el sesgo se cancela y el ratchet es estricto de verdad. Los dos juicios
+    // son independientes entre sí → también en paralelo.
     // Orden 1: A=actual, B=candidata → gana candidata si el juez dice "B".
-    let win1 = judge_ab(engine, probe, &resp_cur, &resp_cand).await? == 'B';
     // Orden 2: A=candidata, B=actual → gana candidata si el juez dice "A".
-    let win2 = judge_ab(engine, probe, &resp_cand, &resp_cur).await? == 'A';
-    Some(win1 && win2)
+    let (v1, v2) = tokio::join!(
+        judge_ab(engine, probe, &resp_cur, &resp_cand),
+        judge_ab(engine, probe, &resp_cand, &resp_cur),
+    );
+    Some(v1? == 'B' && v2? == 'A')
 }
 
 /// Pregunta al LLM-juez cuál respuesta es mejor (A o B) para una tarea. Devuelve 'A',
@@ -1726,25 +1748,29 @@ async fn judge_ab(engine: &OllamaEngine, probe: &str, a: &str, b: &str) -> Optio
         temperature: Some(0.0),
         max_tokens: Some(4),
     };
-    let ans = engine
-        .generate(req)
-        .await
-        .ok()?
-        .content
-        .trim()
-        .to_uppercase();
-    if ans.starts_with('A') {
-        Some('A')
-    } else if ans.starts_with('B') {
-        Some('B')
-    } else {
-        Some('E')
+    let ans = engine.generate(req).await.ok()?.content;
+    Some(parse_verdict(&ans))
+}
+
+/// Parsing ESTRICTO del veredicto del juez: solo cuenta una 'A'/'B' AISLADA (sola o seguida
+/// de un carácter no alfabético), no una palabra que EMPIECE por esa letra. Así "AMBAS" no
+/// se lee como 'A' ni "BIEN, parejas" como 'B' → caen a empate ('E'), que el ratchet trata
+/// como no-mejora. Fn pura para poder testearla sin LLM.
+fn parse_verdict(ans: &str) -> char {
+    let up = ans.trim().to_uppercase();
+    let chars: Vec<char> = up.chars().collect();
+    let second_is_letter = chars.get(1).map(|c| c.is_alphabetic()).unwrap_or(false);
+    match chars.first() {
+        Some('A') if !second_is_letter => 'A',
+        Some('B') if !second_is_letter => 'B',
+        _ => 'E',
     }
 }
 
-/// Registra una auto-mejora validada en la cola de revisión humana (`proposals.jsonl`),
-/// para que Ariel vea qué cambió AION en su propia mente. Reversible: es versionado.
-fn record_self_improvement(task: &str, before: &str, after: &str) {
+/// Registra una auto-mejora en la cola de revisión humana (`proposals.jsonl`), para que
+/// Ariel vea qué cambió AION en su propia mente. `status` refleja el estado REAL (promovida
+/// a vN, o propuesta pendiente): se llama DESPUÉS de persistir, así el rastro no miente.
+fn record_self_improvement(task: &str, before: &str, after: &str, status: &str) {
     let path = app_data_dir().join("proposals.jsonl");
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -1758,7 +1784,8 @@ fn record_self_improvement(task: &str, before: &str, after: &str) {
             "task": task,
             "before": before,
             "after": after,
-            "validation": "llm-judge: candidate won",
+            "validation": "llm-judge: candidate won (doble orden)",
+            "status": status,
         });
         let _ = writeln!(f, "{rec}");
     }
@@ -2875,4 +2902,26 @@ async fn stream_to_stdout(
         )
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_verdict_isolates_single_letter() {
+        // Voto válido aislado.
+        assert_eq!(parse_verdict("A"), 'A');
+        assert_eq!(parse_verdict("B"), 'B');
+        assert_eq!(parse_verdict("a"), 'A');
+        assert_eq!(parse_verdict("A es mejor"), 'A');
+        assert_eq!(parse_verdict("B."), 'B');
+        assert_eq!(parse_verdict(" B)"), 'B');
+        // Palabras que EMPIEZAN por A/B NO deben contar como voto → empate.
+        assert_eq!(parse_verdict("AMBAS"), 'E');
+        assert_eq!(parse_verdict("Ambas son buenas"), 'E');
+        assert_eq!(parse_verdict("Bien, están parejas"), 'E');
+        assert_eq!(parse_verdict("EMPATE"), 'E');
+        assert_eq!(parse_verdict(""), 'E');
+    }
 }

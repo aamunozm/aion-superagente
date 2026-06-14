@@ -283,20 +283,39 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         if std::env::var("AION_REFLECT").as_deref() == Ok("0") {
             return;
         }
-        let mins: u64 = std::env::var("AION_REFLECT_MINS")
+        let interval: i64 = std::env::var("AION_REFLECT_MINS")
             .ok()
-            .and_then(|v| v.parse().ok())
+            .and_then(|v| v.parse::<i64>().ok())
             .filter(|&m| m >= 10)
-            .unwrap_or(45);
+            .unwrap_or(45)
+            * 60;
+        // Sondeo cada minuto (no cada `interval`): así la reflexión APROVECHA la primera
+        // ventana de inactividad tras cumplirse el intervalo, en vez de perderla si Ariel
+        // tocó algo justo en el instante exacto del tick. last_run separa ciclos reales.
+        let mut last_run: i64 = 0;
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(mins * 60)).await;
-            if idle_secs() < 300 {
-                continue; // Ariel está activo: su conversación manda
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let now = chrono::Utc::now().timestamp();
+            if idle_secs() < 300 || now - last_run < interval {
+                continue; // Ariel activo, o aún no toca otro ciclo
             }
-            let engine = OllamaEngine::default_local();
-            let (changed, detail) = crate::reflection::reflect_once(&engine).await;
-            if changed {
-                tracing::info!(detail = %detail, "ciclo de reflexión (experience)");
+            last_run = now;
+            // AISLAMIENTO DE PANIC: corre el ciclo en una sub-tarea. Si reflect_once
+            // panickea, se captura como JoinError y el lazo SIGUE vivo (sin esto, un panic
+            // mataría la task entera y la etapa Experience quedaría muerta hasta reiniciar).
+            let h = tokio::spawn(async {
+                let engine = OllamaEngine::default_local();
+                crate::reflection::reflect_once(&engine).await
+            });
+            match h.await {
+                Ok((changed, detail)) => {
+                    if changed {
+                        tracing::info!(detail = %detail, "ciclo de reflexión (experience)");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("lazo de reflexión: iteración abortada ({e}); continúo");
+                }
             }
         }
     });
