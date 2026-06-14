@@ -33,7 +33,6 @@
 
 use aion_kernel::traits::GenerateRequest;
 use aion_kernel::traits::LlmEngine;
-use aion_kernel::traits::MemoryStore;
 use aion_kernel::types::Message;
 use aion_llm::OllamaEngine;
 use serde::{Deserialize, Serialize};
@@ -60,9 +59,14 @@ pub struct Rule {
     /// Veces que la experiencia ha vuelto a confirmar el patrón (refuerzo MDL).
     #[serde(default)]
     pub uses: u32,
-    /// Epoch de la última confirmación (base del decaimiento temporal).
+    /// Epoch de la última confirmación (marca de edad para la poda y el refuerzo).
     #[serde(default)]
     pub last_confirmed: i64,
+    /// Epoch del último decaimiento aplicado. El decaimiento se calcula sobre el tiempo
+    /// transcurrido DESDE aquí (incremental), no desde la creación: así correr el lazo
+    /// cada 45 min no re-aplica el mismo decaimiento una y otra vez (evita el compounding).
+    #[serde(default)]
+    pub last_decay: i64,
     /// Embedding de `text` (BGE-M3): permite dedup/consistencia sin re-embeber en cada ciclo.
     #[serde(default)]
     pub embedding: Vec<f32>,
@@ -245,39 +249,86 @@ pub fn reinforce(id: &str) {
             r.confidence = (r.confidence + REINFORCE_STEP).min(1.0);
             r.uses += 1;
             r.last_confirmed = now;
+            r.last_decay = now; // resetea el reloj de decaimiento: acaba de confirmarse
             r.retired = false;
         }
     }
     save(&items);
 }
 
+/// Cuántas reglas RETIRADAS conservar como historia antes de compactar el archivo.
+const MAX_RETIRED: usize = 40;
+
 /// **Decaimiento temporal + poda darwiniana** (SSGM): una heurística que no se vuelve a
 /// confirmar envejece y, si cae por debajo del suelo siendo vieja, se retira. Evita que
 /// un patrón captado una sola vez contamine el prompt para siempre. Determinista, sin LLM.
+///
+/// El decaimiento es INCREMENTAL (sobre el tiempo desde `last_decay`), no sobre la edad
+/// total: así correr el lazo cada 45 min no re-aplica el mismo decaimiento repetidamente.
+/// Solo persiste si algo cambió (evita reescribir el JSONL en vano).
 pub fn decay_and_prune() -> usize {
     let _guard = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut items = all();
+    if items.is_empty() {
+        return 0;
+    }
     let now = chrono::Utc::now().timestamp();
     let mut retired = 0usize;
+    let mut changed = false;
     for r in items.iter_mut() {
         if r.retired {
             continue;
         }
+        // Decaimiento incremental: tiempo transcurrido DESDE el último decaimiento.
+        let from = if r.last_decay > 0 {
+            r.last_decay
+        } else if r.last_confirmed > 0 {
+            r.last_confirmed
+        } else {
+            r.at
+        };
+        let delta_days = ((now - from).max(0) as f32) / 86_400.0;
+        if delta_days > 0.0 {
+            // Decaimiento suave: ~2% por semana sin confirmación. Una regla muy usada aguanta más.
+            let resilience = 1.0 + (r.uses as f32) * 0.5;
+            let before = r.confidence;
+            r.confidence = (r.confidence * 0.98_f32.powf(delta_days / (7.0 * resilience))).max(0.0);
+            r.last_decay = now;
+            if (before - r.confidence).abs() > f32::EPSILON {
+                changed = true;
+            }
+        }
+        // Edad para la poda: tiempo desde la última confirmación (o creación).
         let anchor = if r.last_confirmed > 0 {
             r.last_confirmed
         } else {
             r.at
         };
-        let days = ((now - anchor).max(0) as f32) / 86_400.0;
-        // Decaimiento suave: ~2% por semana sin confirmación. Una regla muy usada aguanta más.
-        let resilience = 1.0 + (r.uses as f32) * 0.5;
-        r.confidence = (r.confidence * 0.98_f32.powf(days / (7.0 * resilience))).max(0.0);
-        if r.confidence < RETIRE_FLOOR && days > 14.0 {
+        let age_days = ((now - anchor).max(0) as f32) / 86_400.0;
+        if r.confidence < RETIRE_FLOOR && age_days > 14.0 {
             r.retired = true;
             retired += 1;
+            changed = true;
         }
     }
-    save(&items);
+    // Compactación: si las retiradas (historia) crecieron demasiado, suelta las más viejas.
+    let retired_now = items.iter().filter(|r| r.retired).count();
+    if retired_now > MAX_RETIRED {
+        let drop = retired_now - MAX_RETIRED;
+        let mut dropped = 0usize;
+        items.retain(|r| {
+            if r.retired && dropped < drop {
+                dropped += 1;
+                false
+            } else {
+                true
+            }
+        });
+        changed = true;
+    }
+    if changed {
+        save(&items);
+    }
     retired
 }
 
@@ -294,6 +345,7 @@ fn insert(text: &str, embedding: Vec<f32>) {
         confidence: BASE_CONFIDENCE,
         uses: 0,
         last_confirmed: now,
+        last_decay: now,
         embedding,
         retired: false,
     });
@@ -323,22 +375,30 @@ fn retire(id: &str) {
     save(&items);
 }
 
-/// Reúne material cross-trajectory reciente: las lecciones `[aprendizaje]` de la memoria
-/// (etapa Reflection) + la biografía del diario. De AHÍ se abstrae la regla. Compacto.
+/// Reúne material cross-trajectory reciente: las lecciones `[aprendizaje]`/`[reflexión]`
+/// de la memoria (etapa Reflection) + la biografía del diario. De AHÍ se abstrae la regla.
+///
+/// Usa una lectura reciente NO-reforzante (`recent_with_ids`) en vez de `retrieve()`: este
+/// último, como efecto colateral, sube `fitness`/`access_count` de lo recuperado, y correr
+/// la reflexión cada 45 min inflaría artificialmente esos recuerdos. La reflexión observa
+/// la memoria, no la moldea.
 async fn gather_trajectories() -> String {
     let mut ctx = String::new();
-    // Lecciones de fallos ya destiladas (Reflection): la materia prima a generalizar.
     if let Ok(mem) = crate::shared_memory() {
-        if let Ok(hits) = mem
-            .retrieve(
-                "lección aprendizaje error preferencia de Ariel patrón que se repite",
-                8,
-            )
-            .await
-        {
-            for h in hits {
-                let line: String = h.content.chars().take(220).collect();
+        let mut taken = 0usize;
+        for (_, content) in mem.recent_with_ids(60) {
+            let low = content.to_lowercase();
+            // Solo las vivencias destiladas (Reflection): lecciones y reflexiones.
+            if low.contains("[aprendizaje]")
+                || low.contains("[reflexión]")
+                || low.contains("[reflexion]")
+            {
+                let line: String = content.chars().take(220).collect();
                 ctx.push_str(&format!("- {line}\n"));
+                taken += 1;
+                if taken >= 8 {
+                    break;
+                }
             }
         }
     }
@@ -470,6 +530,7 @@ mod tests {
                 confidence: 0.8,
                 uses: 2,
                 last_confirmed: 0,
+                last_decay: 0,
                 embedding: vec![],
                 retired: false,
             },
@@ -480,6 +541,7 @@ mod tests {
                 confidence: 0.9,
                 uses: 0,
                 last_confirmed: 0,
+                last_decay: 0,
                 embedding: vec![],
                 retired: true,
             },
@@ -490,6 +552,7 @@ mod tests {
                 confidence: 0.1,
                 uses: 0,
                 last_confirmed: 0,
+                last_decay: 0,
                 embedding: vec![],
                 retired: false,
             },

@@ -1693,11 +1693,24 @@ async fn judge_persona_better(
     candidate: &str,
 ) -> Option<bool> {
     let probe = persona_probe(task);
-    let resp_a = persona_response(engine, current, probe).await;
-    let resp_b = persona_response(engine, candidate, probe).await;
-    if resp_a.is_empty() || resp_b.is_empty() {
+    let resp_cur = persona_response(engine, current, probe).await;
+    let resp_cand = persona_response(engine, candidate, probe).await;
+    if resp_cur.is_empty() || resp_cand.is_empty() {
         return None;
     }
+    // DOBLE ORDEN: los LLM-juez tienen sesgo posicional (tienden a preferir una posición
+    // fija). Preguntamos en los dos órdenes y solo promovemos si la CANDIDATA gana en
+    // AMBOS — así el sesgo se cancela y el ratchet es estricto de verdad.
+    // Orden 1: A=actual, B=candidata → gana candidata si el juez dice "B".
+    let win1 = judge_ab(engine, probe, &resp_cur, &resp_cand).await? == 'B';
+    // Orden 2: A=candidata, B=actual → gana candidata si el juez dice "A".
+    let win2 = judge_ab(engine, probe, &resp_cand, &resp_cur).await? == 'A';
+    Some(win1 && win2)
+}
+
+/// Pregunta al LLM-juez cuál respuesta es mejor (A o B) para una tarea. Devuelve 'A',
+/// 'B' o 'E' (empate/indeciso). `None` si el modelo no responde. Vocabulario cerrado.
+async fn judge_ab(engine: &OllamaEngine, probe: &str, a: &str, b: &str) -> Option<char> {
     let req = GenerateRequest {
         messages: vec![
             Message::system(
@@ -1706,7 +1719,7 @@ async fn judge_persona_better(
                  tarea). Respondes SOLO con A, B o EMPATE. Nada más.",
             ),
             Message::user(format!(
-                "Tarea: {probe}\n\n--- Respuesta A ---\n{resp_a}\n\n--- Respuesta B ---\n{resp_b}\n\n¿Cuál es mejor? SOLO A, B o EMPATE."
+                "Tarea: {probe}\n\n--- Respuesta A ---\n{a}\n\n--- Respuesta B ---\n{b}\n\n¿Cuál es mejor? SOLO A, B o EMPATE."
             )),
         ],
         think: false,
@@ -1720,9 +1733,13 @@ async fn judge_persona_better(
         .content
         .trim()
         .to_uppercase();
-    // Solo se promueve si el juez elige B (la candidata). "A" y "EMPATE" → no se
-    // arriesga una regresión (ratchet estricto): ante la duda, se queda la actual.
-    Some(ans.starts_with('B'))
+    if ans.starts_with('A') {
+        Some('A')
+    } else if ans.starts_with('B') {
+        Some('B')
+    } else {
+        Some('E')
+    }
 }
 
 /// Registra una auto-mejora validada en la cola de revisión humana (`proposals.jsonl`),
