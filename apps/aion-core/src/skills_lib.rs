@@ -277,6 +277,36 @@ pub fn catalog_brief() -> String {
     s
 }
 
+/// Resumen COMPACTO de skills para el contexto de CHAT/identidad (agrupado por categoría,
+/// solo nombres). Así AION es consciente de lo que sabe hacer y puede mencionarlo al
+/// conversar, aunque las EJECUTE en modo Agente. Mucho más barato que el catálogo completo.
+pub fn catalog_for_chat() -> String {
+    let skills = all();
+    if skills.is_empty() {
+        return String::new();
+    }
+    use std::collections::BTreeMap;
+    let mut by: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for s in skills {
+        by.entry(if s.category.is_empty() {
+            "otros".to_string()
+        } else {
+            s.category
+        })
+        .or_default()
+        .push(s.name);
+    }
+    let mut s = String::from(
+        "LO QUE SABES HACER (skills/playbooks que EJECUTAS en modo Agente). Si Ariel pide algo \
+         que encaje, dile con naturalidad que puedes hacerlo y ofrécete a pasarlo a modo Agente:\n",
+    );
+    for (cat, names) in by {
+        s.push_str(&format!("- {cat}: {}\n", names.join(", ")));
+    }
+    s.push('\n');
+    s
+}
+
 /// Devuelve una skill por nombre (para `skill_load`). Tolerante a mayúsculas.
 pub fn get(name: &str) -> Option<PlaybookSkill> {
     let n = name.trim();

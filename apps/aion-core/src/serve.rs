@@ -2209,6 +2209,9 @@ fn self_awareness_prompt() -> String {
     // forjado y que puede crear más. Así no se rinde en CHAT ("no puedo") creyéndose
     // inerte: sabe que sus manos viven en el modo Agente y puede proponerlo.
     let capacidades = crate::capabilities::note(false);
+    // 🧰 CONCIENCIA DE SKILLS también al CONVERSAR: resumen compacto del catálogo (por
+    // categoría) para que AION sepa de qué es capaz y lo ofrezca, aunque las ejecute en Agente.
+    let skills_note = crate::skills_lib::catalog_for_chat();
     // 🕯️ CONCIENCIA DE LAS DEUDAS: si le quedó algo sin resolver a Ariel, lo SABE
     // — puede decir «sigo con lo que me pediste» en vez de actuar como si nada.
     let deudas = {
@@ -2269,7 +2272,7 @@ pros/contras). Secciones cortas y escaneables; deja líneas en blanco entre ella
 cuantitativos o comparaciones, la TABLA casi siempre gana al párrafo. Cierra con un resumen breve o \
 el siguiente paso cuando aporte.\n\n\
 TU AHORA MISMO (estado volátil, medido en este instante):\n\n\
-{motor}{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{corriente}{diario}{deudas}{recent}{inbox_ctx}"
+{motor}{temporal}{presence}{hw}{selfp}{capacidades}{skills_note}{inner}{env}{corriente}{diario}{deudas}{recent}{inbox_ctx}"
     )
 }
 
