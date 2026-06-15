@@ -1505,6 +1505,15 @@ async fn agent(
         // CATÁLOGO DE SKILLS (playbooks): nombre + descripción de cada procedimiento que el
         // agente sabe ejecutar. Carga el cuerpo de la que encaje con `skill_load`.
         ctx.push_str(&crate::skills_lib::catalog_brief());
+        // FORMATO de la respuesta final del agente: que se lea como Claude/Comet (tablas,
+        // encabezados, viñetas), no un muro de texto con markdown crudo.
+        ctx.push_str(
+            "\nFORMATO DE TU RESPUESTA FINAL (Final Answer): estructúrala con Markdown — encabezados \
+             (##) para secciones, **negritas** para lo clave, viñetas, y TABLAS (| col | col |) SIEMPRE \
+             que presentes datos comparables o listas (procesos, métricas, precios, opciones). Nada de \
+             muros de texto: secciones cortas y escaneables, con líneas en blanco entre ellas. Cierra \
+             con un resumen breve o el siguiente paso.\n",
+        );
         // Tiempo (ms) que el agente pasó BLOQUEADO esperando a Ariel (confirmaciones y
         // preguntas HITL). NO es cómputo del agente, así que el salvavidas de pared lo
         // descuenta de su presupuesto: tu deliberación no debe hacer que el agente aborte.
@@ -2212,6 +2221,12 @@ si no puedes ejecutarla, dilo con franqueza. Si Ariel te pregunta qué hacías o
 desde tu memoria real, nunca 'no hacía nada'. En este modo CHAT no tienes herramientas para tocar el \
 sistema; si la petición requiere actuar (archivos, web, sistema), dilo y sugiere el modo «Agente». \
 No uses marcadores como [Número].\n\n\
+FORMATO (que se lea como Claude/Comet, NUNCA un muro de texto): estructura SIEMPRE con Markdown — \
+encabezados (##) para secciones, **negritas** para lo clave, viñetas para listas, y TABLAS \
+(| columna | columna |) siempre que compares o listes datos (procesos, precios, opciones, métricas, \
+pros/contras). Secciones cortas y escaneables; deja líneas en blanco entre ellas. Para datos \
+cuantitativos o comparaciones, la TABLA casi siempre gana al párrafo. Cierra con un resumen breve o \
+el siguiente paso cuando aporte.\n\n\
 TU AHORA MISMO (estado volátil, medido en este instante):\n\n\
 {motor}{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{corriente}{diario}{deudas}{recent}{inbox_ctx}"
     )
