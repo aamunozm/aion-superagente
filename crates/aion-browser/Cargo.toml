@@ -15,10 +15,12 @@ thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "socks"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "socks", "gzip"] }
 chromiumoxide = { version = "0.9", default-features = false, features = ["rustls", "zip8"] }
 futures-util = "0.3"
 base64 = "0.22"
+# Extracción de texto de PDFs (muchas fuentes académicas lo son). Puro Rust.
+pdf-extract = "0.7"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

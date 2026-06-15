@@ -210,7 +210,9 @@ async fn read_source(
     topic: &str,
     idx: usize,
 ) -> Option<Note> {
-    let text = web.fetch_text(&sr.url).await.ok()?;
+    // Lectura PROFUNDA: presupuesto amplio (12k) + soporte PDF (fuentes académicas). Antes
+    // fetch_text recortaba a 4k y no leía PDFs → muchas fuentes rendían "NADA".
+    let text = web.fetch_readable(&sr.url, 12_000).await.ok()?;
     if text.chars().count() < 80 {
         return None; // página sin texto útil
     }
@@ -226,12 +228,12 @@ async fn read_source(
                 "Tema: {topic}\nFuente [{idx}] ({}): {}\n\nTEXTO:\n{}",
                 sr.source,
                 sr.title,
-                text.chars().take(3500).collect::<String>()
+                text.chars().take(7000).collect::<String>()
             )),
         ],
         think: false,
         temperature: Some(0.2),
-        max_tokens: Some(280),
+        max_tokens: Some(340),
     };
     let claims = engine.generate(req).await.ok()?.content.trim().to_string();
     let up = claims.to_uppercase();
