@@ -50,6 +50,49 @@ const SEEDS: &[(&str, &str)] = &[
         "explain-codebase.md",
         include_str!("skills_seed/explain-codebase.md"),
     ),
+    // ── Fase 2: Documentos, Negocio, Datos, Comunicación, Personal, Meta ──
+    (
+        "report-builder.md",
+        include_str!("skills_seed/report-builder.md"),
+    ),
+    (
+        "meeting-notes.md",
+        include_str!("skills_seed/meeting-notes.md"),
+    ),
+    (
+        "lead-research.md",
+        include_str!("skills_seed/lead-research.md"),
+    ),
+    (
+        "proposal-generator.md",
+        include_str!("skills_seed/proposal-generator.md"),
+    ),
+    (
+        "quote-invoice.md",
+        include_str!("skills_seed/quote-invoice.md"),
+    ),
+    ("market-scan.md", include_str!("skills_seed/market-scan.md")),
+    (
+        "data-analysis.md",
+        include_str!("skills_seed/data-analysis.md"),
+    ),
+    (
+        "translate-document.md",
+        include_str!("skills_seed/translate-document.md"),
+    ),
+    ("draft-email.md", include_str!("skills_seed/draft-email.md")),
+    (
+        "trip-planner.md",
+        include_str!("skills_seed/trip-planner.md"),
+    ),
+    (
+        "local-places.md",
+        include_str!("skills_seed/local-places.md"),
+    ),
+    (
+        "skill-creator.md",
+        include_str!("skills_seed/skill-creator.md"),
+    ),
 ];
 
 #[derive(Debug, Clone)]
