@@ -112,6 +112,30 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     // el panel de skills) sin pisar los que Ariel haya editado. Barato e idempotente.
     crate::skills_lib::ensure_seeded();
 
+    // 🗓️ RUTINAS (autonomía dirigida): planificador desatendido. Cada minuto revisa si alguna
+    // rutina ACTIVA toca ahora (HH:MM local) y no corrió hoy; si toca, AION la ejecuta SOLO y
+    // deja el resultado en la Bandeja. Auto-aprobación (Ariel la programó); las acciones
+    // peligrosas siguen bloqueadas en run_routine_task. Marca last_run ANTES de correr para no
+    // duplicar si la tarea tarda más de un minuto.
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let now = chrono::Local::now();
+            let hm = now.format("%H:%M").to_string();
+            let today = now.format("%Y-%m-%d").to_string();
+            for r in crate::routines::all() {
+                if !r.enabled || r.time != hm || r.last_run == today {
+                    continue;
+                }
+                crate::routines::mark_ran(&r.id, &today);
+                let answer = run_routine_task(&r.prompt).await;
+                if let Ok(ibx) = crate::inbox::Inbox::open(crate::inbox_path()) {
+                    let _ = ibx.push("rutina", &format!("🗓️ Rutina «{}»\n\n{}", r.title, answer));
+                }
+            }
+        }
+    });
+
     // AUTOCONTENCIÓN local-first: garantiza el RUNTIME local (Ollama hoy; intercambiable
     // tras crate::local_runtime). El chat, los embeddings y la compactación EN del puente lo
     // necesitan vivo. EN BACKGROUND a propósito: el bind HTTP no debe esperar al arranque de
@@ -356,6 +380,9 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/governance/setup", post(governance_setup))
         .route("/api/skills", get(skills_list).post(skills_save))
         .route("/api/skills/delete", post(skills_delete))
+        .route("/api/routines", get(routines_list).post(routines_save))
+        .route("/api/routines/delete", post(routines_delete))
+        .route("/api/routines/run", post(routines_run))
         .route("/api/chat", post(chat))
         .route("/api/chat/new", post(chat_reset))
         .route("/api/agent", post(agent))
@@ -924,6 +951,130 @@ async fn skills_save(Json(s): Json<crate::skills_lib::PlaybookSkill>) -> Json<se
         Ok(()) => Json(serde_json::json!({ "ok": true })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
+}
+
+/// Ejecuta una tarea de rutina de forma DESATENDIDA (sin SSE, sin usuario delante). Tool set
+/// FOCALIZADO (sin navegador ni computer-use, que no aplican sin sesión): run_command, archivos,
+/// web, skills, memoria. Confirmaciones AUTO-APROBADAS (Ariel programó la rutina) EXCEPTO una
+/// lista negra innegociable (sudo, rm -rf, formateo, apagado…), que se deniega aunque la skill
+/// la pida. Timeout duro para no colgar el planificador.
+async fn run_routine_task(prompt: &str) -> String {
+    let engine = active_engine();
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(CalculatorTool));
+    if let Ok(mem) = crate::shared_memory() {
+        tools.register(Arc::new(MemoryTool::new(mem.clone(), 3)));
+        tools.register(Arc::new(crate::agent_tools::RememberTool::new(mem)));
+    }
+    if let Ok(host) = WasmSkillHost::new() {
+        let host = Arc::new(host);
+        let _ = crate::skill_store::load_all(&host);
+        tools.register(Arc::new(crate::agent_tools::SkillInvokeTool::new(host)));
+    }
+    let web = Arc::new(WebClient::new());
+    tools.register(Arc::new(crate::agent_tools::SearchTool::new(web.clone())));
+    tools.register(Arc::new(crate::agent_tools::WeatherTool::new(web.clone())));
+    tools.register(Arc::new(crate::agent_tools::PlaceLookupTool::new(
+        web.clone(),
+    )));
+    tools.register(Arc::new(WebTool::new(web)));
+    tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
+    tools.register(Arc::new(crate::agent_tools::NetTool::new()));
+    tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
+    tools.register(Arc::new(crate::agent_tools::FileWriteTool::new()));
+    tools.register(Arc::new(crate::agent_tools::SkillLoadTool::new()));
+    tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
+    tools.register(Arc::new(crate::agent_tools::GraphSearchTool::new()));
+    tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
+
+    // AUTO-APROBACIÓN con LISTA NEGRA: la rutina la autorizó Ariel al crearla, pero ni así
+    // permitimos acciones destructivas o de privilegio en una ejecución desatendida.
+    let confirm: aion_orchestrator::ConfirmFn = Arc::new(|desc: String| {
+        let d = desc.to_lowercase();
+        let dangerous = [
+            "sudo",
+            "rm -rf",
+            "rm -fr",
+            "mkfs",
+            "diskutil erase",
+            "dd if=",
+            "shutdown",
+            "reboot",
+            "killall -9",
+            "> /dev/",
+            "fdisk",
+            ":(){",
+            "csrutil",
+            "spctl --master-disable",
+        ]
+        .iter()
+        .any(|p| d.contains(p));
+        Box::pin(async move { !dangerous })
+    });
+
+    let ctx = format!(
+        "{}\n{}\nEstás ejecutando una RUTINA programada (sin Ariel delante). Sé eficiente, evita \
+         pasos innecesarios, y entrega un resultado claro y estructurado (Markdown con tablas si \
+         aplica).",
+        agent_identity_brief(),
+        crate::skills_lib::catalog_brief()
+    );
+    let agent = ReActAgent::new(&*engine, &tools, EventBus::default())
+        .with_context(ctx)
+        .with_confirm(confirm);
+    match tokio::time::timeout(std::time::Duration::from_secs(240), agent.run(prompt)).await {
+        Ok(Ok(run)) => run.answer,
+        Ok(Err(e)) => format!("⚠️ No pude completar la rutina: {e}"),
+        Err(_) => "⚠️ La rutina se agotó el tiempo (240 s).".to_string(),
+    }
+}
+
+/// Lista las rutinas para el panel de la UI.
+async fn routines_list() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "routines": crate::routines::all() }))
+}
+
+/// Crea o actualiza una rutina.
+async fn routines_save(Json(r): Json<crate::routines::Routine>) -> Json<serde_json::Value> {
+    if r.title.trim().is_empty() || r.prompt.trim().is_empty() || r.time.trim().is_empty() {
+        return Json(
+            serde_json::json!({ "ok": false, "error": "faltan campos (título, tarea, hora)" }),
+        );
+    }
+    match crate::routines::upsert(r) {
+        Ok(saved) => Json(serde_json::json!({ "ok": true, "routine": saved })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct RoutineId {
+    id: String,
+}
+
+async fn routines_delete(Json(b): Json<RoutineId>) -> Json<serde_json::Value> {
+    match crate::routines::remove(&b.id) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+/// «Ejecutar ahora»: corre la rutina al instante, deja el resultado en la Bandeja y lo devuelve.
+async fn routines_run(Json(b): Json<RoutineId>) -> Json<serde_json::Value> {
+    let Some(r) = crate::routines::all().into_iter().find(|x| x.id == b.id) else {
+        return Json(serde_json::json!({ "ok": false, "error": "rutina no encontrada" }));
+    };
+    let answer = run_routine_task(&r.prompt).await;
+    if let Ok(ibx) = crate::inbox::Inbox::open(crate::inbox_path()) {
+        let _ = ibx.push(
+            "rutina",
+            &format!(
+                "🗓️ Rutina «{}» (ejecutada manualmente)\n\n{}",
+                r.title, answer
+            ),
+        );
+    }
+    Json(serde_json::json!({ "ok": true, "answer": answer }))
 }
 
 #[derive(Deserialize)]

@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import Icon from "./Icon";
 import { useT } from "@/lib/i18n";
 
-type NavItem = { href: string; key: string; icon: "chat" | "folder" | "tools" | "memory" | "sparkle" | "code" | "bulb" };
+type NavItem = { href: string; key: string; icon: "chat" | "folder" | "tools" | "memory" | "sparkle" | "code" | "bulb" | "clock" };
 type NavGroup = { titleKey: string; items: NavItem[] };
 
 const GROUPS: NavGroup[] = [
@@ -22,6 +22,7 @@ const GROUPS: NavGroup[] = [
     items: [
       { href: "/tools", key: "nav.tools", icon: "tools" },
       { href: "/skills", key: "nav.skills", icon: "bulb" },
+      { href: "/routines", key: "nav.routines", icon: "clock" },
       { href: "/memory", key: "nav.memory", icon: "memory" },
       { href: "/mind", key: "nav.mind", icon: "sparkle" },
       { href: "/claude-code", key: "nav.claudeCode", icon: "code" },

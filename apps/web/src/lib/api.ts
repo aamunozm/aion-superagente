@@ -686,6 +686,35 @@ export const skillDelete = (name: string) =>
     body: JSON.stringify({ name }),
   });
 
+// ── Rutinas (autonomía dirigida: tareas que AION ejecuta solo en un horario) ──
+export type Routine = {
+  id: string;
+  title: string;
+  prompt: string;
+  time: string; // "HH:MM"
+  enabled: boolean;
+  last_run: string;
+};
+export const routinesList = () => jsonCall<{ routines: Routine[] }>("/api/routines");
+export const routineSave = (r: Partial<Routine>) =>
+  jsonCall<{ ok: boolean; error?: string; routine?: Routine }>("/api/routines", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(r),
+  });
+export const routineDelete = (id: string) =>
+  jsonCall<{ ok: boolean; error?: string }>("/api/routines/delete", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+export const routineRun = (id: string) =>
+  jsonCall<{ ok: boolean; answer?: string; error?: string }>("/api/routines/run", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+
 // Alterna en un clic el motor activo local↔API (solo si ambos están configurados).
 export const providerToggle = () =>
   jsonCall<{ ok?: boolean; kind?: string; model?: string; has_key?: boolean; error?: string }>(

@@ -34,6 +34,7 @@ mod projects;
 mod prompt_store;
 mod prompts;
 mod provider;
+mod routines;
 mod sensors;
 mod serve;
 mod skill_store;
