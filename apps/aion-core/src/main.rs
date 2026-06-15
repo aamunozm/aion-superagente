@@ -31,6 +31,7 @@ mod local_runtime;
 mod mcp_compact;
 mod memory_tool;
 mod metacog;
+mod metacog_eval;
 mod ollama_runtime;
 mod onboarding;
 mod pending;
@@ -249,6 +250,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("think") => {
             let prompt = args[1..].join(" ");
             run_think(&prompt).await?;
+        }
+        Some("calib") => {
+            metacog_eval::run().await?;
         }
         Some("history") => {
             run_history()?;
