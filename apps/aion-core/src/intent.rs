@@ -56,6 +56,14 @@ const TASK_PROTOS: &[&str] = &[
     "descarga el último informe y guárdalo",
     "ejecuta el comando para ver el estado del sistema",
     "haz una captura de pantalla y dime qué ves",
+    // INVESTIGACIÓN a fondo en la web/foros: pedir que SALGA a buscar y leer fuentes es una
+    // TAREA (necesita navegador/buscador), aunque el tema sea abstracto. Sin estos prototipos,
+    // «haz una investigación profunda en internet y foros sobre este tema» se parecía más a la
+    // charla meta sobre AION y se enrutaba a chat → «estoy en modo chat».
+    "quiero que hagas una investigación profunda en internet y foros sobre este tema",
+    "investiga a fondo en la web y en foros y resúmeme lo que encuentres",
+    "busca en internet y en foros especializados información sobre esto",
+    "documéntate en la web sobre este tema y tráeme las mejores fuentes",
 ];
 
 /// Margen mínimo de similitud para decidir sin LLM. Por debajo, el caso es realmente
