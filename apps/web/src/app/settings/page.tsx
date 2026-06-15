@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
 import { LANGS, useT } from "@/lib/i18n";
@@ -13,6 +13,7 @@ import {
   modelsRemove,
   providerGet,
   providerSet,
+  providerTest,
   systemScan,
   status,
   downloadAgent,
@@ -43,29 +44,39 @@ import {
 // Proveedores de motor LLM. "local" = Ollama (privado). Los externos hablan una API
 // OpenAI-compatible; AION ya despacha a ellas desde el backend (build_engine).
 type ProvKey = "local" | "google" | "deepseek" | "custom";
+// `models` = lista curada que se muestra de inmediato en el desplegable, antes de
+// «Probar» (que la complementa con los modelos reales que devuelve la API). El usuario
+// siempre puede escribir uno a mano con la opción «Otro modelo».
 const PROVIDERS: Record<
   Exclude<ProvKey, "local">,
-  { label: string; base_url: string; defaultModel: string; keyHint: string }
+  { label: string; base_url: string; defaultModel: string; keyHint: string; models: string[] }
 > = {
   google: {
     label: "Google AI Studio (Gemini)",
     base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
     defaultModel: "gemini-2.5-flash",
     keyHint: "API key de aistudio.google.com",
+    models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite", "gemini-2.0-flash"],
   },
   deepseek: {
     label: "DeepSeek",
     base_url: "https://api.deepseek.com",
-    defaultModel: "deepseek-chat",
+    defaultModel: "deepseek-v4-flash",
     keyHint: "API key de platform.deepseek.com",
+    // Curados de respaldo (se muestran antes de «Probar»). «Probar» los reemplaza por el
+    // catálogo real vía GET /models, que es la fuente de verdad si DeepSeek cambia esto.
+    models: ["deepseek-v4-flash", "deepseek-v4-pro"],
   },
   custom: {
     label: "API OpenAI-compatible (otra)",
     base_url: "",
     defaultModel: "",
     keyHint: "API key del proveedor",
+    models: [],
   },
 };
+
+const WRITE_OWN = "__write_own__"; // opción «Otro modelo (escribir)» del desplegable
 
 export default function SettingsPage() {
   const { t, lang, setLang } = useT();
@@ -97,6 +108,16 @@ export default function SettingsPage() {
   const [customUrl, setCustomUrl] = useState<string>("");
   const [provBusy, setProvBusy] = useState(false);
   const [provMsg, setProvMsg] = useState<string>("");
+  // Modelos descubiertos en vivo vía «Probar» (GET /models). Se fusionan con los curados.
+  const [provModels, setProvModels] = useState<string[]>([]);
+  const [provTesting, setProvTesting] = useState(false);
+  const [provTested, setProvTested] = useState(false); // conexión validada en esta sesión
+  const [writeOwn, setWriteOwn] = useState(false); // modo «escribir modelo a mano»
+  // Caché de modelos por endpoint (evita re-pedir /models al volver a un proveedor en la sesión).
+  const modelCache = useRef<Record<string, string[]>>({});
+  // Guard de secuencia: si Ariel re-prueba mientras una prueba previa sigue en vuelo, solo la
+  // ÚLTIMA aplica resultados (evita que una respuesta lenta y vieja pise a la nueva).
+  const testSeq = useRef(0);
 
   function applyProv(p: ProviderState) {
     setProv(p);
@@ -149,6 +170,54 @@ export default function SettingsPage() {
       setProvMsg(`⚠️ ${e instanceof Error ? e.message : "error"}`);
     } finally {
       setProvBusy(false);
+    }
+  }
+
+  // Prueba la conexión a la API externa y carga sus modelos en el desplegable, SIN guardar.
+  async function testProvider() {
+    if (provTesting || provSel === "local") return;
+    const preset = PROVIDERS[provSel];
+    const base_url = provSel === "custom" ? customUrl.trim() : preset.base_url;
+    if (!base_url) {
+      setProvMsg("⚠️ Indica la Base URL del proveedor.");
+      return;
+    }
+    const usingExisting = !provKey && prov?.has_key && prov.base_url === base_url;
+    if (!provKey && !usingExisting) {
+      setProvMsg("⚠️ Pega tu API key para probar la conexión.");
+      return;
+    }
+    const myseq = ++testSeq.current; // solo la última prueba aplicará resultados
+    setProvTesting(true);
+    setProvMsg("Probando conexión…");
+    try {
+      const r = await providerTest({ base_url, api_key: provKey });
+      if (testSeq.current !== myseq) return; // llegó una prueba más nueva: descarto esta
+      if (r.ok) {
+        const models = r.models ?? [];
+        modelCache.current[base_url] = models; // cachea para volver al proveedor sin re-pedir
+        setProvModels(models);
+        setProvTested(true);
+        // Si el modelo elegido no está en la lista real, sugiere uno válido.
+        if (models.length && !models.includes(provModel)) {
+          setProvModel(models.includes(preset.defaultModel) ? preset.defaultModel : models[0]);
+        }
+        setProvMsg(
+          models.length
+            ? `✅ Conexión correcta · ${models.length} modelos disponibles. Elige uno y pulsa Activar.`
+            : "✅ Conexión correcta. Escribe el modelo a mano y pulsa Activar.",
+        );
+        if (!models.length) setWriteOwn(true);
+      } else {
+        setProvTested(false);
+        setProvMsg(`⚠️ ${r.error ?? "no se pudo conectar"}`);
+      }
+    } catch (e) {
+      if (testSeq.current !== myseq) return;
+      setProvTested(false);
+      setProvMsg(`⚠️ ${e instanceof Error ? e.message : "error de red"}`);
+    } finally {
+      if (testSeq.current === myseq) setProvTesting(false);
     }
   }
 
@@ -513,6 +582,11 @@ export default function SettingsPage() {
                   onClick={() => {
                     setProvSel(k);
                     setProvMsg("");
+                    // Precarga modelos de la caché si ya probamos este proveedor en la sesión.
+                    setProvModels(k !== "local" ? (modelCache.current[PROVIDERS[k].base_url] ?? []) : []);
+                    setProvTested(false);
+                    setWriteOwn(false);
+                    setProvKey("");
                     if (k !== "local") setProvModel(prov?.kind === "external" && prov.base_url === PROVIDERS[k].base_url ? prov.model : PROVIDERS[k].defaultModel);
                   }}
                   className="px-3 py-1.5 rounded-xl text-xs transition-all"
@@ -534,31 +608,95 @@ export default function SettingsPage() {
               🔒 Todo se queda en tu Mac. El modelo concreto se elige arriba, en «{t("settings.models")}».
             </p>
           ) : (
-            <div className="flex flex-col gap-2 mb-3">
+            <div className="flex flex-col gap-3 mb-3">
+              {/* 1) Endpoint (solo para «otra» API) */}
               {provSel === "custom" && (
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs" style={{ color: "var(--text-3)" }}>Base URL del proveedor</span>
+                  <input
+                    className="input"
+                    placeholder="https://… /v1"
+                    value={customUrl}
+                    onChange={(e) => { setCustomUrl(e.target.value); setProvMsg(""); setProvTested(false); setProvModels([]); }}
+                    autoComplete="off"
+                  />
+                </label>
+              )}
+
+              {/* 2) API key */}
+              <label className="flex flex-col gap-1">
+                <span className="text-xs" style={{ color: "var(--text-3)" }}>API key</span>
                 <input
                   className="input"
-                  placeholder="Base URL (https://… /v1)"
-                  value={customUrl}
-                  onChange={(e) => { setCustomUrl(e.target.value); setProvMsg(""); }}
-                  autoComplete="off"
+                  type="password"
+                  placeholder={prov?.has_key && prov.base_url === PROVIDERS[provSel].base_url ? "API key guardada — déjalo vacío para conservarla" : PROVIDERS[provSel].keyHint}
+                  value={provKey}
+                  onChange={(e) => { setProvKey(e.target.value); setProvTested(false); }}
+                  autoComplete="new-password"
                 />
-              )}
-              <input
-                className="input"
-                placeholder="Modelo (p. ej. gemini-2.5-flash, deepseek-chat)"
-                value={provModel}
-                onChange={(e) => setProvModel(e.target.value)}
-                autoComplete="off"
-              />
-              <input
-                className="input"
-                type="password"
-                placeholder={prov?.has_key && prov.base_url === PROVIDERS[provSel].base_url ? "API key guardada — déjalo vacío para conservarla" : PROVIDERS[provSel].keyHint}
-                value={provKey}
-                onChange={(e) => setProvKey(e.target.value)}
-                autoComplete="new-password"
-              />
+              </label>
+
+              {/* 3) Probar conexión + cargar modelos */}
+              <button
+                className="btn self-start"
+                disabled={provTesting}
+                onClick={testProvider}
+                style={{ background: "var(--surface-1)", color: "var(--text-1)", border: "1px solid var(--accent)", opacity: provTesting ? 0.5 : 1 }}
+              >
+                {provTesting ? "Probando…" : provTested ? "✓ Conexión validada · volver a probar" : "Probar API y cargar modelos"}
+              </button>
+
+              {/* 4) Modelo: desplegable (curados + descubiertos) o escribir a mano */}
+              <label className="flex flex-col gap-1">
+                <span className="text-xs" style={{ color: "var(--text-3)" }}>
+                  Modelo del lenguaje{provModels.length ? ` · ${provModels.length} disponibles` : ""}
+                </span>
+                {(() => {
+                  // Une los curados con los descubiertos en vivo + el valor actual, sin duplicar.
+                  const opts = Array.from(
+                    new Set([...PROVIDERS[provSel].models, ...provModels, provModel].filter(Boolean)),
+                  );
+                  if (writeOwn || opts.length === 0) {
+                    return (
+                      <div className="flex gap-2">
+                        <input
+                          className="input flex-1"
+                          placeholder="Escribe el id del modelo (p. ej. deepseek-reasoner)"
+                          value={provModel}
+                          onChange={(e) => setProvModel(e.target.value)}
+                          autoComplete="off"
+                        />
+                        {opts.length > 0 && (
+                          <button
+                            className="text-xs px-2 whitespace-nowrap"
+                            style={{ color: "var(--accent)" }}
+                            onClick={() => setWriteOwn(false)}
+                          >
+                            ← lista
+                          </button>
+                        )}
+                      </div>
+                    );
+                  }
+                  return (
+                    <select
+                      className="input"
+                      value={opts.includes(provModel) ? provModel : ""}
+                      onChange={(e) => {
+                        if (e.target.value === WRITE_OWN) { setWriteOwn(true); return; }
+                        setProvModel(e.target.value);
+                      }}
+                    >
+                      {!opts.includes(provModel) && <option value="" disabled>Elige un modelo…</option>}
+                      {opts.map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                      <option value={WRITE_OWN}>✏️ Otro modelo (escribir)…</option>
+                    </select>
+                  );
+                })()}
+              </label>
+
               <p className="text-[11px] px-1" style={{ color: "#f59e0b" }}>
                 ⚠️ Con esta opción, lo que escribas a AION se envía a {PROVIDERS[provSel].label}. La key se guarda cifrada en tu Mac (permisos 0600).
               </p>
@@ -567,9 +705,9 @@ export default function SettingsPage() {
 
           <button
             className="btn"
-            disabled={provBusy}
+            disabled={provBusy || (provSel !== "local" && !provModel)}
             onClick={() => saveProvider(provSel, provModel, provKey)}
-            style={{ background: "var(--ink)", color: "#fff", opacity: provBusy ? 0.5 : 1 }}
+            style={{ background: "var(--ink)", color: "#fff", opacity: provBusy || (provSel !== "local" && !provModel) ? 0.5 : 1 }}
           >
             {provBusy ? "Guardando…" : provSel === "local" ? "Usar motor local" : `Activar ${PROVIDERS[provSel].label}`}
           </button>

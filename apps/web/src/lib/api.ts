@@ -651,6 +651,16 @@ export type ProviderState = {
 // Lee el proveedor activo. NUNCA devuelve la API key (solo `has_key`).
 export const providerGet = () => jsonCall<ProviderState>("/api/provider");
 
+// Prueba una API externa OpenAI-compatible SIN guardar: valida base_url + key y
+// devuelve los modelos disponibles para elegir uno. Si `api_key` va vacío, el backend
+// reutiliza la key ya guardada del mismo endpoint (la UI nunca recibe la key).
+export const providerTest = (cfg: { base_url: string; api_key?: string }) =>
+  jsonCall<{ ok: boolean; models?: string[]; error?: string }>("/api/provider/test", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ api_key: "", ...cfg }),
+  });
+
 // Alterna en un clic el motor activo local↔API (solo si ambos están configurados).
 export const providerToggle = () =>
   jsonCall<{ ok?: boolean; kind?: string; model?: string; has_key?: boolean; error?: string }>(
