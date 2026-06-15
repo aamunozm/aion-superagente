@@ -619,6 +619,55 @@ impl WebClient {
         Ok(text)
     }
 
+    /// **Lectura PROFUNDA de una fuente** (para investigación): como `fetch_text` pero con un
+    /// presupuesto de caracteres configurable (más alto) y SOPORTE DE PDF — muchas fuentes
+    /// académicas son PDFs y `fetch_text` solo veía basura binaria. Detecta PDF por content-type
+    /// o por la cabecera mágica `%PDF` y extrae su texto. Recorta por CARACTERES (no bytes: evita
+    /// pánico en mitad de un UTF-8). Mantiene guard anti-SSRF + proxy.
+    pub async fn fetch_readable(&self, url: &str, max_chars: usize) -> Result<String> {
+        let url = url.trim();
+        guard_url(url)?;
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| AionError::Internal(format!("fetch falló: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(AionError::Internal(format!("HTTP {}", resp.status())));
+        }
+        let ctype = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
+        let looks_pdf = ctype.contains("application/pdf") || url.to_lowercase().ends_with(".pdf");
+        let mut text = if looks_pdf {
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| AionError::Internal(format!("cuerpo inválido: {e}")))?;
+            extract_pdf(bytes.to_vec()).await.unwrap_or_default()
+        } else {
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| AionError::Internal(format!("cuerpo inválido: {e}")))?;
+            // Content-type a veces miente: si el cuerpo empieza por %PDF, trátalo como PDF.
+            if body.as_bytes().starts_with(b"%PDF") {
+                extract_pdf(body.into_bytes()).await.unwrap_or_default()
+            } else {
+                html::to_text(&body)
+            }
+        };
+        if text.chars().count() > max_chars {
+            text = text.chars().take(max_chars).collect();
+            text.push_str(" …[truncado]");
+        }
+        Ok(text)
+    }
+
     /// Cuerpo CRUDO (sin pasar por el extractor de texto): para APIs JSON. Mantiene
     /// el guard anti-SSRF y el proxy (`AION_PROXY`) como el resto del cliente.
     pub async fn fetch_raw(&self, url: &str) -> Result<String> {
@@ -796,6 +845,21 @@ fn weather_desc(code: u64) -> &'static str {
         95..=99 => "tormenta",
         _ => "condiciones variables",
     }
+}
+
+/// Extrae el texto de un PDF (bytes en memoria). En hilo BLOQUEANTE (parseo CPU-bound) y bajo
+/// `catch_unwind`: `pdf-extract` puede entrar en pánico con PDFs malformados, y eso JAMÁS debe
+/// tumbar al agente. `None` si no se pudo extraer (la investigación sigue con las demás fuentes).
+async fn extract_pdf(bytes: Vec<u8>) -> Option<String> {
+    tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(&bytes).ok())
+            .ok()
+            .flatten()
+            .filter(|t| t.trim().chars().count() >= 40)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Codifica una cadena para usarla en una query string (percent-encoding).
