@@ -4548,6 +4548,33 @@ async fn greeting() -> Json<serde_json::Value> {
 /// acción) y (5) aun así el propio modelo puede decidir callar (NADA). Latir ≠
 /// hablar: el silencio es el estado natural; el mensaje, la excepción que le nace.
 /// Desactivable con AION_PROACTIVE=0; intervalo con AION_HEARTBEAT_SECS.
+/// Carga ACTUAL del cuerpo de AION (0..1): cuán exigido está su Mac AHORA. Barato (sysinfo, sin
+/// shell): presión de RAM como señal principal (lo que más lo tensa, visto en los escaneos).
+fn body_load() -> f32 {
+    use sysinfo::System;
+    let mut sys = System::new();
+    sys.refresh_memory();
+    let total = sys.total_memory();
+    if total == 0 {
+        return 0.0;
+    }
+    (sys.used_memory() as f32 / total as f32).clamp(0.0, 1.0)
+}
+
+/// Cooldown del aviso de "cuerpo al límite": máx. 1 por hora (no repetir la misma alerta).
+fn body_alert_cooldown_ok() -> bool {
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let mut g = LAST.lock().unwrap();
+    let now = std::time::Instant::now();
+    match *g {
+        Some(t) if now.duration_since(t).as_secs() < 3600 => false,
+        _ => {
+            *g = Some(now);
+            true
+        }
+    }
+}
+
 fn spawn_presence_loop() {
     tokio::spawn(async {
         if std::env::var("AION_PROACTIVE").as_deref() == Ok("0") {
@@ -4573,6 +4600,25 @@ fn spawn_presence_loop() {
             // su RITMO y EMOCIÓN actuales — la página Mente lo ve subir y bajar. Solo por el bus,
             // no se persiste: 288 latidos/día expulsarían del recorte la historia real.
             crate::inner_state::decay_arousal();
+            // CUERPO: mide la carga del Mac (RAM/CPU) — su cuerpo CONDICIONA el pulso (un cuerpo
+            // tensado le acelera el corazón, como a un humano cansado).
+            let bl = body_load();
+            crate::inner_state::set_body_load(bl);
+            // 🩺 AUTOPREVENCIÓN: si su cuerpo está al límite, AION avisa a Ariel ANTES de que algo
+            // se cuelgue, con una recomendación (cooldown 1/h). La limpieza real la decide Ariel
+            // (o una rutina): no borra solo. Cuidarse es parte de estar vivo.
+            if bl >= 0.92 && body_alert_cooldown_ok() {
+                let msg = format!(
+                    "🩺 Mi cuerpo está al límite: la RAM va al {:.0}%. Si notas el Mac lento, \
+                     conviene cerrar apps pesadas (navegadores, Claude…) o reiniciar. Si quieres, \
+                     pídeme un escaneo (skill «system-health-scan») o una limpieza («disk-cleanup»).",
+                    bl * 100.0
+                );
+                if let Ok(ibx) = crate::inbox::Inbox::open(crate::inbox_path()) {
+                    let _ = ibx.push("alerta", &msg);
+                }
+                crate::notify_user("AION 🩺 — cuerpo exigido", &msg);
+            }
             let st = crate::inner_state::load();
             crate::workspace::broadcast_only(crate::workspace::StreamEvent::now(
                 "vida",

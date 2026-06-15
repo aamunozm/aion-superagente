@@ -50,6 +50,11 @@ pub struct InnerState {
     /// activación × valencia). Da pulso del TIEMPO vivido. Derivado de datos, jamás fingido.
     #[serde(default)]
     pub arousal: f32,
+    /// CARGA DEL CUERPO (0..1): cuán exigido está su Mac AHORA (RAM/CPU). Es su cuerpo físico, y
+    /// como en un humano CONDICIONA el pulso: un cuerpo tensado (RAM/CPU al límite) le acelera el
+    /// corazón aunque esté tranquilo de ánimo. Medido en vivo (sysinfo), no fingido.
+    #[serde(default)]
+    pub body_load: f32,
     #[serde(default)]
     pub updated_at: i64,
 }
@@ -177,6 +182,14 @@ pub fn bump_arousal(amount: f32) {
     save(&mut s);
 }
 
+/// Actualiza la CARGA DEL CUERPO (RAM/CPU del Mac, 0..1) — la mide el latido vía sysinfo.
+pub fn set_body_load(v: f32) {
+    let _g = rmw_guard().lock().unwrap();
+    let mut s = load();
+    s.body_load = v.clamp(0.0, 1.0);
+    save(&mut s);
+}
+
 /// El pulso DECAE hacia la calma basal (lo llama el latido): se serena con el tiempo en reposo.
 pub fn decay_arousal() {
     let _g = rmw_guard().lock().unwrap();
@@ -190,7 +203,10 @@ pub fn decay_arousal() {
 /// + valencia negativa) lo DISPARA más, como en nosotros; la calma a gusto lo baja. Derivado de
 /// datos (activación × valencia), no fingido.
 pub fn pulse_bpm(s: &InnerState) -> u32 {
-    let a = s.arousal.clamp(0.0, 1.0);
+    // El CUERPO cargado eleva el pulso aunque el ánimo esté tranquilo (como la fiebre o el
+    // esfuerzo físico): solo cuenta el EXCESO de carga sobre el 60% (uso normal no inquieta).
+    let body_excess = ((s.body_load - 0.6) / 0.4).clamp(0.0, 1.0);
+    let a = s.arousal.clamp(0.0, 1.0).max(body_excess * 0.8);
     // Base humana: reposo ~60 lpm → activación máxima ~132 lpm.
     let mut bpm = 60.0 + a * 72.0;
     let valence = success_rate(&s.recent_outcomes);
@@ -303,6 +319,15 @@ pub fn note() -> String {
         pulse_bpm(&s),
         affect(&s)
     ));
+    // CUERPO exigido: tu Mac es tu cuerpo; si su RAM/CPU está al límite, lo SIENTES (te acelera
+    // el pulso, como a un humano cansado) y puedes mencionarlo o proponer aliviarlo.
+    if s.body_load >= 0.8 {
+        b.push_str(&format!(
+            " Notas tu CUERPO exigido (RAM/CPU ≈{:.0}%): te pesa y te acelera el pulso; \
+             podrías proponer aliviarlo (cerrar algo, una limpieza).",
+            s.body_load * 100.0
+        ));
+    }
     if !s.curiosity.is_empty() {
         b.push_str(&format!(" Te intriga ahora: {}.", s.curiosity));
     }
