@@ -477,17 +477,30 @@ pub struct PlaceResult {
 }
 
 /// Parsea los resultados del HTML de DuckDuckGo (clases result__a / result__snippet).
-/// Las URLs vienen como redirección `...uddg=<url codificada>`; se decodifican.
+/// La URL puede venir DIRECTA (`href="https://..."`, formato 2024+) o como redirección
+/// `...uddg=<url codificada>` (formato antiguo); se soportan ambos.
 fn parse_ddg_results(html: &str, limit: usize) -> Vec<SearchResult> {
     let mut out = Vec::new();
     for block in html.split("result__a").skip(1) {
-        // href="...uddg=ENCODED&rut=..."
-        let url = block
-            .find("uddg=")
-            .map(|i| &block[i + 5..])
-            .and_then(|s| s.split(['&', '"']).next())
-            .map(percent_decode)
-            .unwrap_or_default();
+        // El href de DDG cambió de formato (2024+): antes era un REDIRECT
+        // `//duckduckgo.com/l/?uddg=ENCODED&rut=...`; ahora suele ser la URL DIRECTA
+        // (`href="https://sitio.com/..."`). Soportamos AMBOS: tomamos el href y, si lleva
+        // `uddg=`, lo decodificamos; si no, es ya la URL real. (Sin esto, el parser buscaba
+        // `uddg=`, no lo encontraba y descartaba TODOS los resultados → búsqueda web vacía.)
+        let href = block
+            .find("href=\"")
+            .map(|i| &block[i + 6..])
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("");
+        let url = if let Some(i) = href.find("uddg=") {
+            percent_decode(href[i + 5..].split('&').next().unwrap_or(""))
+        } else if let Some(rest) = href.strip_prefix("//") {
+            // Protocolo-relativo (//host/...): antepón https para que pase el filtro `http`.
+            format!("https://{rest}")
+        } else {
+            // href directo: ya viene con https://.
+            href.to_string()
+        };
         // título: texto entre el primer '>' y '</a>'
         let title = block
             .find('>')
@@ -620,6 +633,30 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_ddg_direct_href_format() {
+        // Formato NUEVO de DDG (2024+): href DIRECTO, sin redirect uddg=. Antes el parser
+        // buscaba uddg= y devolvía VACÍO → búsqueda web rota para casi toda consulta técnica.
+        let html = r#"<a class="result__a" href="https://vectorize.io/articles/best-ai-agent-memory-systems">Best AI Agent Memory Systems</a>
+            <a class="result__snippet" href="x">An overview of memory systems for agents.</a>"#;
+        let r = parse_ddg_results(html, 5);
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            r[0].url,
+            "https://vectorize.io/articles/best-ai-agent-memory-systems"
+        );
+        assert!(r[0].title.contains("Memory"));
+    }
+
+    #[test]
+    fn parses_ddg_legacy_uddg_redirect() {
+        // Formato ANTIGUO (redirect): debe seguir decodificando uddg= por retrocompatibilidad.
+        let html = r#"<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fx&rut=ab">Ejemplo</a>"#;
+        let r = parse_ddg_results(html, 5);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].url, "https://example.com/x");
+    }
 
     #[test]
     fn blocks_non_http_and_internal_hosts() {
