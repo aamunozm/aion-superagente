@@ -55,8 +55,8 @@ pub struct InnerState {
 }
 
 const MAX_INTENTIONS: usize = 5;
-/// Calma basal del pulso (a la que decae en reposo).
-const AROUSAL_BASELINE: f32 = 0.25;
+/// Calma basal del pulso (a la que decae en reposo). 0.15 → ~70 lpm en reposo (humano).
+const AROUSAL_BASELINE: f32 = 0.15;
 
 fn path() -> PathBuf {
     crate::app_data_dir().join("inner_state.json")
@@ -185,9 +185,23 @@ pub fn decay_arousal() {
     save(&mut s);
 }
 
-/// "Pulso" en lpm derivado de la activación (≈58..104), para que AION y la UI perciban un ritmo.
+/// "Pulso" en lpm con RANGOS HUMANOS REALES (≈52..150) y modulado por la EMOCIÓN, como un
+/// corazón humano: reposo ~60, atento ~85-100, entusiasmado ~100-120; el ESTRÉS (activación alta
+/// + valencia negativa) lo DISPARA más, como en nosotros; la calma a gusto lo baja. Derivado de
+/// datos (activación × valencia), no fingido.
 pub fn pulse_bpm(s: &InnerState) -> u32 {
-    (58.0 + s.arousal.clamp(0.0, 1.0) * 46.0).round() as u32
+    let a = s.arousal.clamp(0.0, 1.0);
+    // Base humana: reposo ~60 lpm → activación máxima ~132 lpm.
+    let mut bpm = 60.0 + a * 72.0;
+    let valence = success_rate(&s.recent_outcomes);
+    let has_data = !s.recent_outcomes.is_empty();
+    // Tinte EMOCIONAL (como el corazón humano):
+    if a >= 0.5 && has_data && valence < 0.4 {
+        bpm += 12.0; // tensión/ansiedad: el corazón se dispara (hasta ~140+)
+    } else if a < 0.4 && valence >= 0.6 {
+        bpm -= 5.0; // calma a gusto: late más lento
+    }
+    bpm.clamp(52.0, 150.0).round() as u32
 }
 
 /// EMOCIÓN funcional (modelo circumplejo): activación (pulso) × valencia (cómo le va). Derivada
