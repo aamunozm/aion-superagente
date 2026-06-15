@@ -10,7 +10,10 @@
 mod driver;
 mod html;
 
-pub use driver::{BrowserDriver, ChromiumoxideDriver, El, PageView, Snapshot};
+pub use driver::{
+    bing_search, debug_html, google_search, web_search, BrowserDriver, ChromiumoxideDriver, El,
+    PageView, Snapshot,
+};
 
 use aion_kernel::{AionError, Result};
 use std::time::Duration;
@@ -55,34 +58,132 @@ impl WebClient {
         }
     }
 
-    /// **Búsqueda web real** (DuckDuckGo HTML, sin API key). Devuelve resultados
-    /// con título, URL y fragmento, para que el agente investigue en varias fuentes.
+    /// **Búsqueda web real** multi-fuente, sin API key. Fuente PRINCIPAL: la **web real** vía el
+    /// navegador propio de AION (buscadores permisivos con rotación), respaldada por OpenAlex
+    /// (académico), DuckDuckGo y Wikipedia. Devuelve título, URL y fragmento para investigar.
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        // MULTI-FUENTE: consulta varios motores EN PARALELO y FUSIONA (dedup por host),
-        // en vez de "uno u otro". Así nunca depende de una sola fuente y diversifica.
+        // BUSCADOR PROPIO MULTI-FUENTE (todo gratis y SIN clave, nada de APIs de pago):
+        //  · WEB REAL vía navegador propio de AION: prueba buscadores permisivos en orden
+        //    (Brave→Startpage→DuckDuckGo→Mojeek→Ecosia) y rota si alguno pide captcha. Datos web
+        //    de verdad, no Wikipedia. (Google/Bing quedan para uso logueado: bloquean al bot.)
+        //  · SearXNG self-hosted (si Ariel lo corre) · OpenAlex (~250M papers académicos)
+        //  · DuckDuckGo (html+instant) · Wikipedia ES/EN (respaldo enciclopédico)
+        // Se consultan EN PARALELO y se FUSIONAN (dedup por host), priorizando la web real.
+        use futures_util::stream::{FuturesUnordered, StreamExt};
         let q = query.trim();
-        let (ddg, ia, wiki) = tokio::join!(
-            self.search_ddg(q, limit),
-            self.search_ddg_instant(q, limit),
-            self.search_wikipedia(q, limit),
-        );
+        // Fan-out RESILIENTE. Cada fuente corre en paralelo con techo de 8s y devuelve su
+        // PRIORIDAD de mezcla (0 = primero). Recolectamos según llegan; una fuente caída no
+        // arrastra la búsqueda. Pero ESPERAMOS a la web real (la principal, prio 0) hasta ~12s
+        // antes del corte anticipado: arranca más lento (Chrome + rotación) pero es la mejor.
+        let dur = Duration::from_secs(8);
+        // La web real (prio 0) puede tardar más: lanza/usa Chrome y puede rotar varios motores.
+        let web_dur = Duration::from_secs(15);
+        let flat = |r: std::result::Result<
+            Result<Vec<SearchResult>>,
+            tokio::time::error::Elapsed,
+        >| { r.ok().and_then(|x| x.ok()).unwrap_or_default() };
+        type SrcFut<'a> = std::pin::Pin<
+            Box<dyn std::future::Future<Output = (u8, Vec<SearchResult>)> + Send + 'a>,
+        >;
+        let mut futs: FuturesUnordered<SrcFut> = FuturesUnordered::new();
+        // Prio 0: WEB REAL por el navegador propio (rota buscadores permisivos). Es la mejor
+        // fuente; por eso esperamos a que llegue (primary) antes de conformarnos con el resto.
+        futs.push(Box::pin(async {
+            (
+                0u8,
+                flat(tokio::time::timeout(web_dur, driver::web_search(q, limit)).await),
+            )
+        }));
+        futs.push(Box::pin(async {
+            (
+                1u8,
+                flat(tokio::time::timeout(dur, self.search_searxng(q, limit)).await),
+            )
+        }));
+        futs.push(Box::pin(async {
+            (
+                2u8,
+                flat(tokio::time::timeout(dur, self.search_openalex(q, limit)).await),
+            )
+        }));
+        futs.push(Box::pin(async {
+            (
+                3u8,
+                flat(tokio::time::timeout(dur, self.search_ddg(q, limit)).await),
+            )
+        }));
+        futs.push(Box::pin(async {
+            (
+                4u8,
+                flat(tokio::time::timeout(dur, self.search_ddg_instant(q, limit)).await),
+            )
+        }));
+        futs.push(Box::pin(async {
+            (
+                5u8,
+                flat(
+                    tokio::time::timeout(dur, self.search_wiki("en.wikipedia.org", q, limit)).await,
+                ),
+            )
+        }));
+        futs.push(Box::pin(async {
+            (
+                6u8,
+                flat(
+                    tokio::time::timeout(dur, self.search_wiki("es.wikipedia.org", q, limit)).await,
+                ),
+            )
+        }));
+
+        let total = futs.len();
+        let mut groups: Vec<(u8, Vec<SearchResult>)> = Vec::new();
+        let start = tokio::time::Instant::now();
+        let mut deadline = start + web_dur; // techo absoluto (la web real puede tardar)
+        let mut primary_done = false; // ¿llegó ya la web real (prio 0)?
+        loop {
+            let sleep = tokio::time::sleep_until(deadline);
+            tokio::pin!(sleep);
+            tokio::select! {
+                biased;
+                maybe = futs.next() => match maybe {
+                    Some((prio, v)) => {
+                        if prio == 0 {
+                            primary_done = true;
+                        }
+                        groups.push((prio, v));
+                        if groups.len() == total {
+                            break;
+                        }
+                        // Corte anticipado solo si ya tenemos la web real (o ya esperamos >12s por
+                        // ella, p. ej. rotando motores) y hay ≥3 fuentes: +1s a las rezagadas y cierra.
+                        let may_cut = primary_done || start.elapsed() >= Duration::from_secs(12);
+                        if may_cut && groups.len() >= 3 {
+                            let soon = tokio::time::Instant::now() + Duration::from_millis(1000);
+                            if soon < deadline {
+                                deadline = soon;
+                            }
+                        }
+                    }
+                    None => break,
+                },
+                _ = &mut sleep => break,
+            }
+        }
+        // Ordena por prioridad de mezcla y concatena: las fuentes que no llegaron a tiempo
+        // simplemente no aportan.
+        groups.sort_by_key(|(p, _)| *p);
 
         let mut out: Vec<SearchResult> = Vec::new();
         let mut seen_host: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut seen_url: std::collections::HashSet<String> = std::collections::HashSet::new();
-        // Intercala varias fuentes; Wikipedia rellena al final.
-        for r in ddg
-            .unwrap_or_default()
-            .into_iter()
-            .chain(ia.unwrap_or_default())
-            .chain(wiki.unwrap_or_default())
-        {
+        // Diversifica por host; Wikipedia puede repetir host (es/en).
+        for r in groups.into_iter().flat_map(|(_, v)| v) {
             if !seen_url.insert(r.url.clone()) {
                 continue; // misma URL exacta ya incluida
             }
             let host = host_of(&r.url);
             // Permite varias entradas pero limita duplicados del MISMO host (diversidad).
-            let dup = seen_host.contains(&host) && host != "es.wikipedia.org";
+            let dup = seen_host.contains(&host) && !host.ends_with("wikipedia.org");
             if dup {
                 continue;
             }
@@ -162,12 +263,18 @@ impl WebClient {
         Ok(out)
     }
 
-    /// Búsqueda vía API de Wikipedia (es). Fuente fiable de respaldo: devuelve
-    /// artículos reales con extracto y URL navegable.
-    async fn search_wikipedia(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+    /// Búsqueda vía API de Wikipedia en cualquier idioma (`host` = es/en.wikipedia.org). Fuente
+    /// fiable: devuelve artículos reales con extracto y URL navegable. La API `list=search`
+    /// busca por CONTENIDO (no solo por título), así que acierta con consultas largas.
+    async fn search_wiki(
+        &self,
+        host: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
         let q = urlencode(query.trim());
         let url = format!(
-            "https://es.wikipedia.org/w/api.php?action=query&list=search&srsearch={q}\
+            "https://{host}/w/api.php?action=query&list=search&srsearch={q}\
              &format=json&srlimit={limit}&srprop=snippet"
         );
         let json: serde_json::Value = self
@@ -186,9 +293,106 @@ impl WebClient {
                 let snippet = strip_html_tags(it["snippet"].as_str().unwrap_or(""));
                 let page = title.replace(' ', "_");
                 out.push(SearchResult {
-                    url: format!("https://es.wikipedia.org/wiki/{}", urlencode(&page)),
+                    url: format!("https://{host}/wiki/{}", urlencode(&page)),
                     title,
                     snippet,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// **OpenAlex** (académico, SIN API key): ~250M trabajos científicos arbitrados. Devuelve
+    /// título, año, abstract reconstruido y URL navegable (DOI o landing). Fuente de nivel
+    /// PROFESIONAL para investigación — gratis, propia, sin pagar. Lo que faltaba para que AION
+    /// citara papers de verdad cuando Ariel pide "solo fuentes académicas".
+    async fn search_openalex(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        // `mailto` mete la petición en el "polite pool" de OpenAlex: mucho más rápido y fiable
+        // que el pool común (que llega a tardar >15s y dar timeout). Es gratis y sin API key.
+        let url = format!(
+            "https://api.openalex.org/works?search={}&per_page={}&mailto=info@prontoclick.it",
+            urlencode(query.trim()),
+            limit.clamp(1, 10)
+        );
+        let json: serde_json::Value = self
+            .http
+            .get(&url)
+            .header("User-Agent", "AION/1.0 (agente local-first)")
+            .send()
+            .await
+            .map_err(|e| AionError::Internal(format!("openalex falló: {e}")))?
+            .json()
+            .await
+            .map_err(|e| AionError::Internal(format!("openalex json inválido: {e}")))?;
+        let mut out = Vec::new();
+        if let Some(arr) = json["results"].as_array() {
+            for w in arr.iter().take(limit) {
+                let title = w["display_name"].as_str().unwrap_or("").to_string();
+                if title.is_empty() {
+                    continue;
+                }
+                // URL navegable: DOI si existe, si no la landing de OpenAlex.
+                let url = w["doi"]
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| w["id"].as_str().map(str::to_string))
+                    .unwrap_or_default();
+                if url.is_empty() {
+                    continue;
+                }
+                let year = w["publication_year"]
+                    .as_i64()
+                    .map(|y| y.to_string())
+                    .unwrap_or_default();
+                let abs = reconstruct_abstract(&w["abstract_inverted_index"]);
+                let snippet = if abs.is_empty() {
+                    format!("[Académico {year}] {title}")
+                } else {
+                    let a: String = abs.chars().take(280).collect();
+                    format!("[Académico {year}] {a}")
+                };
+                out.push(SearchResult {
+                    title,
+                    url,
+                    snippet,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// **SearXNG** self-hosted (opcional): metabuscador PROPIO, gratis y sin clave, que agrega
+    /// Google/Bing/Brave/etc. respetando la privacidad — el "patrón oro" libre para agentes. Se
+    /// activa con `AION_SEARXNG_URL` (p. ej. http://127.0.0.1:8888). Sin esa variable, no hace
+    /// nada (silencioso). Da búsqueda web de alta calidad sin depender de una API de pago.
+    async fn search_searxng(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let Ok(base) = std::env::var("AION_SEARXNG_URL") else {
+            return Ok(vec![]);
+        };
+        let base = base.trim().trim_end_matches('/');
+        if base.is_empty() {
+            return Ok(vec![]);
+        }
+        let url = format!("{base}/search?q={}&format=json", urlencode(query.trim()));
+        let json: serde_json::Value = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| AionError::Internal(format!("searxng falló: {e}")))?
+            .json()
+            .await
+            .map_err(|e| AionError::Internal(format!("searxng json inválido: {e}")))?;
+        let mut out = Vec::new();
+        if let Some(arr) = json["results"].as_array() {
+            for r in arr.iter().take(limit) {
+                let (Some(title), Some(u)) = (r["title"].as_str(), r["url"].as_str()) else {
+                    continue;
+                };
+                out.push(SearchResult {
+                    title: title.to_string(),
+                    url: u.to_string(),
+                    snippet: r["content"].as_str().unwrap_or("").to_string(),
                 });
             }
         }
@@ -533,6 +737,32 @@ fn strip_html_tags(s: &str) -> String {
         .replace("&quot;", "\"")
         .trim()
         .to_string()
+}
+
+/// Reconstruye el abstract de un trabajo de OpenAlex desde su `abstract_inverted_index`
+/// (mapa palabra → posiciones), que es como OpenAlex entrega los resúmenes. Ordena las palabras
+/// por posición y las une. Vacío si no hay índice. Esto le da a AION un extracto real del paper
+/// para razonar y citar, no solo el título.
+fn reconstruct_abstract(idx: &serde_json::Value) -> String {
+    let Some(obj) = idx.as_object() else {
+        return String::new();
+    };
+    let mut words: Vec<(u64, &str)> = Vec::new();
+    for (w, positions) in obj {
+        if let Some(arr) = positions.as_array() {
+            for p in arr {
+                if let Some(pos) = p.as_u64() {
+                    words.push((pos, w.as_str()));
+                }
+            }
+        }
+    }
+    words.sort_by_key(|(p, _)| *p);
+    words
+        .into_iter()
+        .map(|(_, w)| w)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Etiqueta legible «Ciudad (País)» para la geolocalización (best-effort).

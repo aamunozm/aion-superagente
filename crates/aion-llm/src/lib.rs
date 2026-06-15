@@ -11,4 +11,4 @@ mod ollama;
 mod openai;
 
 pub use ollama::OllamaEngine;
-pub use openai::OpenAiEngine;
+pub use openai::{list_models, OpenAiEngine};

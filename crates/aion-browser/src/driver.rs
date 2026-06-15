@@ -26,6 +26,20 @@ pub trait BrowserDriver: Send + Sync {
     async fn snapshot(&self) -> Result<Snapshot>;
     async fn click(&self, selector: &str) -> Result<()>;
     async fn type_text(&self, selector: &str, text: &str) -> Result<()>;
+    /// Desplaza la página: `dir` = "down"|"up"|"top"|"bottom"|"text:<texto>". Devuelve la vista
+    /// tras desplazar. Esencial para páginas largas/infinitas (patrón browser-use).
+    async fn scroll(&self, _dir: &str) -> Result<PageView> {
+        Err(AionError::Internal("scroll no soportado".into()))
+    }
+    /// Extrae el CONTENIDO principal legible de la página (estilo lectura): quita menús,
+    /// barras, scripts y deja el texto que importa. Para leer artículos/productos sin ruido.
+    async fn extract(&self) -> Result<String> {
+        Err(AionError::Internal("extract no soportado".into()))
+    }
+    /// Vuelve a la página anterior del historial. Devuelve la nueva vista.
+    async fn back(&self) -> Result<PageView> {
+        Err(AionError::Internal("back no soportado".into()))
+    }
     /// Rellena el formulario de login de la página actual con usuario+contraseña.
     /// Los valores se inyectan en la PÁGINA (vía CDP) y NUNCA se devuelven: la función
     /// solo informa de qué campos rellenó. Base de la bóveda de credenciales.
@@ -75,13 +89,60 @@ fn cell() -> &'static Mutex<Option<Session>> {
     SESSION.get_or_init(|| Mutex::new(None))
 }
 
-/// Localiza el ejecutable de Chrome/Chromium (AION_CHROME o rutas habituales).
+/// Carpeta de datos de AION (`~/Library/Application Support/AION` en macOS).
+fn aion_data_dir() -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    let base = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join("Library/Application Support/AION"))
+        .unwrap_or_else(|_| std::env::temp_dir());
+    #[cfg(not(target_os = "macos"))]
+    let base = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".config/aion"))
+        .unwrap_or_else(|_| std::env::temp_dir());
+    base
+}
+
+/// Chromium PROPIO empaquetado dentro de AION.app (Contents/Resources/chromium-runtime),
+/// relativo al ejecutable del sidecar. Es el camino de producción: el navegador es de AION,
+/// independiente del Chrome personal del usuario.
+fn bundled_chromium() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    // .../AION.app/Contents/MacOS/aion-core → subir a Contents/ y entrar a Resources/
+    let contents = exe.parent()?.parent()?; // Contents
+    let candidates = [
+        contents.join("Resources/chromium-runtime/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"),
+        contents.join("Resources/chromium-runtime/Chromium.app/Contents/MacOS/Chromium"),
+    ];
+    candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Chromium PROPIO descargado en los datos de AION (`.../AION/chromium`). Sirve en desarrollo
+/// y como red de seguridad si el bundle no lo trae.
+fn downloaded_chromium() -> Option<String> {
+    let p = aion_data_dir().join(
+        "chromium/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    );
+    p.exists().then(|| p.to_string_lossy().into_owned())
+}
+
+/// Localiza el ejecutable del navegador. PRIORIZA el Chromium PROPIO de AION (interno, solo de
+/// los agentes); el Chrome del sistema queda como último recurso (es "de afuera").
 fn chrome_path() -> Option<String> {
     if let Ok(p) = std::env::var("AION_CHROME") {
         if !p.is_empty() {
             return Some(p);
         }
     }
+    if let Some(p) = bundled_chromium() {
+        return Some(p);
+    }
+    if let Some(p) = downloaded_chromium() {
+        return Some(p);
+    }
+    // Último recurso: navegador del sistema (no ideal; el navegador debe ser propio de AION).
     #[cfg(target_os = "macos")]
     let candidates = [
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -116,6 +177,39 @@ fn stealth_ua() -> String {
     })
 }
 
+/// Perfil PERSISTENTE del navegador de AION. A diferencia de un dir temporal por proceso,
+/// este sobrevive reinicios: las cookies y sesiones (logins de Google/GitHub/Reddit/redes)
+/// se conservan, que es justo lo que pide un navegador "de verdad". Es un perfil DEDICADO de
+/// AION (no el de Chrome del usuario), así que no hay conflicto con el navegador personal.
+/// Override con AION_BROWSER_PROFILE.
+fn profile_dir() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("AION_BROWSER_PROFILE") {
+        if !p.is_empty() {
+            return p.into();
+        }
+    }
+    aion_data_dir().join("browser-profile")
+}
+
+/// ¿Lanzar el navegador VISIBLE (headful) en vez de headless? Necesario para que Ariel haga
+/// login a mano en sus cuentas (la sesión queda guardada en el perfil persistente y luego el
+/// agente la reutiliza headless). Headful además es aún menos detectable. Activa con
+/// AION_BROWSER_HEADFUL=1.
+fn headful() -> bool {
+    std::env::var("AION_BROWSER_HEADFUL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// ¿Comportarse como humano (escritura con ritmo, pausas)? Activado por defecto: es lo que más
+/// reduce la detección por PATRÓN. Se puede desactivar (AION_BROWSER_HUMAN=0) para máxima
+/// velocidad cuando no importa parecer humano.
+fn human_mode() -> bool {
+    std::env::var("AION_BROWSER_HUMAN")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
 /// Lanza el navegador si aún no hay sesión. Devuelve error claro si falta Chrome.
 async fn ensure(sess: &mut Option<Session>) -> Result<()> {
     if sess.is_some() {
@@ -125,10 +219,14 @@ async fn ensure(sess: &mut Option<Session>) -> Result<()> {
     if let Some(p) = chrome_path() {
         builder = builder.chrome_executable(p);
     }
-    // PERFIL DEDICADO: evita el conflicto SingletonLock con el Chrome del usuario o con
-    // una instancia previa. Cada proceso de AION usa su propio user-data-dir temporal.
-    let profile = std::env::temp_dir().join(format!("aion-chrome-{}", std::process::id()));
+    // PERFIL PERSISTENTE Y DEDICADO: conserva sesiones entre reinicios y evita el conflicto
+    // SingletonLock con el Chrome personal del usuario. Si una sesión previa de AION dejó un
+    // lock huérfano, se limpia (somos instancia única local).
+    let profile = profile_dir();
     let _ = std::fs::create_dir_all(&profile);
+    for lock in ["SingletonLock", "SingletonCookie", "SingletonSocket"] {
+        let _ = std::fs::remove_file(profile.join(lock));
+    }
     builder = builder
         .user_data_dir(profile)
         // STEALTH (legítimo): hace que el navegador del agente parezca uno normal.
@@ -142,7 +240,12 @@ async fn ensure(sess: &mut Option<Session>) -> Result<()> {
         .arg("--disable-extensions")
         .arg("--disable-infobars");
     // Headless "new": más fiel a un Chrome real que el headless antiguo (menos detectable).
-    builder = builder.new_headless_mode();
+    // En modo headful (login manual) se omite para que la ventana sea visible.
+    if !headful() {
+        builder = builder.new_headless_mode();
+    } else {
+        builder = builder.with_head();
+    }
     let config = builder
         .build()
         .map_err(|e| AionError::Internal(format!("no encuentro Chrome para el navegador: {e}. Instala Google Chrome o define AION_CHROME.")))?;
@@ -243,10 +346,32 @@ impl BrowserDriver for ChromiumoxideDriver {
         let el = page.find_element(selector).await.map_err(|e| {
             AionError::Internal(format!("no encontré el elemento «{selector}»: {e}"))
         })?;
-        el.click()
-            .await
-            .map_err(|e| AionError::Internal(format!("no pude hacer clic: {e}")))?;
-        let _ = page.wait_for_navigation().await;
+        // Traer el elemento a la vista evita clics que cuelgan por estar fuera de pantalla.
+        let _ = el.scroll_into_view().await;
+        if human_mode() {
+            // Pausa humana antes de actuar (un humano no hace clic en 0 ms tras ver el elemento).
+            tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+        }
+        // Click con TECHO de tiempo: si el elemento está cubierto por un overlay (banner de
+        // cookies, modal) el CDP puede colgarse ~30 s. Mejor fallar en 10 s para que el agente
+        // cambie de estrategia (cerrar el overlay, otra acción) en vez de quedarse bloqueado.
+        match tokio::time::timeout(std::time::Duration::from_secs(10), el.click()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(AionError::Internal(format!("no pude hacer clic: {e}"))),
+            Err(_) => {
+                return Err(AionError::Internal(
+                    "el clic tardó demasiado (elemento cubierto o no interactivo); \
+                     prueba cerrar el aviso de cookies o usar otra acción"
+                        .into(),
+                ))
+            }
+        }
+        // La navegación tras el clic puede no ocurrir (acción JS/overlay): no esperes de más.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            page.wait_for_navigation(),
+        )
+        .await;
         Ok(())
     }
 
@@ -259,10 +384,76 @@ impl BrowserDriver for ChromiumoxideDriver {
             .await
             .map_err(|e| AionError::Internal(format!("no encontré el campo «{selector}»: {e}")))?;
         el.click().await.ok();
-        el.type_str(text)
-            .await
-            .map_err(|e| AionError::Internal(format!("no pude escribir: {e}")))?;
+        // ESCRITURA HUMANA: tecla a tecla con ritmo variable (lo que más despista a la detección
+        // por patrón). Para textos muy largos o si se desactiva el modo humano, escribe de golpe.
+        if human_mode() && text.chars().count() <= 200 {
+            tokio::time::sleep(std::time::Duration::from_millis(180)).await; // foco → primera tecla
+            for ch in text.chars() {
+                el.type_str(&ch.to_string())
+                    .await
+                    .map_err(|e| AionError::Internal(format!("no pude escribir: {e}")))?;
+                // 45–110 ms por tecla, variando con el carácter (sin dependencias de azar).
+                let jitter = 45 + (ch as u64 % 66);
+                tokio::time::sleep(std::time::Duration::from_millis(jitter)).await;
+            }
+        } else {
+            el.type_str(text)
+                .await
+                .map_err(|e| AionError::Internal(format!("no pude escribir: {e}")))?;
+        }
         Ok(())
+    }
+
+    async fn scroll(&self, dir: &str) -> Result<PageView> {
+        let guard = cell().lock().await;
+        let sess = guard.as_ref().ok_or_else(no_page)?;
+        let page = sess.page.as_ref().ok_or_else(no_page)?;
+        // Construye el JS de desplazamiento según la dirección pedida.
+        let js = match dir.trim() {
+            "top" => "window.scrollTo(0, 0)".to_string(),
+            "bottom" => "window.scrollTo(0, document.body.scrollHeight)".to_string(),
+            "up" => "window.scrollBy(0, -Math.round(innerHeight*0.9))".to_string(),
+            d if d.starts_with("text:") => {
+                let needle = d.trim_start_matches("text:").trim();
+                format!(
+                    "(() => {{ const t={}; const el=[...document.querySelectorAll('body *')]\
+                     .find(e=>e.innerText&&e.innerText.toLowerCase().includes(t.toLowerCase())); \
+                     if(el){{el.scrollIntoView({{block:'center'}});return true;}} return false; }})()",
+                    serde_json::to_string(needle).unwrap_or_else(|_| "\"\"".into())
+                )
+            }
+            _ => "window.scrollBy(0, Math.round(innerHeight*0.9))".to_string(), // "down" por defecto
+        };
+        let _ = page.evaluate(js).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await; // deja cargar lazy-load
+        page_view(page).await
+    }
+
+    async fn extract(&self) -> Result<String> {
+        let guard = cell().lock().await;
+        let sess = guard.as_ref().ok_or_else(no_page)?;
+        let page = sess.page.as_ref().ok_or_else(no_page)?;
+        let text = page
+            .evaluate(EXTRACT_CONTENT_JS)
+            .await
+            .ok()
+            .and_then(|r| r.into_value::<String>().ok())
+            .unwrap_or_default();
+        let mut text = text;
+        if text.len() > MAX_TEXT * 2 {
+            text.truncate(MAX_TEXT * 2);
+            text.push_str("\n…(contenido truncado)");
+        }
+        Ok(text)
+    }
+
+    async fn back(&self) -> Result<PageView> {
+        let guard = cell().lock().await;
+        let sess = guard.as_ref().ok_or_else(no_page)?;
+        let page = sess.page.as_ref().ok_or_else(no_page)?;
+        let _ = page.evaluate("history.back()").await;
+        let _ = page.wait_for_navigation().await;
+        page_view(page).await
     }
 
     async fn fill_login(&self, username: &str, password: &str) -> Result<String> {
@@ -314,6 +505,165 @@ fn no_page() -> AionError {
     AionError::Internal("no hay ninguna página abierta; usa browser_open primero".into())
 }
 
+/// Resultado crudo extraído del DOM del SERP (se mapea a `crate::SearchResult`).
+#[derive(serde::Deserialize)]
+struct RawHit {
+    title: String,
+    url: String,
+    #[serde(default)]
+    snippet: String,
+}
+
+/// Buscadores PERMISIVOS con el acceso automatizado (a diferencia de Google/Bing, que muestran
+/// challenge al instante). Índices propios o proxys que dan datos web REALES. Se prueban EN ORDEN
+/// y nos quedamos con el primero que responda; si uno pide captcha, rotamos al siguiente. Cada uno
+/// es `(nombre, url_con_{q})`.
+const ENGINES: &[(&str, &str)] = &[
+    ("Brave", "https://search.brave.com/search?q={q}"),
+    ("Startpage", "https://www.startpage.com/sp/search?query={q}"), // resultados de Google (proxy)
+    ("DuckDuckGo", "https://lite.duckduckgo.com/lite/?q={q}"),
+    ("Mojeek", "https://www.mojeek.com/search?q={q}"),
+    ("Ecosia", "https://www.ecosia.org/search?q={q}"),
+];
+
+/// Una sola consulta a un buscador con el navegador real. Renderiza el SERP (JS), gestiona el
+/// consentimiento de cookies (UE/Italia), detecta bloqueo anti-bot (captcha/`/sorry/`) y extrae
+/// los resultados con un extractor GENÉRICO semántico (robusto a cambios de CSS). Si está
+/// bloqueado, devuelve `Err` para que el llamador rote a otro motor. NUNCA resuelve captchas.
+async fn serp_one(url: &str, limit: usize) -> Result<Vec<crate::SearchResult>> {
+    let mut guard = cell().lock().await;
+    ensure(&mut guard).await?;
+    let sess = guard.as_mut().unwrap();
+    let page =
+        sess.browser.new_page("about:blank").await.map_err(|e| {
+            AionError::Internal(format!("no pude crear la página de búsqueda: {e}"))
+        })?;
+    let _ = page.evaluate_on_new_document(STEALTH_JS).await;
+    let _ = page.set_user_agent(stealth_ua()).await;
+    let nav_ok = page.goto(url).await.is_ok();
+    let _ = page.wait_for_navigation().await;
+    // Comportamiento humano: deja respirar al SERP para que cargue su JS (y no parezca ráfaga).
+    tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
+    let _ = page.evaluate(CONSENT_JS).await; // cierra banner de cookies si aparece
+    let final_url = page.url().await.ok().flatten().unwrap_or_default();
+    let title = page.get_title().await.ok().flatten().unwrap_or_default();
+    let blocked = final_url.contains("/sorry/")
+        || final_url.contains("/captcha")
+        || title.to_lowercase().contains("captcha")
+        || title.contains("403")
+        || title.contains("Un último paso");
+    if !nav_ok {
+        let _ = page.close().await;
+        return Err(AionError::Internal("no pude abrir el buscador".into()));
+    }
+    if blocked {
+        let _ = page.close().await;
+        return Err(AionError::Internal(
+            "buscador pidió verificación (rotar)".into(),
+        ));
+    }
+    let json = page
+        .evaluate(GENERIC_SERP_JS)
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_else(|| "[]".into());
+    let _ = page.close().await; // página temporal
+    let hits: Vec<RawHit> = serde_json::from_str(&json).unwrap_or_default();
+    Ok(hits
+        .into_iter()
+        .filter(|h| h.url.starts_with("http") && !h.title.is_empty())
+        .take(limit)
+        .map(|h| crate::SearchResult {
+            title: h.title,
+            url: h.url,
+            snippet: h.snippet,
+        })
+        .collect())
+}
+
+/// **Búsqueda web REAL** de AION: prueba los buscadores permisivos EN ORDEN y devuelve los
+/// resultados del primero que responda con datos (rotando si alguno pide captcha). Datos web de
+/// verdad (no Wikipedia), con el navegador propio e invisible de AION. Respeta `AION_PROXY` (Tor)
+/// para rotar IP si se configura.
+pub async fn web_search(query: &str, limit: usize) -> Result<Vec<crate::SearchResult>> {
+    let q = crate::urlencode(query.trim());
+    let mut last_err = None;
+    for (name, tmpl) in ENGINES {
+        let url = tmpl.replace("{q}", &q);
+        match serp_one(&url, limit).await {
+            Ok(hits) if hits.len() >= 3 => {
+                tracing::debug!(engine = name, n = hits.len(), "web_search ok");
+                return Ok(hits);
+            }
+            Ok(hits) => last_err = Some(format!("{name}: solo {} resultados", hits.len())),
+            Err(e) => last_err = Some(format!("{name}: {e}")),
+        }
+    }
+    // Ningún motor permisivo respondió: que el fan-out caiga a las otras fuentes (académicas, etc.).
+    Err(AionError::Internal(format!(
+        "ningún buscador respondió ({})",
+        last_err.unwrap_or_default()
+    )))
+}
+
+/// DEBUG: abre una URL en página temporal y devuelve el innerHTML de un selector (para
+/// inspeccionar la estructura de un SERP al escribir su extractor). No para producción.
+pub async fn debug_html(url: &str, selector: &str) -> Result<String> {
+    let mut guard = cell().lock().await;
+    ensure(&mut guard).await?;
+    let sess = guard.as_mut().unwrap();
+    let page = sess
+        .browser
+        .new_page("about:blank")
+        .await
+        .map_err(|e| AionError::Internal(format!("page: {e}")))?;
+    let _ = page.evaluate_on_new_document(STEALTH_JS).await;
+    let _ = page.goto(url).await;
+    let _ = page.wait_for_navigation().await;
+    tokio::time::sleep(std::time::Duration::from_millis(2200)).await; // SERP carga JS async
+    let js = if let Some(expr) = selector.strip_prefix("js:") {
+        format!(
+            "(() => {{ try {{ return String({expr}); }} catch (e) {{ return '(err) '+e; }} }})()"
+        )
+    } else {
+        format!(
+            "(() => {{ const e = document.querySelector({}); return e ? e.outerHTML.slice(0,4000) : '(no encontrado)'; }})()",
+            serde_json::to_string(selector).unwrap_or_else(|_| "\"body\"".into())
+        )
+    };
+    let html = page
+        .evaluate(js)
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    let _ = page.close().await;
+    Ok(html)
+}
+
+/// Búsqueda REAL en **Google**. Headless sin sesión, Google muestra challenge y devuelve `Err`;
+/// funciona cuando Ariel está logueado (perfil persistente). Disponible para ese caso.
+pub async fn google_search(query: &str, limit: usize) -> Result<Vec<crate::SearchResult>> {
+    let q = crate::urlencode(query.trim());
+    serp_one(
+        &format!("https://www.google.com/search?q={q}&hl=es&gl=it"),
+        limit,
+    )
+    .await
+}
+
+/// Búsqueda REAL en **Bing**. Igual que Google, suele pedir challenge sin sesión. Disponible para
+/// uso logueado.
+pub async fn bing_search(query: &str, limit: usize) -> Result<Vec<crate::SearchResult>> {
+    let q = crate::urlencode(query.trim());
+    serp_one(
+        &format!("https://www.bing.com/search?q={q}&setlang=es&cc=it"),
+        limit,
+    )
+    .await
+}
+
 /// Función JS que localiza los campos de usuario y contraseña del login y los rellena,
 /// disparando los eventos input/change (para que el sitio detecte el valor). Devuelve
 /// SOLO los nombres de los campos rellenados (nunca los valores).
@@ -344,11 +694,21 @@ const FILL_LOGIN_FN: &str = r#"(u, p) => {
 /// agente parezca uno normal — legítimo para automatizar tus propias sesiones.
 const STEALTH_JS: &str = r#"
 (() => {
+  const def = (obj, prop, val) => {
+    try { Object.defineProperty(obj, prop, { get: () => val, configurable: true }); } catch (e) {}
+  };
   try {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    Object.defineProperty(navigator, 'languages', { get: () => ['es-ES','es','en'] });
-    Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
-    window.chrome = window.chrome || { runtime: {} };
+    // 1) Señales de automatización (lo que delata a un bot headless).
+    def(navigator, 'webdriver', undefined);
+    def(navigator, 'languages', ['es-ES', 'es', 'it', 'en']);
+    def(navigator, 'plugins', [1, 2, 3, 4, 5]);
+    // 2) Hardware realista de un Mac Apple Silicon (un headless suele reportar valores raros).
+    def(navigator, 'hardwareConcurrency', 8);
+    def(navigator, 'deviceMemory', 8);
+    def(navigator, 'platform', 'MacIntel');
+    def(navigator, 'maxTouchPoints', 0);
+    window.chrome = window.chrome || { runtime: {}, app: {}, csi: () => {}, loadTimes: () => {} };
+    // 3) Permisos: que notifications no delate el modo automatizado.
     const q = navigator.permissions && navigator.permissions.query;
     if (q) {
       navigator.permissions.query = (p) =>
@@ -356,15 +716,109 @@ const STEALTH_JS: &str = r#"
           ? Promise.resolve({ state: Notification.permission })
           : q(p);
     }
-    // WebGL vendor/renderer realistas (otra señal habitual de headless).
-    const gp = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function (p) {
-      if (p === 37445) return 'Intel Inc.';
-      if (p === 37446) return 'Intel Iris OpenGL Engine';
-      return gp.call(this, p);
+    // 4) WebGL vendor/renderer realistas (señal habitual de headless).
+    const patchGL = (proto) => {
+      if (!proto) return;
+      const gp = proto.getParameter;
+      proto.getParameter = function (p) {
+        if (p === 37445) return 'Apple Inc.';            // UNMASKED_VENDOR_WEBGL
+        if (p === 37446) return 'Apple M-series GPU';    // UNMASKED_RENDERER_WEBGL
+        return gp.call(this, p);
+      };
+    };
+    patchGL(window.WebGLRenderingContext && WebGLRenderingContext.prototype);
+    patchGL(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype);
+    // 5) Canvas: ruido mínimo y estable para frustrar el fingerprinting por canvas, sin romper
+    //    el render real (solo altera 1 bit de unos pocos píxeles del export).
+    const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function (...args) {
+      try {
+        const ctx = this.getContext('2d');
+        if (ctx && this.width && this.height) {
+          const w = Math.min(this.width, 16);
+          const img = ctx.getImageData(0, 0, w, 1);
+          for (let i = 0; i < img.data.length; i += 40) img.data[i] = img.data[i] ^ 1;
+          ctx.putImageData(img, 0, 0);
+        }
+      } catch (e) {}
+      return origToDataURL.apply(this, args);
     };
   } catch (e) {}
 })();
+"#;
+
+/// JS que cierra el banner de consentimiento de cookies (Google UE y banners comunes):
+/// busca un botón cuyo texto sea de aceptar/rechazar y lo pulsa. Best-effort, idempotente.
+const CONSENT_JS: &str = r#"
+(() => {
+  try {
+    const rx = /(accept all|accetta tutto|aceptar todo|reject all|rifiuta tutto|rechazar todo|i agree|acconsento|ho capito|accetto)/i;
+    const cand = [...document.querySelectorAll('button, div[role=button], input[type=submit], a[role=button]')];
+    const b = cand.find(el => rx.test((el.innerText || el.value || el.getAttribute('aria-label') || '')));
+    if (b) { b.click(); return 'clicked'; }
+  } catch (e) {}
+  return 'none';
+})()
+"#;
+
+/// Extrae el CONTENIDO principal legible (readability-lite): prioriza <article>/<main>, si no
+/// elige el bloque con más texto, y limpia menús/scripts/estilos. Devuelve texto plano.
+const EXTRACT_CONTENT_JS: &str = r#"
+(() => {
+  const clean = (s) => (s || '').replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  // 1) Contenedores semánticos preferentes.
+  let root = document.querySelector('article, main, [role=main]');
+  // 2) Si no hay, busca el bloque con MÁS texto (heurística de densidad).
+  if (!root) {
+    let best = document.body, bestLen = 0;
+    for (const el of document.querySelectorAll('div, section')) {
+      const t = el.innerText || '';
+      if (t.length > bestLen && el.querySelectorAll('p, li, h1, h2, h3').length >= 3) {
+        best = el; bestLen = t.length;
+      }
+    }
+    root = best;
+  }
+  // Clona y quita ruido no informativo antes de leer el texto.
+  const c = root.cloneNode(true);
+  c.querySelectorAll('script, style, nav, header, footer, aside, form, noscript, [aria-hidden=true]')
+    .forEach(e => e.remove());
+  const title = (document.title || '').trim();
+  return clean((title ? title + '\n\n' : '') + (c.innerText || ''));
+})()
+"#;
+
+/// Extractor GENÉRICO de SERP, robusto a cambios de CSS: no depende de clases concretas (que
+/// cada motor cambia), sino de la SEMÁNTICA común a todos los buscadores — un enlace externo con
+/// un título de longitud razonable, y como snippet el texto del bloque contenedor. Funciona para
+/// Brave, Startpage, DuckDuckGo, Mojeek, Ecosia… Filtra navegación, enlaces del propio motor y
+/// dominios de utilidad. Devuelve JSON `[{title,url,snippet}]` por orden de aparición (relevancia).
+const GENERIC_SERP_JS: &str = r#"
+(() => {
+  const out = [];
+  const seen = new Set();
+  const self = location.hostname.replace(/^www\./, '');
+  const badHost = /(google|bing|brave|mojeek|startpage|duckduckgo|ecosia|gstatic|googleusercontent|microsoft|yahoo)\./i;
+  const badPath = /\/(search|sp\/search|settings|preferences|about|privacy|help|login|signin|account|maps|images|videos|news|imghp)\b/i;
+  for (const a of document.querySelectorAll('a[href^="http"]')) {
+    let url = a.href || '';
+    let host;
+    try { host = new URL(url).hostname.replace(/^www\./, ''); } catch (e) { continue; }
+    if (host === self || badHost.test(host)) continue;
+    if (badPath.test(url)) continue;
+    const title = (a.innerText || '').trim().replace(/\s+/g, ' ');
+    if (title.length < 12) continue; // descarta enlaces de navegación / iconos
+    if (seen.has(url)) continue;
+    seen.add(url);
+    // Snippet: sube unos niveles al bloque del resultado y toma su texto sin el título.
+    let box = a;
+    for (let k = 0; k < 4 && box.parentElement; k++) box = box.parentElement;
+    let snip = (box.innerText || '').replace(title, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
+    out.push({ title, url, snippet: snip });
+    if (out.length >= 15) break;
+  }
+  return JSON.stringify(out);
+})()
 "#;
 
 /// JS que recorre el DOM, etiqueta los elementos INTERACTIVOS visibles con

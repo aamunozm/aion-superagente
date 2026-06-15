@@ -632,6 +632,7 @@ export const providerSet = (cfg: {
   model: string;
   base_url?: string;
   api_key?: string;
+  utility_model?: string; // modelo local ligero para tareas de fondo (opcional)
 }) =>
   jsonCall<{ ok?: boolean; error?: string }>("/api/provider", {
     method: "POST",
@@ -646,10 +647,73 @@ export type ProviderState = {
   has_key: boolean;
   local_model: string;
   ext_model: string;
+  utility_model: string; // modelo local ligero para tareas de fondo (comprensión, traducción)
   can_toggle: boolean;
 };
 // Lee el proveedor activo. NUNCA devuelve la API key (solo `has_key`).
 export const providerGet = () => jsonCall<ProviderState>("/api/provider");
+
+// Prueba una API externa OpenAI-compatible SIN guardar: valida base_url + key y
+// devuelve los modelos disponibles para elegir uno. Si `api_key` va vacío, el backend
+// reutiliza la key ya guardada del mismo endpoint (la UI nunca recibe la key).
+export const providerTest = (cfg: { base_url: string; api_key?: string }) =>
+  jsonCall<{ ok: boolean; models?: string[]; error?: string }>("/api/provider/test", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ api_key: "", ...cfg }),
+  });
+
+// ── Skills (playbooks que el agente sabe ejecutar) ──────────────────────────
+export type Skill = {
+  name: string;
+  description: string;
+  when_to_use: string;
+  category: string;
+  tools: string[];
+  body: string;
+};
+export const skillsList = () => jsonCall<{ skills: Skill[] }>("/api/skills");
+export const skillSave = (s: Skill) =>
+  jsonCall<{ ok: boolean; error?: string }>("/api/skills", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(s),
+  });
+export const skillDelete = (name: string) =>
+  jsonCall<{ ok: boolean; error?: string }>("/api/skills/delete", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+
+// ── Rutinas (autonomía dirigida: tareas que AION ejecuta solo en un horario) ──
+export type Routine = {
+  id: string;
+  title: string;
+  prompt: string;
+  time: string; // "HH:MM"
+  enabled: boolean;
+  last_run: string;
+};
+export const routinesList = () => jsonCall<{ routines: Routine[] }>("/api/routines");
+export const routineSave = (r: Partial<Routine>) =>
+  jsonCall<{ ok: boolean; error?: string; routine?: Routine }>("/api/routines", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(r),
+  });
+export const routineDelete = (id: string) =>
+  jsonCall<{ ok: boolean; error?: string }>("/api/routines/delete", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+export const routineRun = (id: string) =>
+  jsonCall<{ ok: boolean; answer?: string; error?: string }>("/api/routines/run", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
 
 // Alterna en un clic el motor activo local↔API (solo si ambos están configurados).
 export const providerToggle = () =>

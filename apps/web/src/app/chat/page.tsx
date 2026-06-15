@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
+import Markdown from "@/components/Markdown";
 import { useT } from "@/lib/i18n";
 import {
   agentStream,
@@ -68,6 +69,45 @@ const STEP_STYLE: Record<Step["kind"], { icon: React.ComponentProps<typeof Icon>
   observation: { icon: "eye", color: "var(--on-peach)" },
 };
 
+// Una línea de paso del agente (pensamiento/acción/observación). Las observaciones largas
+// (p. ej. el volcado de elementos de una página) se RESUMEN y se expanden con «ver más», para
+// no saturar la conversación con detalle que casi nunca necesitas ver entero.
+const STEP_CLAMP = 220;
+function StepRow({ s }: { s: Step }) {
+  const [open, setOpen] = useState(false);
+  const long = s.text.length > STEP_CLAMP;
+  const shown = open || !long ? s.text : `${s.text.slice(0, STEP_CLAMP).trimEnd()}…`;
+  return (
+    <div className="flex items-start gap-2 text-sm pl-1 min-w-0" style={{ color: "var(--text-2)" }}>
+      <span style={{ color: STEP_STYLE[s.kind].color }} className="mt-0.5 shrink-0">
+        <Icon name={STEP_STYLE[s.kind].icon} size={15} />
+      </span>
+      {s.agent && (
+        <span
+          className="text-[10px] px-1.5 py-0.5 rounded-full shrink-0 font-medium"
+          style={{ background: "var(--accent-subtle)", color: "var(--accent)" }}
+        >
+          {s.agent}
+        </span>
+      )}
+      <span className="min-w-0">
+        <span className={`whitespace-pre-wrap [overflow-wrap:anywhere] ${s.kind === "action" ? "font-mono text-xs" : ""}`}>
+          {shown}
+        </span>
+        {long && (
+          <button
+            onClick={() => setOpen(!open)}
+            className="ml-1.5 text-[11px] align-baseline"
+            style={{ color: "var(--accent)" }}
+          >
+            {open ? "ver menos ▲" : "ver más ▾"}
+          </button>
+        )}
+      </span>
+    </div>
+  );
+}
+
 export default function ChatPage() {
   const { t } = useT();
   const [input, setInput] = useState("");
@@ -101,6 +141,14 @@ export default function ChatPage() {
       return [...prev, { prompt: "", mode: "chat", thinking: "", steps: [], answer: text, reach: { kind, at } }];
     });
   }
+  // Auto-scroll al fondo ante CUALQUIER mensaje nuevo (respuesta, streaming token a token, o un
+  // mensaje que AION inicia por su cuenta vía polling). Con block:"end" + el padding inferior del
+  // contenedor, el último mensaje queda con un pequeño margen sobre la caja de escribir — como en
+  // todo chat. Antes el scroll solo se disparaba al enviar tú, así que los mensajes proactivos de
+  // AION quedaban cortados abajo.
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+  }, [turns]);
   // Conversaciones persistentes: id actual + lista + dropdown de historial.
   const [convoId, setConvoId] = useState<string>("");
   const [convos, setConvos] = useState<ConvoMeta[]>([]);
@@ -386,7 +434,7 @@ export default function ChatPage() {
 
   return (
     <AppShell title={t("nav.chat")}>
-      <div className="flex flex-col h-full max-w-4xl mx-auto w-full px-6">
+      <div className="flex flex-col h-full max-w-6xl mx-auto w-full px-6">
       <div className="flex items-center gap-2 py-3 shrink-0">
         {/* Nuevo chat */}
         <button
@@ -499,7 +547,7 @@ export default function ChatPage() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto py-5 flex flex-col gap-5">
+      <div className="flex-1 overflow-y-auto pt-5 pb-8 flex flex-col gap-5">
         {!modelReady && (
           <div
             className="card text-sm"
@@ -525,7 +573,7 @@ export default function ChatPage() {
                 cualquier otra respuesta suya (solo que sin burbuja de usuario). */}
             {t.reach ? (
               <div className="msg max-w-[85%] self-start">
-                <p className="whitespace-pre-wrap">{t.answer}</p>
+                <Markdown>{t.answer}</Markdown>
               </div>
             ) : (
             <>
@@ -541,26 +589,11 @@ export default function ChatPage() {
             )}
 
             {(t.mode === "agent" || t.mode === "crew") &&
-              t.steps.map((s, j) => (
-                <div key={j} className="flex items-start gap-2 text-sm pl-1" style={{ color: "var(--text-2)" }}>
-                  <span style={{ color: STEP_STYLE[s.kind].color }} className="mt-0.5 shrink-0">
-                    <Icon name={STEP_STYLE[s.kind].icon} size={15} />
-                  </span>
-                  {s.agent && (
-                    <span
-                      className="text-[10px] px-1.5 py-0.5 rounded-full shrink-0 font-medium"
-                      style={{ background: "var(--accent-subtle)", color: "var(--accent)" }}
-                    >
-                      {s.agent}
-                    </span>
-                  )}
-                  <span className={s.kind === "action" ? "font-mono text-xs" : ""}>{s.text}</span>
-                </div>
-              ))}
+              t.steps.map((s, j) => <StepRow key={j} s={s} />)}
 
             {t.answer && (
               <div className="msg max-w-[85%] self-start">
-                <p className="whitespace-pre-wrap">{t.answer}</p>
+                <Markdown>{t.answer}</Markdown>
                 {t.meta && (
                   <p className="text-[11px] mt-1.5" style={{ color: "var(--text-3)" }}>
                     {t.meta}

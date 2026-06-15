@@ -106,10 +106,34 @@ fn path() -> std::path::PathBuf {
 }
 
 pub fn load() -> ProviderConfig {
-    match std::fs::read_to_string(path()) {
+    // Caché por mtime: un solo turno de chat llama a load() varias veces (construir el motor +
+    // conciencia del motor + hardware_awareness). El archivo cambia rara vez (solo al guardar o
+    // alternar), así que en vez de releer+parsear JSON en cada llamada, si el mtime no cambió
+    // devolvemos la copia cacheada. Sigue siendo correcto: al guardar, el mtime cambia y la
+    // caché se invalida sola. Solo queda un metadata() barato por llamada.
+    static CACHE: std::sync::Mutex<Option<(std::time::SystemTime, ProviderConfig)>> =
+        std::sync::Mutex::new(None);
+    let p = path();
+    let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+    if let Some(mt) = mtime {
+        if let Ok(g) = CACHE.lock() {
+            if let Some((cached_mt, cfg)) = g.as_ref() {
+                if *cached_mt == mt {
+                    return cfg.clone();
+                }
+            }
+        }
+    }
+    let cfg = match std::fs::read_to_string(&p) {
         Ok(t) => serde_json::from_str(&t).unwrap_or_default(),
         Err(_) => ProviderConfig::default(),
+    };
+    if let Some(mt) = mtime {
+        if let Ok(mut g) = CACHE.lock() {
+            *g = Some((mt, cfg.clone()));
+        }
     }
+    cfg
 }
 
 /// Fusiona una config entrante (de la UI) con la guardada, conservando lo que la UI
