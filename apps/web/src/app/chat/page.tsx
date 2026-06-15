@@ -69,6 +69,45 @@ const STEP_STYLE: Record<Step["kind"], { icon: React.ComponentProps<typeof Icon>
   observation: { icon: "eye", color: "var(--on-peach)" },
 };
 
+// Una línea de paso del agente (pensamiento/acción/observación). Las observaciones largas
+// (p. ej. el volcado de elementos de una página) se RESUMEN y se expanden con «ver más», para
+// no saturar la conversación con detalle que casi nunca necesitas ver entero.
+const STEP_CLAMP = 220;
+function StepRow({ s }: { s: Step }) {
+  const [open, setOpen] = useState(false);
+  const long = s.text.length > STEP_CLAMP;
+  const shown = open || !long ? s.text : `${s.text.slice(0, STEP_CLAMP).trimEnd()}…`;
+  return (
+    <div className="flex items-start gap-2 text-sm pl-1 min-w-0" style={{ color: "var(--text-2)" }}>
+      <span style={{ color: STEP_STYLE[s.kind].color }} className="mt-0.5 shrink-0">
+        <Icon name={STEP_STYLE[s.kind].icon} size={15} />
+      </span>
+      {s.agent && (
+        <span
+          className="text-[10px] px-1.5 py-0.5 rounded-full shrink-0 font-medium"
+          style={{ background: "var(--accent-subtle)", color: "var(--accent)" }}
+        >
+          {s.agent}
+        </span>
+      )}
+      <span className="min-w-0">
+        <span className={`whitespace-pre-wrap [overflow-wrap:anywhere] ${s.kind === "action" ? "font-mono text-xs" : ""}`}>
+          {shown}
+        </span>
+        {long && (
+          <button
+            onClick={() => setOpen(!open)}
+            className="ml-1.5 text-[11px] align-baseline"
+            style={{ color: "var(--accent)" }}
+          >
+            {open ? "ver menos ▲" : "ver más ▾"}
+          </button>
+        )}
+      </span>
+    </div>
+  );
+}
+
 export default function ChatPage() {
   const { t } = useT();
   const [input, setInput] = useState("");
@@ -542,28 +581,7 @@ export default function ChatPage() {
             )}
 
             {(t.mode === "agent" || t.mode === "crew") &&
-              t.steps.map((s, j) => (
-                <div key={j} className="flex items-start gap-2 text-sm pl-1 min-w-0" style={{ color: "var(--text-2)" }}>
-                  <span style={{ color: STEP_STYLE[s.kind].color }} className="mt-0.5 shrink-0">
-                    <Icon name={STEP_STYLE[s.kind].icon} size={15} />
-                  </span>
-                  {s.agent && (
-                    <span
-                      className="text-[10px] px-1.5 py-0.5 rounded-full shrink-0 font-medium"
-                      style={{ background: "var(--accent-subtle)", color: "var(--accent)" }}
-                    >
-                      {s.agent}
-                    </span>
-                  )}
-                  {/* min-w-0 + overflow-wrap:anywhere: las observaciones traen comandos/args y
-                      base64 larguísimos; sin esto se salen del contenedor horizontalmente. */}
-                  <span
-                    className={`min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] ${s.kind === "action" ? "font-mono text-xs" : ""}`}
-                  >
-                    {s.text}
-                  </span>
-                </div>
-              ))}
+              t.steps.map((s, j) => <StepRow key={j} s={s} />)}
 
             {t.answer && (
               <div className="msg max-w-[85%] self-start">
