@@ -15,6 +15,7 @@ mod claude_mcp;
 mod comprehension;
 mod consciousness;
 mod credentials;
+mod deep_research;
 mod empathy;
 mod episodic;
 mod evals;
