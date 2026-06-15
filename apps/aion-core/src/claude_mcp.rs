@@ -46,6 +46,41 @@ fn graph_near_dup(a: &str, b: &str) -> bool {
     union > 0.0 && inter / union >= 0.70
 }
 
+/// Presupuesto de tokens (estimado) por respuesta del puente: acota cuánto se sirve a
+/// Claude Code en una consulta. Configurable con `AION_MCP_TOKEN_BUDGET` (def. 600).
+fn token_budget() -> usize {
+    std::env::var("AION_MCP_TOKEN_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&b| b > 0)
+        .unwrap_or(600)
+}
+
+/// Estima tokens del texto (chars/4, mismo proxy que la auditoría).
+fn est_tokens(s: &str) -> usize {
+    s.chars().count() / 4
+}
+
+/// Sirve los hits `(score, contenido)` compactados a inglés, acotando el TOTAL a `budget`
+/// tokens estimados. Cada recuerdo se trunca a 300 chars antes de compactar. Garantiza al
+/// menos 1 línea (no devolver vacío por un presupuesto diminuto). Palanca A de ahorro.
+fn serve_within_budget<'a>(hits: impl Iterator<Item = (f32, &'a str)>, budget: usize) -> String {
+    let mut spent = 0usize;
+    let mut lines: Vec<String> = Vec::new();
+    for (score, content) in hits {
+        let c: String = content.chars().take(300).collect();
+        let served = crate::mcp_compact::compact_for_bridge(&c);
+        let line = format!("[{score:.2}] {served}");
+        let cost = est_tokens(&line);
+        if !lines.is_empty() && spent + cost > budget {
+            break; // ya hay contenido y este excede el presupuesto → corta la cola
+        }
+        spent += cost;
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
 fn wrap_untrusted(body: &str) -> String {
     // Neutraliza intentos de CERRAR el delimitador desde dentro del cuerpo: un recuerdo
     // que contenga literalmente la marca de fin escaparía del fence y el resto se leería
@@ -448,15 +483,16 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             // sirve la versión inglesa cacheada (≈14-40% menos tokens, medido) cuando existe;
             // en miss se sirve el español original y se calienta la caché en segundo plano.
             // Fail-open: nunca bloquea ni corrompe.
-            let body = useful
-                .iter()
-                .map(|h| {
-                    let c: String = h.content.chars().take(300).collect();
-                    let served = crate::mcp_compact::compact_for_bridge(&c);
-                    format!("[{:.2}] {}", h.score, served)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            //
+            // PRESUPUESTO POR TOKENS (palanca A de ahorro): además del filtro de relevancia,
+            // se acota el TOTAL servido a un presupuesto estimado de tokens (def. 600;
+            // `AION_MCP_TOKEN_BUDGET`). Así una consulta nunca infla el contexto de Claude Code
+            // con la cola de recuerdos marginales aunque pasen el umbral. Siempre se sirve al
+            // menos el más relevante (no devolver vacío por un presupuesto diminuto).
+            let body = serve_within_budget(
+                useful.iter().map(|h| (h.score, h.content.as_str())),
+                token_budget(),
+            );
             Ok(wrap_untrusted(&body))
         }
         "aion_library_search" => {
@@ -509,8 +545,10 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 comms
                     .iter()
                     .map(|(score, c)| {
-                        // Cap de resumen: 160 chars es suficiente para orientar.
+                        // Cap de resumen: 160 chars es suficiente para orientar. Compactado
+                        // ES/IT→EN para el puente (palanca E), fail-open a original.
                         let summary: String = c.summary.chars().take(160).collect();
+                        let summary = crate::mcp_compact::compact_for_bridge(&summary);
                         format!(
                             "[{score:.2}] Tema «{}» ({} nodos): {summary}",
                             c.label, c.size
@@ -538,8 +576,10 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                         continue;
                     }
                     shown_excerpts.push(excerpt.clone());
+                    // Compactado ES/IT→EN para el puente (palanca E); dedup sobre el original.
+                    let served = crate::mcp_compact::compact_for_bridge(&excerpt);
                     lines.push(format!(
-                        "[{:.2}] {} (vía {}): {excerpt}",
+                        "[{:.2}] {} (vía {}): {served}",
                         h.score,
                         h.chunk_id,
                         h.via.join(" → "),
@@ -667,5 +707,35 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
         }
         "aion_brief" => Ok(crate::claude_code::build_brief().await),
         _ => Err(format!("Tool desconocida: {name}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Necesita runtime: en cache miss `compact_for_bridge` hace `tokio::spawn` del calentado.
+    #[tokio::test]
+    async fn budget_caps_results_but_serves_at_least_one() {
+        let a = "a".repeat(120);
+        let b = "b".repeat(120);
+        let c = "c".repeat(120);
+        // Cada línea ~127 chars → ~31 tok. Budget 40 → cabe solo la 1ª (la 2ª excedería).
+        let hits = [(0.9_f32, a.as_str()), (0.8, b.as_str()), (0.7, c.as_str())];
+        let out = serve_within_budget(hits.iter().copied(), 40);
+        let n = out.lines().count();
+        assert!(
+            n >= 1 && n < 3,
+            "el presupuesto debe recortar pero servir ≥1 (sirvió {n})"
+        );
+        // Presupuesto enorme → sirve los tres.
+        let all = serve_within_budget(hits.iter().copied(), 100_000);
+        assert_eq!(all.lines().count(), 3);
+    }
+
+    #[test]
+    fn token_budget_has_sane_default() {
+        // Sin env var, el presupuesto por defecto es positivo y razonable.
+        assert!(token_budget() >= 100);
     }
 }
