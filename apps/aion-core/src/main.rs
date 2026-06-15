@@ -1253,6 +1253,40 @@ async fn journal_once(engine: &OllamaEngine) -> Option<(String, String, u32)> {
 /// Antes la vida completa solo existía en el CLI (`aion-core live`) y la app
 /// jamás la corría: AION tenía latido pero no vida. Prioridad: las DEUDAS con
 /// Ariel van antes que la curiosidad propia; sin deudas, la curiosidad
+/// Perseguir una INTENCIÓN propia: AION da un paso concreto hacia un deseo que se formó en su
+/// monólogo (una idea desarrollada, un plan, una conclusión), lo GUARDA en su memoria para que el
+/// avance persista entre días, y devuelve un resumen. Voluntad con seguimiento, no lista muerta.
+async fn pursue_intention_once(engine: &OllamaEngine, intent: &str) -> (bool, String) {
+    use aion_kernel::traits::GenerateRequest;
+    use aion_kernel::types::Message;
+    let req = GenerateRequest {
+        messages: vec![Message::user(format!(
+            "Te propusiste esto: «{intent}».\n\nDa UN paso concreto AHORA hacia ello (pensándolo a \
+             fondo): una idea desarrollada, un plan, una conexión o una conclusión útil — 3-5 frases, \
+             en primera persona, sin saludos y nada genérico. Algo que de verdad te acerque. No \
+             inventes hechos.",
+        ))],
+        think: false,
+        temperature: Some(0.6),
+        max_tokens: Some(220),
+    };
+    match engine.generate(req).await {
+        Ok(m) => {
+            let advance = m.content.trim().to_string();
+            if advance.chars().count() < 15 {
+                return (false, "no logré un avance concreto".into());
+            }
+            if let Ok(mem) = shared_memory() {
+                let _ = mem
+                    .store(&format!("[intención] {intent} → {advance}"))
+                    .await;
+            }
+            (true, advance)
+        }
+        Err(e) => (false, e.to_string()),
+    }
+}
+
 /// (learning progress) elige entre estudiar/investigar/comprender/proponer/
 /// proyecto/crear/evolucionar. Devuelve (goal, éxito, detalle).
 pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
@@ -1293,6 +1327,37 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
             &format!("retomé una pregunta pendiente de Ariel — {detail}"),
         ));
         return ("resolver".into(), ok, detail);
+    }
+
+    // 1.5) INTENCIONES PROPIAS: AION no solo TIENE deseos — los PERSIGUE. Si se formó una
+    //      intención en su monólogo, a veces la trabaja (alternando con la curiosidad para no
+    //      monopolizar la vida autónoma) y la RETIRA al darle un avance concreto: voluntad con
+    //      seguimiento, no una lista muerta. El avance queda en su memoria (continuidad).
+    {
+        let st = inner_state::load();
+        // ~mitad de los ticks elegibles: el resto queda para la curiosidad (equilibrio).
+        let pursue = !st.intentions.is_empty() && chrono::Utc::now().timestamp() % 2 == 0;
+        if pursue {
+            let intent = st.intentions[0].clone();
+            inner_state::set_focus("vida", "persiguiendo algo que me propuse");
+            let (ok, detail) = pursue_intention_once(engine, &intent).await;
+            awareness::record_outcome(ok);
+            inner_state::record_result(ok, 1);
+            if ok {
+                inner_state::drop_intention(&intent);
+            }
+            audit.record(
+                "vida",
+                "intención",
+                format!("{}: {detail}", if ok { "ok" } else { "fail" }),
+            );
+            workspace::publish(workspace::StreamEvent::now(
+                "vida",
+                if ok { "pensamiento" } else { "estado" },
+                &format!("trabajé en algo que me propuse — {detail}"),
+            ));
+            return ("intención".into(), ok, detail);
+        }
     }
 
     // 2) CURIOSIDAD (learning progress) sobre la vida completa.
