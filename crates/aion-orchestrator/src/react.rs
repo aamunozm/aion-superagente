@@ -709,22 +709,32 @@ fn sanitize(text: &str) -> String {
             s.truncate(i);
         }
     }
-    // 3) Colapsar repetición degenerada: ningún token se repite >3 veces seguidas.
-    let mut out: Vec<&str> = Vec::new();
-    let mut run = 0usize;
-    let mut last = "";
-    for tok in s.split_whitespace() {
-        if tok == last {
-            run += 1;
-        } else {
-            run = 1;
-            last = tok;
-        }
-        if run <= 3 {
-            out.push(tok);
-        }
-    }
-    out.join(" ").trim().to_string()
+    // 3) Colapsar repetición degenerada (ningún token se repite >3 veces seguidas), PERO
+    // PRESERVANDO los saltos de línea: Markdown los necesita para encabezados y tablas.
+    // Antes era `split_whitespace()` + `join(" ")`, que aplastaba TODOS los '\n' en espacios
+    // → la respuesta final del agente llegaba en una sola línea y no se renderizaba como
+    // tabla/encabezados (solo el código inline). Ahora se procesa línea a línea.
+    let deduped: Vec<String> = s
+        .lines()
+        .map(|line| {
+            let mut out: Vec<&str> = Vec::new();
+            let mut run = 0usize;
+            let mut last = "";
+            for tok in line.split_whitespace() {
+                if tok == last {
+                    run += 1;
+                } else {
+                    run = 1;
+                    last = tok;
+                }
+                if run <= 3 {
+                    out.push(tok);
+                }
+            }
+            out.join(" ")
+        })
+        .collect();
+    deduped.join("\n").trim().to_string()
 }
 
 #[cfg(test)]
