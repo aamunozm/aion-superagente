@@ -112,6 +112,24 @@ impl WebClient {
         Ok(parse_ddg_results(&body, limit))
     }
 
+    /// DuckDuckGo LITE (POST). Endpoint minimalista, más estable y menos bloqueado que el html:
+    /// 2ª fuente web para que la cobertura sobreviva si el html limita por carga.
+    async fn search_ddg_lite(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let resp = self
+            .http
+            .post("https://lite.duckduckgo.com/lite/")
+            .header("Accept-Language", "es-ES,es;q=0.9,en;q=0.8")
+            .form(&[("q", query)])
+            .send()
+            .await
+            .map_err(|e| AionError::Internal(format!("ddg-lite falló: {e}")))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| AionError::Internal(format!("ddg-lite cuerpo inválido: {e}")))?;
+        Ok(parse_ddg_lite_results(&body, limit))
+    }
+
     /// DuckDuckGo Instant Answer (API JSON). Endpoint distinto, menos propenso a
     /// bloqueo; da un resumen + temas relacionados que ENLAZAN a sitios reales
     /// (no solo Wikipedia). Diversifica las fuentes.
@@ -211,8 +229,14 @@ impl WebClient {
         if let Some(arr) = json["results"].as_array() {
             for w in arr.iter().take(limit) {
                 let title = w["title"].as_str().unwrap_or("").to_string();
-                let u = w["primary_location"]["landing_page_url"]
+                // Prioriza el PDF/URL de ACCESO ABIERTO (legible: fetch_readable extrae PDF) sobre
+                // la landing page del editor (suele ser de PAGO y sin texto). Así los papers se
+                // leen de verdad en vez de rendir "NADA".
+                let u = w["best_oa_location"]["pdf_url"]
                     .as_str()
+                    .or_else(|| w["open_access"]["oa_url"].as_str())
+                    .or_else(|| w["best_oa_location"]["landing_page_url"].as_str())
+                    .or_else(|| w["primary_location"]["landing_page_url"].as_str())
                     .or_else(|| w["doi"].as_str())
                     .or_else(|| w["id"].as_str())
                     .unwrap_or("")
@@ -225,10 +249,18 @@ impl WebClient {
                     .map(|y| y.to_string())
                     .unwrap_or_default();
                 let cites = w["cited_by_count"].as_i64().unwrap_or(0);
+                // El ABSTRACT reconstruido va en el snippet: si el PDF no se pudiera leer, el
+                // lector usa el abstract como respaldo (el paper contribuye igual).
+                let abs = openalex_abstract(w);
+                let snippet = if abs.chars().count() > 40 {
+                    format!("Paper académico ({year}) · {cites} citas. {abs}")
+                } else {
+                    format!("Paper académico ({year}) · {cites} citas")
+                };
                 out.push(SearchResult {
                     title,
                     url: u,
-                    snippet: format!("Paper académico ({year}) · {cites} citas"),
+                    snippet,
                     source: "académico".into(),
                 });
             }
@@ -363,8 +395,9 @@ impl WebClient {
     /// por familia. Fail-soft: una fuente caída/lenta no vacía el resultado.
     pub async fn search_deep(&self, query: &str, limit: usize) -> Vec<SearchResult> {
         let per = 6usize;
-        let (ddg, oa, hn, se, gh, rd, yt) = tokio::join!(
+        let (ddg, lite, oa, hn, se, gh, rd, yt) = tokio::join!(
             self.search_ddg(query, per * 2),
+            self.search_ddg_lite(query, per * 2),
             self.search_openalex(query, per),
             self.search_hackernews(query, per),
             self.search_stackexchange(query, per),
@@ -378,7 +411,8 @@ impl WebClient {
             std::collections::HashMap::new();
         // ROUND-ROBIN entre fuentes: toma 1 de cada una por turno (web, académico, foro, código,
         // vídeo…) en vez de encadenar (que dejaba que DDG llenara el cupo antes de llegar a las
-        // demás). Así el resultado es DIVERSO de verdad, no dominado por un solo motor.
+        // demás). Así el resultado es DIVERSO de verdad, no dominado por un solo motor. DDG html y
+        // lite van como dos fuentes web: si una se limita por carga, la otra mantiene la cobertura.
         let pools: Vec<Vec<SearchResult>> = vec![
             ddg.unwrap_or_default(),
             oa.unwrap_or_default(),
@@ -387,6 +421,7 @@ impl WebClient {
             gh.unwrap_or_default(),
             rd.unwrap_or_default(),
             yt.unwrap_or_default(),
+            lite.unwrap_or_default(),
         ];
         let depth = pools.iter().map(|p| p.len()).max().unwrap_or(0);
         'fill: for col in 0..depth {
@@ -845,6 +880,71 @@ fn weather_desc(code: u64) -> &'static str {
         95..=99 => "tormenta",
         _ => "condiciones variables",
     }
+}
+
+/// Reconstruye el abstract de un work de OpenAlex desde su `abstract_inverted_index`
+/// ({palabra: [posiciones]}). Vacío si no lo trae. Sirve de respaldo cuando el PDF no se lee.
+fn openalex_abstract(w: &serde_json::Value) -> String {
+    let Some(inv) = w["abstract_inverted_index"].as_object() else {
+        return String::new();
+    };
+    let mut words: Vec<(usize, &str)> = Vec::new();
+    for (word, poss) in inv {
+        if let Some(arr) = poss.as_array() {
+            for p in arr {
+                if let Some(i) = p.as_u64() {
+                    words.push((i as usize, word.as_str()));
+                }
+            }
+        }
+    }
+    words.sort_by_key(|(i, _)| *i);
+    words
+        .into_iter()
+        .map(|(_, w)| w)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(600)
+        .collect()
+}
+
+/// Parsea los resultados de DuckDuckGo LITE (lite.duckduckgo.com): tabla simple con anclas
+/// `result-link`. Más estable y menos bloqueada que el endpoint html — buena 2ª fuente web.
+fn parse_ddg_lite_results(html: &str, limit: usize) -> Vec<SearchResult> {
+    let mut out = Vec::new();
+    for block in html.split("result-link").skip(1) {
+        let href = block
+            .find("href=\"")
+            .map(|i| &block[i + 6..])
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("");
+        let url = if let Some(i) = href.find("uddg=") {
+            percent_decode(href[i + 5..].split('&').next().unwrap_or(""))
+        } else if let Some(rest) = href.strip_prefix("//") {
+            format!("https://{rest}")
+        } else {
+            href.to_string()
+        };
+        let title = block
+            .find('>')
+            .map(|i| &block[i + 1..])
+            .and_then(|s| s.split("</a>").next())
+            .map(strip_html_tags)
+            .unwrap_or_default();
+        if url.starts_with("http") && !url.contains("duckduckgo.com") {
+            out.push(SearchResult {
+                title: title.trim().to_string(),
+                url,
+                snippet: String::new(),
+                source: "web".into(),
+            });
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Extrae el texto de un PDF (bytes en memoria). En hilo BLOQUEANTE (parseo CPU-bound) y bajo

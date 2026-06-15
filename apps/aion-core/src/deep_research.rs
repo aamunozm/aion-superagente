@@ -66,11 +66,16 @@ where
         "action",
         "Buscando en múltiples fuentes (web, académico, foros, código, vídeo)…",
     );
-    let searches = angles
-        .iter()
-        .map(|a| web.search_deep(a, 10))
-        .collect::<Vec<_>>();
-    let per_angle = futures_util::future::join_all(searches).await;
+    // ESCALONADO (no ráfaga): lanzar las 6 búsquedas a la vez gatillaba el rate-limit de DDG
+    // (sobre todo en varias investigaciones seguidas). Secuencial con una pausa breve es gentil
+    // con los buscadores y apenas cuesta tiempo (el cuello de botella es la LECTURA, no la búsqueda).
+    let mut per_angle: Vec<Vec<SearchResult>> = Vec::new();
+    for (i, a) in angles.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        }
+        per_angle.push(web.search_deep(a, 10).await);
+    }
     let mut sources: Vec<SearchResult> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut host_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -212,10 +217,19 @@ async fn read_source(
 ) -> Option<Note> {
     // Lectura PROFUNDA: presupuesto amplio (12k) + soporte PDF (fuentes académicas). Antes
     // fetch_text recortaba a 4k y no leía PDFs → muchas fuentes rendían "NADA".
-    let text = web.fetch_readable(&sr.url, 12_000).await.ok()?;
-    if text.chars().count() < 80 {
-        return None; // página sin texto útil
-    }
+    let fetched = web
+        .fetch_readable(&sr.url, 12_000)
+        .await
+        .unwrap_or_default();
+    let text = if fetched.chars().count() >= 80 {
+        fetched
+    } else if sr.snippet.chars().count() >= 120 {
+        // No se pudo leer la página (PDF de pago, muro, JS): usa el abstract/snippet como
+        // RESPALDO para que la fuente (sobre todo papers académicos) contribuya igualmente.
+        sr.snippet.clone()
+    } else {
+        return None; // ni página ni abstract útiles
+    };
     let req = GenerateRequest {
         messages: vec![
             Message::system(
