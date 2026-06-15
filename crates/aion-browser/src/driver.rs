@@ -346,14 +346,32 @@ impl BrowserDriver for ChromiumoxideDriver {
         let el = page.find_element(selector).await.map_err(|e| {
             AionError::Internal(format!("no encontré el elemento «{selector}»: {e}"))
         })?;
+        // Traer el elemento a la vista evita clics que cuelgan por estar fuera de pantalla.
+        let _ = el.scroll_into_view().await;
         if human_mode() {
             // Pausa humana antes de actuar (un humano no hace clic en 0 ms tras ver el elemento).
             tokio::time::sleep(std::time::Duration::from_millis(220)).await;
         }
-        el.click()
-            .await
-            .map_err(|e| AionError::Internal(format!("no pude hacer clic: {e}")))?;
-        let _ = page.wait_for_navigation().await;
+        // Click con TECHO de tiempo: si el elemento está cubierto por un overlay (banner de
+        // cookies, modal) el CDP puede colgarse ~30 s. Mejor fallar en 10 s para que el agente
+        // cambie de estrategia (cerrar el overlay, otra acción) en vez de quedarse bloqueado.
+        match tokio::time::timeout(std::time::Duration::from_secs(10), el.click()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(AionError::Internal(format!("no pude hacer clic: {e}"))),
+            Err(_) => {
+                return Err(AionError::Internal(
+                    "el clic tardó demasiado (elemento cubierto o no interactivo); \
+                     prueba cerrar el aviso de cookies o usar otra acción"
+                        .into(),
+                ))
+            }
+        }
+        // La navegación tras el clic puede no ocurrir (acción JS/overlay): no esperes de más.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            page.wait_for_navigation(),
+        )
+        .await;
         Ok(())
     }
 
