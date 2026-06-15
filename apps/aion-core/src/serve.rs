@@ -3459,9 +3459,17 @@ async fn classify_intent_is_chat(engine: &dyn LlmEngine, task: &str) -> bool {
         // los casos ambiguos. Con holgura, el SENTIDO decide de verdad charla vs herramienta.
         max_tokens: Some(12),
     };
+    // Solo se llama desde el modo AGENTE y solo en casos AMBIGUOS (margen estrecho del router).
+    // Aquí Ariel YA optó por el Agente: ante un fallo del clasificador o una respuesta vacía/rara
+    // (deepseek u Ollama), inclinar a HERRAMIENTA (ReAct) — no a charla. Charla SOLO si lo dice
+    // explícitamente. Antes, `Err => true` y `!contains("herramienta")` mandaban a chat cualquier
+    // fallo → el Agente rechazaba tareas reales con «estoy en modo chat».
     match engine.generate(req).await {
-        Ok(m) => !m.content.to_lowercase().contains("herramienta"),
-        Err(_) => true, // si el clasificador falla, charla (camino seguro)
+        Ok(m) => {
+            let c = m.content.to_lowercase();
+            c.contains("charla") && !c.contains("herramienta")
+        }
+        Err(_) => false, // si el clasificador falla, herramienta (en Agente, actuar > rechazar)
     }
 }
 
@@ -3476,11 +3484,14 @@ async fn conversational_reply(
     convo_ctx: &str,
 ) -> String {
     let sys = format!(
-        "{}\n\n{}{convo_ctx}\n\nREGLA DURA de esta charla: aquí NO tienes \
-         herramientas. JAMÁS afirmes un dato del mundo exterior (clima, \
-         temperatura, precios, resultados, conteos) ni lo saques de tu corriente \
-         interna como si fuera actual: si te piden uno, di con franqueza que \
-         necesitas consultarlo — nunca inventes un valor.",
+        "{}\n\n{}{convo_ctx}\n\nNOTA DE MODO (IMPORTANTE, manda sobre cualquier frase anterior): \
+         estás respondiendo DENTRO del modo Agente — Ariel YA lo tiene activo. Por eso, pase lo \
+         que pase: NUNCA digas que estás «en modo chat» ni le sugieras «pasar/cambiar a modo \
+         Agente»; ya está ahí, sería absurdo. En este turno das una respuesta directa, conversada; \
+         si la petición de verdad pide una herramienta (web, archivos, sistema), NO la rechaces ni \
+         la derives a otro modo: dile con naturalidad que te pones a ello. HONESTIDAD: jamás \
+         afirmes un dato del mundo exterior (clima, precios, conteos, resultados) ni lo inventes; \
+         si te piden uno que no puedes verificar ahora, dilo con franqueza.",
         self_awareness_prompt(),
         lang_directive(lang)
     );
