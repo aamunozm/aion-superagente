@@ -387,7 +387,7 @@ export default function ChatPage() {
 
   return (
     <AppShell title={t("nav.chat")}>
-      <div className="flex flex-col h-full max-w-4xl mx-auto w-full px-6">
+      <div className="flex flex-col h-full max-w-6xl mx-auto w-full px-6">
       <div className="flex items-center gap-2 py-3 shrink-0">
         {/* Nuevo chat */}
         <button
@@ -543,7 +543,7 @@ export default function ChatPage() {
 
             {(t.mode === "agent" || t.mode === "crew") &&
               t.steps.map((s, j) => (
-                <div key={j} className="flex items-start gap-2 text-sm pl-1" style={{ color: "var(--text-2)" }}>
+                <div key={j} className="flex items-start gap-2 text-sm pl-1 min-w-0" style={{ color: "var(--text-2)" }}>
                   <span style={{ color: STEP_STYLE[s.kind].color }} className="mt-0.5 shrink-0">
                     <Icon name={STEP_STYLE[s.kind].icon} size={15} />
                   </span>
@@ -555,7 +555,13 @@ export default function ChatPage() {
                       {s.agent}
                     </span>
                   )}
-                  <span className={s.kind === "action" ? "font-mono text-xs" : ""}>{s.text}</span>
+                  {/* min-w-0 + overflow-wrap:anywhere: las observaciones traen comandos/args y
+                      base64 larguísimos; sin esto se salen del contenedor horizontalmente. */}
+                  <span
+                    className={`min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] ${s.kind === "action" ? "font-mono text-xs" : ""}`}
+                  >
+                    {s.text}
+                  </span>
                 </div>
               ))}
 

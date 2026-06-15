@@ -96,6 +96,10 @@
     font-size: 14.5px;
     line-height: 1.55;
     color: var(--text-1);
+    /* Cadenas largas (URLs, args de comandos, base64) se ajustan dentro de la burbuja
+       en vez de desbordarla horizontalmente. */
+    overflow-wrap: anywhere;
+    min-width: 0;
   }
   .msg-user {
     border-radius: 14px;
