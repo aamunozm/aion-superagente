@@ -458,6 +458,8 @@ pub async fn distill_once(engine: &OllamaEngine) -> (bool, String) {
 
 #[cfg(test)]
 mod tests {
+    // Aserciones de invariantes entre constantes (cuarentena < umbral activo, etc.).
+    #![allow(clippy::assertions_on_constants)]
     use super::*;
 
     #[test]

@@ -546,11 +546,13 @@ pub async fn reflect_once(engine: &OllamaEngine) -> (bool, String) {
 
 #[cfg(test)]
 mod tests {
+    // Aserciones de invariantes entre constantes de gobernanza (cuarentena, refuerzo, umbrales).
+    #![allow(clippy::assertions_on_constants)]
     use super::*;
 
     #[test]
     fn active_filters_retired_and_low_confidence() {
-        let rules = vec![
+        let rules = [
             Rule {
                 id: "a".into(),
                 at: 0,

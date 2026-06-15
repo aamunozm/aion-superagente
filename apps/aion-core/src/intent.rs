@@ -139,12 +139,10 @@ pub fn warm() {
 mod tests {
     use super::*;
 
-    #[test]
-    fn margin_constant_is_sane() {
-        // Un margen demasiado grande mandaría casi todo al LLM (lento); demasiado pequeño,
-        // decisiones duras con poca confianza. Debe estar en una banda razonable.
-        assert!(DECISIVE_MARGIN > 0.0 && DECISIVE_MARGIN < 0.2);
-    }
+    // Un margen demasiado grande mandaría casi todo al LLM (lento); demasiado pequeño,
+    // decisiones duras con poca confianza. Debe estar en una banda razonable. Aserción en
+    // tiempo de COMPILACIÓN (no un test de runtime: clippy rechaza `assert!` sobre constantes).
+    const _: () = assert!(DECISIVE_MARGIN > 0.0 && DECISIVE_MARGIN < 0.2);
 
     #[test]
     fn max_sim_ignores_empty_and_mismatched() {

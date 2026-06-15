@@ -78,6 +78,9 @@ pub fn hedge(confidence: u8) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    // Varias aserciones verifican INVARIANTES entre constantes (umbrales) — clippy las marca
+    // como «assertion on constants»; aquí es justo lo que queremos comprobar a propósito.
+    #![allow(clippy::assertions_on_constants)]
     use super::*;
 
     #[test]
