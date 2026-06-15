@@ -1535,6 +1535,148 @@ impl Tool for BrowserSeeTool {
     }
 }
 
+/// Desplaza la página abierta (para contenido largo / carga progresiva).
+pub struct BrowserScrollTool {
+    driver: Arc<dyn BrowserDriver>,
+}
+impl BrowserScrollTool {
+    pub fn new(driver: Arc<dyn BrowserDriver>) -> Self {
+        Self { driver }
+    }
+}
+#[async_trait]
+impl Tool for BrowserScrollTool {
+    fn name(&self) -> &str {
+        "browser_scroll"
+    }
+    fn description(&self) -> &str {
+        "Desplaza la página abierta. Entrada: \"down\" (por defecto), \"up\", \"top\", \
+         \"bottom\", o \"text:<texto>\" para ir hasta donde aparezca ese texto. Útil en \
+         páginas largas o con carga al hacer scroll. Devuelve el texto + elementos tras moverse."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let dir = if input.trim().is_empty() {
+            "down"
+        } else {
+            input.trim()
+        };
+        self.driver.scroll(dir).await.map_err(|e| e.to_string())?;
+        let s = self.driver.snapshot().await.map_err(|e| e.to_string())?;
+        Ok(format!("desplazado ({dir}).\n{}", format_snapshot(&s)))
+    }
+}
+
+/// Extrae el CONTENIDO principal legible de la página (sin menús/anuncios), estilo lectura.
+pub struct BrowserExtractTool {
+    driver: Arc<dyn BrowserDriver>,
+}
+impl BrowserExtractTool {
+    pub fn new(driver: Arc<dyn BrowserDriver>) -> Self {
+        Self { driver }
+    }
+}
+#[async_trait]
+impl Tool for BrowserExtractTool {
+    fn name(&self) -> &str {
+        "browser_extract"
+    }
+    fn description(&self) -> &str {
+        "Extrae el CONTENIDO principal de la página abierta (artículo/producto), limpio de \
+         menús, barras y anuncios. Úsalo para LEER el texto que importa, en vez de browser_read \
+         (que trae también la navegación). Sin entrada."
+    }
+    async fn run(&self, _input: &str) -> Result<String, String> {
+        self.driver.extract().await.map_err(|e| e.to_string())
+    }
+}
+
+/// Vuelve a la página anterior del historial del navegador.
+pub struct BrowserBackTool {
+    driver: Arc<dyn BrowserDriver>,
+}
+impl BrowserBackTool {
+    pub fn new(driver: Arc<dyn BrowserDriver>) -> Self {
+        Self { driver }
+    }
+}
+#[async_trait]
+impl Tool for BrowserBackTool {
+    fn name(&self) -> &str {
+        "browser_back"
+    }
+    fn description(&self) -> &str {
+        "Vuelve a la página anterior (como el botón Atrás del navegador). Sin entrada. \
+         Devuelve el texto + elementos de la página a la que regresa."
+    }
+    async fn run(&self, _input: &str) -> Result<String, String> {
+        self.driver.back().await.map_err(|e| e.to_string())?;
+        let s = self.driver.snapshot().await.map_err(|e| e.to_string())?;
+        Ok(format!("volví atrás.\n{}", format_snapshot(&s)))
+    }
+}
+
+/// Extrae DATOS ESTRUCTURADOS (JSON) de la página abierta usando el LLM local. Núcleo de la
+/// investigación de mercado: el agente abre una página (producto, competidor, directorio), pide
+/// los campos que necesita y los obtiene en JSON; repitiendo por varias páginas arma una tabla.
+pub struct ExtractDataTool {
+    driver: Arc<dyn BrowserDriver>,
+    engine: Arc<dyn LlmEngine>,
+}
+impl ExtractDataTool {
+    pub fn new(driver: Arc<dyn BrowserDriver>, engine: Arc<dyn LlmEngine>) -> Self {
+        Self { driver, engine }
+    }
+}
+#[async_trait]
+impl Tool for ExtractDataTool {
+    fn name(&self) -> &str {
+        "extract_data"
+    }
+    fn description(&self) -> &str {
+        "Extrae DATOS ESTRUCTURADOS (JSON) de la página abierta en el navegador. Entrada: qué \
+         campos quieres, en lenguaje natural. P. ej. \"nombre del producto, precio en EUR, \
+         valoración, nº de reseñas\" o \"lista de empresas con nombre, web y teléfono\". \
+         Devuelve JSON (objeto, o array si hay varios ítems). Úsalo tras browser_open para \
+         construir tablas/informes de mercado."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        if input.trim().is_empty() {
+            return Err("dime qué campos extraer (p. ej. \"nombre, precio, rating\")".into());
+        }
+        let content = self.driver.extract().await.map_err(|e| e.to_string())?;
+        if content.trim().is_empty() {
+            return Err("no hay contenido; abre una página con browser_open primero".into());
+        }
+        // Acota el contenido para el contexto del modelo de fondo.
+        let content: String = content.chars().take(8000).collect();
+        let prompt = format!(
+            "Eres un extractor de datos. Del CONTENIDO de una página web extrae exactamente: {campos}.\n\
+             Reglas: devuelve SOLO JSON válido (un objeto, o un array de objetos si hay varios \
+             ítems). Usa null si un dato no aparece. NO inventes. Nada de texto fuera del JSON.\n\n\
+             CONTENIDO:\n{content}",
+            campos = input.trim(),
+        );
+        let msg = self
+            .engine
+            .generate(GenerateRequest {
+                messages: vec![Message::user(prompt)],
+                think: false,
+                temperature: Some(0.1),
+                max_tokens: Some(1024),
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        // Limpia fences de código si el modelo los añade.
+        let out = msg.content.trim();
+        let out = out
+            .strip_prefix("```json")
+            .or_else(|| out.strip_prefix("```"))
+            .unwrap_or(out);
+        let out = out.strip_suffix("```").unwrap_or(out);
+        Ok(out.trim().to_string())
+    }
+}
+
 /// Inicia sesión en la página abierta usando las credenciales GUARDADAS del usuario
 /// (bóveda en el Llavero). El agente NUNCA ve la contraseña: esta herramienta solo
 /// rellena el formulario y confirma; los valores van directos al navegador.

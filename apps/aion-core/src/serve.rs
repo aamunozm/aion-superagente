@@ -61,6 +61,19 @@ fn active_engine() -> Arc<dyn LlmEngine> {
     build_engine(&crate::provider::load())
 }
 
+/// Motor LLM para tareas de FONDO (extracción de datos, utilidades). `background_model()` es
+/// SIEMPRE un modelo LOCAL (Ollama): si hay uno, las tareas de fondo corren ahí (gratis y
+/// rápido) aunque el chat use una API externa — y así no le enviamos a DeepSeek un nombre de
+/// modelo local (que devolvía 400). Si no hay modelo local, cae al motor principal configurado.
+pub(crate) fn background_engine() -> Arc<dyn LlmEngine> {
+    let cfg = crate::provider::load();
+    let local = cfg.background_model();
+    if !local.trim().is_empty() {
+        return Arc::new(OllamaEngine::new(OllamaEngine::base_url_from_env(), &local));
+    }
+    build_engine(&cfg)
+}
+
 /// Construye el motor LLM a partir de la configuración del proveedor.
 fn build_engine(cfg: &crate::provider::ProviderConfig) -> Arc<dyn LlmEngine> {
     if cfg.kind == "external" && !cfg.api_key.is_empty() && !cfg.base_url.is_empty() {
@@ -1662,6 +1675,19 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::BrowserSeeTool::new(
             browser.clone(),
         )));
+        tools.register(Arc::new(crate::agent_tools::BrowserScrollTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::BrowserExtractTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::BrowserBackTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::ExtractDataTool::new(
+            browser.clone(),
+            background_engine(),
+        )));
         tools.register(Arc::new(crate::agent_tools::CredentialLoginTool::new(
             browser,
         )));
@@ -2033,6 +2059,19 @@ async fn crew(
         )));
         tools.register(Arc::new(crate::agent_tools::BrowserSeeTool::new(
             browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::BrowserScrollTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::BrowserExtractTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::BrowserBackTool::new(
+            browser.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::ExtractDataTool::new(
+            browser.clone(),
+            background_engine(),
         )));
         tools.register(Arc::new(crate::agent_tools::CredentialLoginTool::new(
             browser,
