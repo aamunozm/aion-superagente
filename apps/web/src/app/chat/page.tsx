@@ -141,6 +141,14 @@ export default function ChatPage() {
       return [...prev, { prompt: "", mode: "chat", thinking: "", steps: [], answer: text, reach: { kind, at } }];
     });
   }
+  // Auto-scroll al fondo ante CUALQUIER mensaje nuevo (respuesta, streaming token a token, o un
+  // mensaje que AION inicia por su cuenta vía polling). Con block:"end" + el padding inferior del
+  // contenedor, el último mensaje queda con un pequeño margen sobre la caja de escribir — como en
+  // todo chat. Antes el scroll solo se disparaba al enviar tú, así que los mensajes proactivos de
+  // AION quedaban cortados abajo.
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+  }, [turns]);
   // Conversaciones persistentes: id actual + lista + dropdown de historial.
   const [convoId, setConvoId] = useState<string>("");
   const [convos, setConvos] = useState<ConvoMeta[]>([]);
@@ -539,7 +547,7 @@ export default function ChatPage() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto py-5 flex flex-col gap-5">
+      <div className="flex-1 overflow-y-auto pt-5 pb-8 flex flex-col gap-5">
         {!modelReady && (
           <div
             className="card text-sm"
