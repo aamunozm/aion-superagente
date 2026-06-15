@@ -1292,6 +1292,7 @@ async fn advance_plan_once(engine: &OllamaEngine) -> (bool, String) {
                             ))
                             .await;
                     }
+                    settle_intention_for_plan(&p.id, crate::intentions::Status::Fulfilled);
                     crate::plan::clear();
                     return (true, format!("completé mi plan: {}", p.goal));
                 }
@@ -1355,6 +1356,7 @@ async fn advance_plan_once(engine: &OllamaEngine) -> (bool, String) {
                         p.goal
                     ),
                 ));
+                settle_intention_for_plan(&p.id, crate::intentions::Status::Abandoned);
                 crate::plan::clear();
                 return (
                     true,
@@ -2187,6 +2189,31 @@ fn intentions_enabled() -> bool {
     std::env::var("AION_INTENTIONS").as_deref() == Ok("1")
 }
 
+/// Salda el destino de la intención ligada a un plan que acaba de terminar, en el ÚNICO
+/// punto donde se conoce su resultado real (completado vs abandonado). Sin esto, el
+/// arbitraje no puede distinguir un plan cumplido de uno soltado y mentiría diciendo
+/// «cumplí algo que quería». Solo actúa con la capa activa y si la intención `Active`
+/// es justo la de ESTE plan (invariante: una Active ↔ un plan).
+fn settle_intention_for_plan(plan_id: &str, status: crate::intentions::Status) {
+    if !intentions_enabled() {
+        return;
+    }
+    if let Some(act) = crate::intentions::active() {
+        if act.plan_id.as_deref() == Some(plan_id) {
+            crate::intentions::set_status(&act.id, status);
+            // Solo el cierre HONESTO (cumplido de verdad) entra a la corriente → diario.
+            // El abandono ya lo cuenta la rama de abandono del plan; no lo duplicamos.
+            if status == crate::intentions::Status::Fulfilled {
+                workspace::publish(workspace::StreamEvent::now(
+                    "vida",
+                    "pensamiento",
+                    &format!("cumplí algo que quería: «{}»", act.want),
+                ));
+            }
+        }
+    }
+}
+
 /// Mapea la etiqueta de *drive* del LLM al enum (default: curiosidad).
 fn parse_drive(s: &str) -> crate::intentions::Drive {
     use crate::intentions::Drive;
@@ -2327,15 +2354,14 @@ async fn materialize_intention(engine: &OllamaEngine, want: &str, id: &str) -> O
 /// - Si NO hay plan activo: materializa la intención `Open` de mayor peso; si no hay
 ///   ninguna abierta, hace nacer una (`form_intention_once`) y la materializa.
 async fn intention_arbiter(engine: &OllamaEngine) -> Option<(String, bool, String)> {
-    // Reconciliación: una Active sin plan = su plan terminó → cúmplela.
+    // Reconciliación (red de seguridad): el resultado real (Fulfilled/Abandoned) lo salda
+    // `advance_plan_once` donde SE CONOCE. Si aún así encontramos una intención `Active` sin
+    // plan, su plan desapareció por una vía inesperada (clear externo, corte a medias): NO
+    // afirmamos que se cumplió —sería mentira— sino que la devolvemos a `Open` para
+    // retomarla más tarde (acotada por sus `revisits`).
     if crate::plan::active().is_none() {
         if let Some(act) = crate::intentions::active() {
-            crate::intentions::set_status(&act.id, crate::intentions::Status::Fulfilled);
-            workspace::publish(workspace::StreamEvent::now(
-                "vida",
-                "pensamiento",
-                &format!("cumplí algo que quería: «{}»", act.want),
-            ));
+            crate::intentions::set_status(&act.id, crate::intentions::Status::Open);
         }
     }
     // Con un plan vivo, deja que el flujo normal lo avance (no dupliques trabajo).

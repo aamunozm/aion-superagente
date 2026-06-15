@@ -172,6 +172,24 @@ pub fn vitals_note_cached() -> String {
     }
 }
 
+/// Extrae el % de batería de la salida de `pmset -g batt`. El "80%" NO está aislado:
+/// vive en "-InternalBattery-0 (id=…)\t80%; charging; …", así que hay que tomar los
+/// DÍGITOS pegados al '%', no parsear el segmento entero (bug: el prefijo rompía el
+/// parse y la batería quedaba siempre en None → el gateo por batería no disparaba).
+/// `None` si no hay batería (Mac de escritorio: no aparece el patrón).
+fn parse_battery_pct(s: &str) -> Option<u8> {
+    let pos = s.find('%')?;
+    let digits: String = s[..pos]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    digits.parse::<u8>().ok().map(|p| p.min(100))
+}
+
 async fn read_host_vitals_uncached() -> HostVitals {
     let mut v = HostVitals::default();
 
@@ -183,13 +201,7 @@ async fn read_host_vitals_uncached() -> HostVitals {
     {
         let s = String::from_utf8_lossy(&out.stdout);
         v.on_ac = s.contains("AC Power");
-        if let Some(pct) = s
-            .split(';')
-            .find_map(|seg| seg.trim().strip_suffix('%'))
-            .and_then(|n| n.trim().parse::<u8>().ok())
-        {
-            v.battery_pct = Some(pct.min(100));
-        }
+        v.battery_pct = parse_battery_pct(&s);
     }
 
     // Presión térmica: `pmset -g therm` → línea "CPU_Speed_Limit = 100".
@@ -352,6 +364,24 @@ mod tests {
         assert_eq!(weather_desc(0), "despejado");
         assert_eq!(weather_desc(95), "tormenta");
         assert_eq!(weather_desc(1234), "tiempo variable");
+    }
+
+    #[test]
+    fn battery_pct_parses_real_pmset_output() {
+        // Formato real de macOS (el % vive pegado a basura, no aislado).
+        let real = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=27983971)\t80%; charging; 0:45 remaining present: true";
+        assert_eq!(parse_battery_pct(real), Some(80));
+        // 100% y batería baja.
+        assert_eq!(
+            parse_battery_pct(" -InternalBattery-0 (id=1)\t100%; charged;"),
+            Some(100)
+        );
+        assert_eq!(
+            parse_battery_pct(" -InternalBattery-0 (id=1)\t7%; discharging;"),
+            Some(7)
+        );
+        // Mac de escritorio (sin batería): no hay patrón → None.
+        assert_eq!(parse_battery_pct("Now drawing from 'AC Power'\n"), None);
     }
 
     #[test]
