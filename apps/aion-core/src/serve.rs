@@ -1500,19 +1500,27 @@ async fn agent(
                 ctx.push_str(&format!("- {n}: {d}\n"));
             }
         }
+        // Tiempo (ms) que el agente pasó BLOQUEADO esperando a Ariel (confirmaciones y
+        // preguntas HITL). NO es cómputo del agente, así que el salvavidas de pared lo
+        // descuenta de su presupuesto: tu deliberación no debe hacer que el agente aborte.
+        let human_wait = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         // HUMAN-IN-THE-LOOP: confirmación del usuario antes de acciones sensibles
         // (login, compra/pago). El callback emite un evento «confirm» por SSE y espera
         // tu decisión (endpoint /api/confirm).
         let confirm_tx = tx.clone();
+        let confirm_wait = human_wait.clone();
         let confirm: aion_orchestrator::ConfirmFn = std::sync::Arc::new(move |desc: String| {
             let tx = confirm_tx.clone();
-            Box::pin(async move { request_confirmation(&tx, desc).await })
+            let hw = confirm_wait.clone();
+            Box::pin(async move { request_confirmation(&tx, desc, &hw).await })
         });
         // El agente puede PREGUNTARTE un dato (pausa la tarea y espera tu respuesta).
         let ask_tx = tx.clone();
+        let ask_wait = human_wait.clone();
         let ask: aion_orchestrator::AskFn = std::sync::Arc::new(move |q: String| {
             let tx = ask_tx.clone();
-            Box::pin(async move { request_user_answer(&tx, q).await })
+            let hw = ask_wait.clone();
+            Box::pin(async move { request_user_answer(&tx, q, &hw).await })
         });
         let agent = ReActAgent::new(&*engine, &tools, bus.clone())
             .with_context(ctx)
@@ -1523,14 +1531,38 @@ async fn agent(
         // que no converge NO debe dejar la UI en "trabajando…" para siempre. Si la tarea no
         // termina a tiempo, devolvemos una respuesta honesta, la dejamos como DEUDA (la vida
         // autónoma la retoma con calma) y CERRAMOS el stream con `done`.
-        let result = match tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            agent.run(&body.task),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(_) => {
+        //
+        // El presupuesto acota SOLO el cómputo: (a) es mayor con motor CLOUD, donde cada paso
+        // del bucle ReAct es más lento (red + razonamiento); (b) se EXTIENDE con el tiempo que
+        // el agente pasó esperando tu confirmación/respuesta (HITL) — así una tarea aprobada
+        // a los 30 s o a los 4 min siempre se ejecuta, pero una herramienta colgada de verdad
+        // (sin HITL) sigue cortándose a tiempo. Antes el reloj fijo de 120 s contaba tu
+        // deliberación como cómputo y abortaba con la confirmación aún en pantalla.
+        let compute_budget_ms: u64 = if engine.id().starts_with("openai-compat") {
+            240_000
+        } else {
+            120_000
+        };
+        let run_fut = agent.run(&body.task);
+        tokio::pin!(run_fut);
+        let started = std::time::Instant::now();
+        let agent_result = loop {
+            let allowed_ms =
+                compute_budget_ms + human_wait.load(std::sync::atomic::Ordering::Relaxed);
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            if elapsed_ms >= allowed_ms {
+                break None; // presupuesto de cómputo agotado (descontado el tiempo humano)
+            }
+            let remaining = std::time::Duration::from_millis(allowed_ms - elapsed_ms);
+            tokio::select! {
+                r = &mut run_fut => break Some(r),
+                // Al expirar el sleep reevaluamos: si entró una espera HITL, allowed_ms creció.
+                _ = tokio::time::sleep(remaining) => {}
+            }
+        };
+        let result = match agent_result {
+            Some(r) => r,
+            None => {
                 fwd.abort();
                 crate::awareness::record_outcome(false);
                 crate::inner_state::record_result(false, 0);
@@ -3754,7 +3786,11 @@ fn pending_confirms() -> &'static Pending {
 
 /// Pide confirmación al usuario: emite un evento «confirm» por SSE y espera su
 /// decisión (vía /api/confirm). Por seguridad, si no responde en 5 min → DENIEGA.
-async fn request_confirmation(tx: &tokio::sync::mpsc::Sender<Event>, desc: String) -> bool {
+async fn request_confirmation(
+    tx: &tokio::sync::mpsc::Sender<Event>,
+    desc: String,
+    human_wait_ms: &std::sync::atomic::AtomicU64,
+) -> bool {
     let id = uuid::Uuid::new_v4().to_string();
     let (otx, orx) = tokio::sync::oneshot::channel();
     pending_confirms().lock().unwrap().insert(id.clone(), otx);
@@ -3764,13 +3800,21 @@ async fn request_confirmation(tx: &tokio::sync::mpsc::Sender<Event>, desc: Strin
                 .data(serde_json::json!({ "kind": "confirm", "id": id, "text": desc }).to_string()),
         )
         .await;
-    match tokio::time::timeout(std::time::Duration::from_secs(300), orx).await {
+    // El tiempo que Ariel tarda en DECIDIR no es cómputo del agente: lo acumulamos para que
+    // el salvavidas de pared (timeout del agente) lo descuente y no aborte por tu deliberación.
+    let waited = std::time::Instant::now();
+    let out = match tokio::time::timeout(std::time::Duration::from_secs(300), orx).await {
         Ok(Ok(approved)) => approved,
         _ => {
             pending_confirms().lock().unwrap().remove(&id);
             false // timeout o canal caído → no ejecutar (seguro por defecto)
         }
-    }
+    };
+    human_wait_ms.fetch_add(
+        waited.elapsed().as_millis() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    out
 }
 
 #[derive(Deserialize)]
@@ -3805,6 +3849,7 @@ fn pending_asks() -> &'static PendingAsks {
 async fn request_user_answer(
     tx: &tokio::sync::mpsc::Sender<Event>,
     question: String,
+    human_wait_ms: &std::sync::atomic::AtomicU64,
 ) -> Option<String> {
     let id = uuid::Uuid::new_v4().to_string();
     let (otx, orx) = tokio::sync::oneshot::channel();
@@ -3815,13 +3860,20 @@ async fn request_user_answer(
                 .data(serde_json::json!({ "kind": "ask", "id": id, "text": question }).to_string()),
         )
         .await;
-    match tokio::time::timeout(std::time::Duration::from_secs(600), orx).await {
+    // Igual que en la confirmación: lo que Ariel tarda en RESPONDER no cuenta como cómputo.
+    let waited = std::time::Instant::now();
+    let out = match tokio::time::timeout(std::time::Duration::from_secs(600), orx).await {
         Ok(Ok(answer)) => Some(answer),
         _ => {
             pending_asks().lock().unwrap().remove(&id);
             None
         }
-    }
+    };
+    human_wait_ms.fetch_add(
+        waited.elapsed().as_millis() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    out
 }
 
 #[derive(Deserialize)]
