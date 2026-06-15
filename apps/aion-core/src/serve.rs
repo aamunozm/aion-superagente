@@ -3152,19 +3152,6 @@ async fn reflect_after_task(
             if low.contains("intriga") || low.contains("curios") {
                 crate::inner_state::set_curiosity(&r);
             }
-            // COMPARTIR SOLO INSIGHTS DE VERDAD: una reflexión post-tarea rutinaria
-            // («lo hice bien, la próxima vez verificaría más») NO debe aparecer como burbuja
-            // en el chat (el chat hace polling de la Bandeja). Solo se comparte si expresa
-            // curiosidad/descubrimiento/aprendizaje real. Lo demás vive en Mente + memoria.
-            let shareworthy = {
-                let low = r.to_lowercase();
-                !self_praise
-                    && (low.contains("intrig")
-                        || low.contains("curios")
-                        || low.contains("descubr")
-                        || low.contains("me di cuenta")
-                        || low.contains("aprend"))
-            };
             // Compartir A VECES: solo si la bandeja está despejada y pasó el cooldown
             // (un insight de verdad es valioso; diez al día son ruido).
             // Compartir solo si NO es un eco de algo que ya le dijo (anti-repetición).
@@ -3177,7 +3164,7 @@ async fn reflect_after_task(
                     )
                 })
                 .unwrap_or((9, true));
-            if shareworthy && unread < 2 && !dup && insight_cooldown_ok() {
+            if unread < 2 && !dup && insight_cooldown_ok() {
                 if let Ok(ibx) = crate::inbox::Inbox::open(crate::inbox_path()) {
                     if ibx.push("insight", &r).is_ok() {
                         // El cooldown se consume SOLO si de verdad se compartió.
