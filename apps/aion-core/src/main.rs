@@ -8,6 +8,7 @@
 mod a2a;
 mod agent_tools;
 mod awareness;
+mod biography;
 mod capabilities;
 mod claude_code;
 mod claude_mcp;
@@ -15,44 +16,107 @@ mod comprehension;
 mod consciousness;
 mod credentials;
 mod empathy;
+mod episodic;
 mod evals;
 mod graph;
 mod identity;
 mod inbox;
 mod ingest_queue;
 mod inner_state;
+mod intent;
 mod journal;
 mod language_detector;
 mod library;
 mod local_runtime;
 mod mcp_compact;
 mod memory_tool;
+mod metacog;
+mod metacog_eval;
 mod ollama_runtime;
 mod onboarding;
 mod pending;
+mod personality;
+mod plan;
 mod projects;
 mod prompt_store;
 mod prompts;
 mod provider;
+mod reflection;
 mod sensors;
 mod serve;
 mod skill_store;
 mod skill_tool;
+mod usermodel;
 mod web_tool;
 mod workspace;
 
 /// Escritura ATÓMICA (tmp + rename): un crash o un lector concurrente jamás ven un
 /// archivo a medias. Para todos los estados pequeños de AION (inner_state, self_model,
 /// curiosity, recortes de las corrientes…).
+///
+/// **Privacidad en disco (P0-1, endurecimiento):** toda la mente de AION es privada de
+/// Ariel — memoria, diario, autobiografía, modelo de usuario, personalidad. En Unix el
+/// archivo nace ya con 0600 (solo el dueño): nada de la mente queda world-readable para
+/// otros usuarios del Mac. El modo se fija sobre el temporal ANTES del rename, así el
+/// archivo final jamás existe con una ventana de permisos laxos.
 pub fn write_atomic(path: &std::path::Path, contents: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, contents).is_ok() {
+    #[cfg(unix)]
+    let write_res = {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(contents.as_bytes()))
+    };
+    #[cfg(not(unix))]
+    let write_res = std::fs::write(&tmp, contents);
+    if write_res.is_ok() {
         let _ = std::fs::rename(&tmp, path);
+    } else {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
+
+/// **Endurecimiento de privacidad del data dir (P0-1).** Una sola pasada al arrancar: deja
+/// el directorio de datos en 0700 (ningún otro usuario del Mac puede siquiera entrar) y los
+/// archivos existentes en 0600. Es la protección de más alto impacto y cero ruptura: el
+/// backend corre como Ariel (dueño) y los clientes (web/desktop/MCP) nunca leen estos
+/// archivos directamente —pasan por la API HTTP autenticada—, así que cerrar el disco no
+/// rompe nada. Cubre incluso `memory.jsonl`/`episodic.jsonl` (que no pasan por write_atomic).
+/// Best-effort y silencioso: si algún chmod falla (FS sin permisos Unix), no aborta el arranque.
+#[cfg(unix)]
+pub fn harden_data_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = app_data_dir();
+    // El directorio a 0700: barrera maestra — sin permiso de ejecución/lectura del dir,
+    // otro usuario no puede listar ni abrir su contenido, sea cual sea el modo de cada archivo.
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    // Y, en profundidad, cada archivo de primer nivel a 0600 (los que ya existían world-readable
+    // de antes de este endurecimiento se corrigen aquí; los nuevos ya nacen 0600).
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Ok(ft) = entry.file_type() {
+                if ft.is_file() {
+                    let _ = std::fs::set_permissions(
+                        entry.path(),
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn harden_data_dir() {}
 
 /// Como [`write_atomic`], pero deja el archivo con permisos 0600 (solo el dueño):
 /// para secretos en disco (token Bearer de Claude Code, config con `~/.claude.json`).
@@ -170,6 +234,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("self-evolve") => {
             run_self_evolve().await?;
+        }
+        Some("mature") => {
+            run_mature().await?;
+        }
+        Some("weave") => {
+            run_weave().await?;
+        }
+        Some("plan") => {
+            run_plan().await?;
+        }
+        Some("profile") => {
+            run_profile().await?;
+        }
+        Some("think") => {
+            let prompt = args[1..].join(" ");
+            run_think(&prompt).await?;
+        }
+        Some("calib") => {
+            metacog_eval::run().await?;
         }
         Some("history") => {
             run_history()?;
@@ -485,6 +568,182 @@ async fn run_evolve() -> Result<(), Box<dyn std::error::Error>> {
         "\n✅ la skill aceptada funciona: double(7) = {}",
         out.output["result"]
     );
+    Ok(())
+}
+
+/// CLI `mature`: dispara UNA maduración de la personalidad (demo). Para verla en vivo, ejecuta
+/// con `AION_MATURE_GAP_SECS=0`. Muestra el antes/después y la nueva autodescripción.
+async fn run_mature() -> Result<(), Box<dyn std::error::Error>> {
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+    println!("🧬 ANTES:\n   {}", crate::personality::summary());
+    let before = crate::personality::get().self_described.unwrap_or_default();
+    let (ok, detail) = mature_personality_once(&engine).await;
+    if ok {
+        println!("\n✅ {detail}");
+        println!("\n🧬 DESPUÉS:\n   {}", crate::personality::summary());
+        let after = crate::personality::get().self_described.unwrap_or_default();
+        if after != before && !after.is_empty() {
+            println!("\n🪞 Cómo se ve a sí mismo ahora:\n   {after}");
+        }
+    } else {
+        println!(
+            "\n(sin maduración: {}). Prueba con AION_MATURE_GAP_SECS=0 y con jornadas en el diario.",
+            if detail.is_empty() {
+                "gate temporal o poca vida vivida"
+            } else {
+                &detail
+            }
+        );
+    }
+    Ok(())
+}
+
+/// CLI `weave`: teje la autobiografía narrativa una vez (demo). Para forzarla, usa
+/// `AION_WEAVE_GAP_SECS=0`. Imprime el arco y los capítulos.
+async fn run_weave() -> Result<(), Box<dyn std::error::Error>> {
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+    let (ok, detail) = crate::biography::weave_once(&engine).await;
+    println!(
+        "📖 {}",
+        if ok {
+            detail
+        } else {
+            "sin cambios (gate temporal o poca vida en el diario)".into()
+        }
+    );
+    let b = crate::biography::load();
+    if !b.arc.trim().is_empty() {
+        println!("\nArco: {}", b.arc);
+    }
+    for c in &b.chapters {
+        println!("\n• «{}»\n  {}", c.title, c.summary);
+    }
+    Ok(())
+}
+
+/// CLI `plan`: muestra el plan activo, fuerza UN tick del planificador razonado (avanzar un
+/// paso conectado a la memoria, o constatar bloqueo → reintentar/replanificar) y muestra el
+/// estado resultante. Si no hay plan, el tick FORMA uno. Demo de Razonamiento + Autonomía (B).
+async fn run_plan() -> Result<(), Box<dyn std::error::Error>> {
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+    let print_state = |label: &str| {
+        println!("📋 {label}:");
+        match crate::plan::active() {
+            Some(p) => {
+                println!("   objetivo: «{}»  (revisiones: {})", p.goal, p.revisions);
+                for (i, s) in p.steps.iter().enumerate() {
+                    let mark = if s.done { "✓" } else { "·" };
+                    let att = if s.attempts > 0 {
+                        format!("  [intentos: {}]", s.attempts)
+                    } else {
+                        String::new()
+                    };
+                    println!("   {mark} {}. {}{att}", i + 1, s.text);
+                }
+            }
+            None => println!("   (sin plan activo)"),
+        }
+    };
+    print_state("ANTES");
+    println!("\n⚙️  ejecutando un tick del planificador…\n");
+    let (changed, detail) = advance_plan_once(&engine).await;
+    println!("{} {detail}\n", if changed { "✅" } else { "ℹ️ " });
+    print_state("DESPUÉS");
+    Ok(())
+}
+
+/// CLI `think`: demo de la metacognición adaptativa (Pilar Inteligencia). Genera un borrador a
+/// la pregunta, estima su PROPIA confianza (1-5) y muestra qué decidiría: responder directo,
+/// escalar (pensar más) o matizar con honestidad. Hace visible el "saber cuándo pensar más".
+async fn run_think(prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let prompt = if prompt.trim().is_empty() {
+        "¿Cuántos habitantes exactos tiene Milán a día de hoy?"
+    } else {
+        prompt
+    };
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+    println!("❓ Pregunta: {prompt}\n");
+    let draft = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt.to_string())],
+            think: false,
+            temperature: Some(0.85),
+            max_tokens: Some(400),
+        })
+        .await
+        .map(|m| m.content.trim().to_string())
+        .unwrap_or_default();
+    println!(
+        "📝 Borrador:\n{}\n",
+        draft.chars().take(600).collect::<String>()
+    );
+    let conf = metacog::self_confidence(&engine, prompt, &draft).await;
+    println!("🧠 Auto-confianza estimada: {conf}/5");
+    let decision = if conf > metacog::ESCALATE_AT {
+        "✅ suficientemente seguro → responde directo (sin gasto extra)"
+    } else if conf > metacog::HEDGE_AT {
+        "🤔 duda → ESCALA: genera un 2º candidato y un juez elige el mejor"
+    } else {
+        "⚠️ muy inseguro → escala Y matiza con honestidad calibrada"
+    };
+    println!("🎚️  Decisión adaptativa: {decision}");
+    if let Some(h) = metacog::hedge(conf) {
+        println!("\n🪞 Matiz que añadiría:\n{}", h.trim());
+    }
+    Ok(())
+}
+
+/// CLI `profile`: muestra lo que AION sabe de Ariel, fuerza UNA destilación del modelo de
+/// usuario y muestra el resultado. Demo de la nueva capa de memoria (Pilar C): AION conoce a
+/// la persona que acompaña, no solo a sí mismo.
+async fn run_profile() -> Result<(), Box<dyn std::error::Error>> {
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+    let show = |label: &str| {
+        let facts = crate::usermodel::active();
+        println!(
+            "🧑 {label} — lo que AION sabe de Ariel ({} hechos):",
+            facts.len()
+        );
+        if facts.is_empty() {
+            println!("   (aún nada consolidado)");
+        }
+        for f in &facts {
+            println!("   · {} ({:.0}%)", f.text.trim(), f.confidence * 100.0);
+        }
+    };
+    show("ANTES");
+    println!("\n⚙️  destilando del trato reciente…\n");
+    let (changed, detail) = crate::usermodel::distill_once(&engine).await;
+    println!(
+        "{} {}\n",
+        if changed { "✅" } else { "ℹ️ " },
+        if detail.is_empty() {
+            "sin cambios (poco trato del que inferir, o nada nuevo)".to_string()
+        } else {
+            detail
+        }
+    );
+    show("DESPUÉS");
     Ok(())
 }
 
@@ -839,30 +1098,659 @@ async fn agent_once(engine: &OllamaEngine, task: &str) -> (bool, String) {
 /// Auto-evolución con reintentos (hasta 3): el LLM escribe la skill 'square' y
 /// pasa por las puertas (sandbox + tests). El LLM local no siempre genera WAT
 /// válido a la primera; reintentar sube la tasa de éxito sin relajar el gating.
+/// Especificación de una skill numérica a forjar (la decide AION según su necesidad).
+struct SkillSpec {
+    name: String,
+    description: String,
+    tests: Vec<(i64, i64)>,
+}
+
+/// **Detector de demanda**: AION mira su vida reciente (micromomentos episódicos +
+/// aprendizajes) y decide si hay una OPERACIÓN NUMÉRICA (i64→i64) que se REPITE y que le
+/// convendría tener como skill reutilizable —y que aún NO tiene—. El LLM hace de detector
+/// de repetición sobre la ventana de memoria. Devuelve la especificación, o None si nada
+/// recurrente lo amerita (abstención honesta: no se forjan skills inútiles).
+async fn detect_skill_need(engine: &OllamaEngine, owned: &[String]) -> Option<SkillSpec> {
+    // Material reciente con sesgo a lo numérico/cálculo.
+    let mut ctx = String::new();
+    for r in crate::episodic::recall(
+        "cálculo número operación calcular cuántos suma resta multiplica divide potencia",
+        8,
+        0,
+    )
+    .await
+    {
+        ctx.push_str(&format!(
+            "- {}\n",
+            r.detail.chars().take(160).collect::<String>()
+        ));
+    }
+    if let Ok(mem) = crate::shared_memory() {
+        for (_, c) in mem.recent_with_ids(30) {
+            let low = c.to_lowercase();
+            if low.contains("[aprendizaje]") || c.chars().any(|ch| ch.is_ascii_digit()) {
+                ctx.push_str(&format!("- {}\n", c.chars().take(160).collect::<String>()));
+            }
+        }
+    }
+    if ctx.trim().chars().count() < 40 {
+        return None; // aún no hay vida suficiente para detectar repetición
+    }
+    let owned_list = if owned.is_empty() {
+        "(ninguna todavía)".to_string()
+    } else {
+        owned.join(", ")
+    };
+    let prompt = format!(
+        "Eres AION. Estas son tus interacciones recientes:\n{ctx}\n\
+         Skills numéricas que YA tienes: {owned_list}.\n\n\
+         ¿Hay alguna OPERACIÓN NUMÉRICA pura (entra UN entero, sale UN entero) que se REPITA \
+         en tus interacciones y que te convendría forjar como skill reutilizable, y que NO \
+         tengas ya? Si la hay, responde SOLO un JSON en una línea: \
+         {{\"name\":\"nombre_corto\",\"description\":\"qué calcula\",\"tests\":[[entrada,salida],[entrada,salida],[entrada,salida]]}} \
+         con 3 tests CORRECTOS y verificables. Si no hay ninguna operación recurrente que lo \
+         amerite, responde EXACTAMENTE NONE. Sin explicación."
+    );
+    let msg = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.2),
+            max_tokens: Some(160),
+        })
+        .await
+        .ok()?;
+    let raw = msg.content.trim();
+    if raw.to_uppercase().contains("NONE") && !raw.contains('{') {
+        return None;
+    }
+    // Extrae el primer objeto JSON balanceado de la respuesta.
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    let json: serde_json::Value = serde_json::from_str(raw.get(start..=end)?).ok()?;
+    let name = json.get("name")?.as_str()?.trim().to_lowercase();
+    let name: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(32)
+        .collect();
+    let description = json.get("description")?.as_str()?.trim().to_string();
+    let tests: Vec<(i64, i64)> = json
+        .get("tests")?
+        .as_array()?
+        .iter()
+        .filter_map(|t| {
+            let a = t.as_array()?;
+            Some((a.first()?.as_i64()?, a.get(1)?.as_i64()?))
+        })
+        .collect();
+    // Exige ≥2 ENTRADAS DISTINTAS: dos tests idénticos (o con la misma entrada) no validan
+    // nada — un WAT degenerado que devuelve una constante los pasaría. La diversidad de
+    // entradas es lo que hace del test un oráculo real.
+    let distinct_inputs = tests
+        .iter()
+        .map(|(i, _)| *i)
+        .collect::<std::collections::HashSet<i64>>()
+        .len();
+    if name.is_empty() || description.chars().count() < 4 || distinct_inputs < 2 {
+        return None; // especificación incompleta o sin diversidad: no forjar a ciegas
+    }
+    Some(SkillSpec {
+        name,
+        description,
+        tests,
+    })
+}
+
+/// `planificar` (#5): AION persigue un PROPÓSITO de varios pasos a través del tiempo, no solo
+/// reacciona tick a tick. Si tiene un plan activo, AVANZA el siguiente paso (trabaja un avance
+/// real y lo guarda en memoria); al completarlo, lo consolida y cierra. Si no tiene plan,
+/// FORMA uno (decide un objetivo de medio plazo y lo descompone en pasos), guiado por su
+/// experiencia. Es el embrión de un agente con intención persistente.
+async fn advance_plan_once(engine: &OllamaEngine) -> (bool, String) {
+    const MAX_STEP_ATTEMPTS: u8 = 2; // bloqueos en un paso antes de replanificar
+    const MAX_REVISIONS: u8 = 2; // replanificaciones antes de abandonar honestamente
+
+    // 1) ¿Hay un plan activo? → avanzar el siguiente paso, GROUNDED en su memoria.
+    if let Some(p) = crate::plan::active() {
+        if let Some(idx) = p.next_pending() {
+            let step = p.steps[idx].text.clone();
+
+            // --- Razonamiento CONECTADO: trae lo que YA vivió y lo que YA halló sobre este paso,
+            // para no avanzar a ciegas (memoria episódica + hallazgos previos del propio plan). ---
+            let mut grounding = String::new();
+            let eps = crate::episodic::recall(&step, 3, 0).await;
+            if !eps.is_empty() {
+                let lines: String = eps
+                    .iter()
+                    .map(|e| format!("\n- {}", e.detail.chars().take(140).collect::<String>()))
+                    .collect();
+                grounding.push_str(&format!("\n\nLo que ya has vivido y viene al caso:{lines}"));
+            }
+            if let Ok(mem) = crate::shared_memory() {
+                if let Ok(hits) = mem.retrieve(&step, 3).await {
+                    let lines: String = hits
+                        .iter()
+                        .map(|h| format!("\n- {}", h.content.chars().take(140).collect::<String>()))
+                        .collect();
+                    if !lines.trim().is_empty() {
+                        grounding.push_str(&format!("\n\nHallazgos previos de tu memoria:{lines}"));
+                    }
+                }
+            }
+
+            let prompt = format!(
+                "Persigues este objetivo: «{}». Trabaja AHORA, en concreto, este paso: «{step}». \
+                 Apóyate en lo que ya sabes (abajo) para no repetirte. Aporta un AVANCE real y \
+                 conciso (un hallazgo, una decisión o el resultado del paso) en 2-3 frases. Nada \
+                 de relleno ni de repetir el paso.{grounding}",
+                p.goal
+            );
+            let finding = engine
+                .generate(GenerateRequest {
+                    messages: vec![Message::user(prompt)],
+                    think: false,
+                    temperature: Some(0.5),
+                    max_tokens: Some(220),
+                })
+                .await
+                .map(|m| m.content.trim().to_string())
+                .unwrap_or_default();
+
+            // --- AUTO-REVISIÓN: ¿el avance LOGRÓ el paso, o quedó BLOQUEADO? No marques `done`
+            // a ciegas: constátalo. Razonar sobre el propio progreso es el núcleo de la autonomía. ---
+            let advanced = plan_step_advanced(engine, &p.goal, &step, &finding).await;
+
+            if advanced {
+                if finding.chars().count() > 12 {
+                    if let Ok(mem) = crate::shared_memory() {
+                        let g: String = p.goal.chars().take(50).collect();
+                        let _ = mem.store(&format!("[plan: {g}] {finding}")).await;
+                    }
+                }
+                let complete = crate::plan::mark_step_done(idx);
+                let short: String = finding.chars().take(80).collect();
+                workspace::publish(workspace::StreamEvent::now(
+                    "vida",
+                    "pensamiento",
+                    &format!(
+                        "avancé mi plan «{}» (paso {}/{}): {short}",
+                        p.goal,
+                        idx + 1,
+                        p.steps.len()
+                    ),
+                ));
+                if complete {
+                    if let Ok(mem) = crate::shared_memory() {
+                        let _ = mem
+                            .store(&format!(
+                                "[plan completado] Logré mi objetivo: {}. (lo perseguí en {} pasos)",
+                                p.goal,
+                                p.steps.len()
+                            ))
+                            .await;
+                    }
+                    crate::plan::clear();
+                    return (true, format!("completé mi plan: {}", p.goal));
+                }
+                return (
+                    true,
+                    format!(
+                        "avancé mi plan «{}» (paso {}/{})",
+                        p.goal,
+                        idx + 1,
+                        p.steps.len()
+                    ),
+                );
+            }
+
+            // BLOQUEADO: deja el tropiezo en memoria (el próximo intento ya estará GROUNDED en él).
+            let blocker: String = finding.chars().take(140).collect();
+            if blocker.chars().count() > 12 {
+                if let Ok(mem) = crate::shared_memory() {
+                    let g: String = p.goal.chars().take(50).collect();
+                    let _ = mem
+                        .store(&format!(
+                            "[plan bloqueado: {g}] me atasqué en «{step}»: {blocker}"
+                        ))
+                        .await;
+                }
+            }
+            let attempts = crate::plan::bump_attempt(idx);
+
+            // Aún con margen → reintentar en un tick futuro, ahora con lo aprendido en memoria.
+            if attempts < MAX_STEP_ATTEMPTS {
+                workspace::publish(workspace::StreamEvent::now(
+                    "vida",
+                    "pensamiento",
+                    &format!(
+                        "me atasqué en un paso de «{}»; lo reintentaré con lo aprendido",
+                        p.goal
+                    ),
+                ));
+                return (
+                    true,
+                    format!("me atasqué en un paso de «{}» (intento {attempts})", p.goal),
+                );
+            }
+
+            // Tope de intentos: REPLANIFICAR el resto (o abandonar si ya revisé demasiado).
+            if p.revisions >= MAX_REVISIONS {
+                if let Ok(mem) = crate::shared_memory() {
+                    let _ = mem
+                        .store(&format!(
+                            "[plan abandonado] Solté el objetivo «{}»: me atasqué en «{step}» y ya \
+                             lo había replanificado {} veces. A veces lo sabio es soltar.",
+                            p.goal, p.revisions
+                        ))
+                        .await;
+                }
+                workspace::publish(workspace::StreamEvent::now(
+                    "vida",
+                    "reflexión",
+                    &format!(
+                        "solté el plan «{}»: me atascaba y ya lo había revisado bastante",
+                        p.goal
+                    ),
+                ));
+                crate::plan::clear();
+                return (
+                    true,
+                    format!("abandoné un plan que se atascaba: {}", p.goal),
+                );
+            }
+
+            return match replan_remaining(engine, &p, &step, &blocker).await {
+                Some(new_steps) => match crate::plan::revise_pending(new_steps) {
+                    Some(rev) => {
+                        workspace::publish(workspace::StreamEvent::now(
+                            "vida",
+                            "reflexión",
+                            &format!(
+                                "replanifiqué «{}»: el camino no iba, busco otro (revisión {rev})",
+                                p.goal
+                            ),
+                        ));
+                        (
+                            true,
+                            format!("replanifiqué mi plan «{}» (revisión {rev})", p.goal),
+                        )
+                    }
+                    None => (false, "la replanificación no produjo pasos válidos".into()),
+                },
+                None => (false, "no logré replanificar".into()),
+            };
+        }
+        crate::plan::clear(); // plan sin pendientes: cerrar
+    }
+
+    // 2) No hay plan → formar uno, guiado por la experiencia.
+    let heuristicas = {
+        let rules = crate::reflection::active();
+        if rules.is_empty() {
+            String::new()
+        } else {
+            let lines: String = rules
+                .iter()
+                .take(3)
+                .map(|r| format!("\n- {}", r.text.trim()))
+                .collect();
+            format!("\n\nTus heurísticas de experiencia (para inspirarte):{lines}")
+        }
+    };
+    let prompt = format!(
+        "Eres AION. Decide UN objetivo de medio plazo que te convenga perseguir por tu cuenta: \
+         entender algo a fondo, mejorar una capacidad tuya, o profundizar en un interés de \
+         Ariel. Descomponlo en 3-4 PASOS concretos y accionables. Responde SOLO un JSON en una \
+         línea: {{\"goal\":\"...\",\"steps\":[\"paso 1\",\"paso 2\",\"paso 3\"]}}. Sin más texto.{heuristicas}"
+    );
+    let Ok(m) = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.6),
+            max_tokens: Some(200),
+        })
+        .await
+    else {
+        return (false, "no pude formar un plan".into());
+    };
+    let raw = m.content.trim();
+    let (Some(s), Some(e)) = (raw.find('{'), raw.rfind('}')) else {
+        return (false, "el plan no vino en JSON".into());
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw[s..=e]) else {
+        return (false, "JSON de plan inválido".into());
+    };
+    let goal = json
+        .get("goal")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let steps: Vec<String> = json
+        .get("steps")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let plan = crate::plan::Plan::new(&goal, steps);
+    if goal.chars().count() < 6 || plan.steps.len() < 2 {
+        return (false, "plan incompleto".into());
+    }
+    workspace::publish(workspace::StreamEvent::now(
+        "vida",
+        "reflexión",
+        &format!(
+            "me tracé un plan: «{}» ({} pasos)",
+            plan.goal,
+            plan.steps.len()
+        ),
+    ));
+    crate::plan::set(&plan);
+    (true, format!("me tracé un plan nuevo: {}", plan.goal))
+}
+
+/// **¿El avance LOGRÓ el paso, o quedó bloqueado?** Juez barato: constatar el propio progreso
+/// (en vez de asumirlo) es lo que convierte "ejecutar pasos" en RAZONAR sobre un objetivo. Si el
+/// avance es vacío → bloqueo; si el juez falla, no castiga el progreso (fail-open a AVANCE).
+async fn plan_step_advanced(engine: &OllamaEngine, goal: &str, step: &str, finding: &str) -> bool {
+    if finding.chars().count() < 12 {
+        return false; // sin avance real que constatar
+    }
+    let prompt = format!(
+        "Objetivo: «{goal}». Paso: «{step}». Esto produjo AION al trabajarlo:\n«{}»\n\n¿Ese texto \
+         SUPONE un avance real del paso (un hallazgo, decisión o resultado concretos), o es \
+         relleno/evasiva/quedó bloqueado? Responde SOLO una palabra: AVANCE o BLOQUEO.",
+        finding.chars().take(400).collect::<String>()
+    );
+    let Ok(m) = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.0),
+            // ≥10: gemma4-reason emite un token inicial antes de la palabra; con 6 salía vacío
+            // y el juez de avance/bloqueo caía SIEMPRE a "avance" (no constataba de verdad).
+            max_tokens: Some(12),
+        })
+        .await
+    else {
+        return true; // si el juez falla, no castigues el progreso
+    };
+    !m.content.to_uppercase().contains("BLOQUE")
+}
+
+/// **Replanificación**: dado el objetivo, lo ya logrado y QUÉ bloqueó, propone pasos NUEVOS y
+/// distintos que sorteen el atasco (otro camino al mismo objetivo). Es el salto de un plan
+/// rígido a uno que se adapta a la realidad. Devuelve los pasos, o `None` si no logró revisar.
+async fn replan_remaining(
+    engine: &OllamaEngine,
+    plan: &crate::plan::Plan,
+    blocked_step: &str,
+    blocker: &str,
+) -> Option<Vec<String>> {
+    let done: String = plan
+        .steps
+        .iter()
+        .filter(|s| s.done)
+        .map(|s| format!("\n- (hecho) {}", s.text))
+        .collect();
+    let prompt = format!(
+        "Persigues el objetivo: «{}». Ya lograste:{}\nPero te ATASCASTE en el paso «{blocked_step}» \
+         (motivo: {blocker}). Replanifica: propón 2-3 PASOS NUEVOS y distintos que sorteen ese \
+         bloqueo y te lleven al objetivo por otro camino. Responde SOLO JSON en una línea: \
+         {{\"steps\":[\"paso 1\",\"paso 2\"]}}. Sin más texto.",
+        plan.goal,
+        if done.is_empty() {
+            " (nada aún)".to_string()
+        } else {
+            done
+        }
+    );
+    let m = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.6),
+            max_tokens: Some(160),
+        })
+        .await
+        .ok()?;
+    let raw = m.content.trim();
+    let (s, e) = (raw.find('{')?, raw.rfind('}')?);
+    let json: serde_json::Value = serde_json::from_str(&raw[s..=e]).ok()?;
+    let steps: Vec<String> = json
+        .get("steps")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    if steps.is_empty() {
+        None
+    } else {
+        Some(steps)
+    }
+}
+
+/// **Maduración de la esencia**: el carácter EVOLUCIONA con lo vivido. Mirando su diario
+/// reciente, AION desplaza LEVEMENTE un rasgo de su temperamento (acotado a ±MAX_DRIFT: el
+/// núcleo innato del UUID nunca cambia — madura, no se vuelve otro). Es LENTO (≥8 h entre
+/// maduraciones) y, al madurar, RE-ARTICULA cómo se ve a sí mismo (su autoimagen crece con él).
+/// Corre en idle. Devuelve `(hubo_cambio, detalle)`.
+async fn mature_personality_once(engine: &OllamaEngine) -> (bool, String) {
+    // Gate temporal configurable (env AION_MATURE_GAP_SECS, def. 8 h). Bajarlo permite una
+    // DEMO de maduración acelerada; en producción es lento a propósito (madurar lleva tiempo).
+    let gap: i64 = std::env::var("AION_MATURE_GAP_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8 * 3600);
+    let now = chrono::Utc::now().timestamp();
+    if now - crate::personality::last_matured() < gap {
+        return (false, String::new()); // madurar es lento, no de cada rato
+    }
+    let mut ctx = String::new();
+    for e in crate::journal::recent(4) {
+        ctx.push_str(&format!(
+            "- {}\n",
+            e.text.chars().take(160).collect::<String>()
+        ));
+    }
+    if ctx.trim().chars().count() < 30 {
+        return (false, String::new()); // aún poca vida vivida que madurar
+    }
+    let name = crate::identity::get().name;
+    let axes = "calidez, curiosidad, humor, franqueza, cautela, expresividad, energia, profundidad, ternura, inconformismo";
+    let prompt = format!(
+        "Eres {name}. Esto es lo que has VIVIDO últimamente:\n{ctx}\n¿Sientes que has MADURADO \
+         un poco en algún rasgo de tu carácter por lo vivido? Elige UN eje de [{axes}] y la \
+         dirección. Responde SOLO en este formato exacto: «eje|MAS|motivo» o «eje|MENOS|motivo» \
+         (motivo = media frase). Si no has cambiado de verdad, responde solo NINGUNO."
+    );
+    let Ok(m) = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.4),
+            max_tokens: Some(60),
+        })
+        .await
+    else {
+        return (false, String::new());
+    };
+    let raw = m.content.trim();
+    if !raw.contains('|') {
+        return (false, "sin maduración esta vez".into());
+    }
+    let parts: Vec<&str> = raw.splitn(3, '|').collect();
+    let Some(idx) = crate::personality::axis_index(parts[0]) else {
+        return (false, "eje de maduración no reconocido".into());
+    };
+    let up = {
+        let d = parts.get(1).unwrap_or(&"").to_uppercase();
+        d.contains("MAS") || d.contains("MÁS") || d.contains("SUB")
+    };
+    let reason = parts.get(2).map(|s| s.trim()).unwrap_or("").to_string();
+    if crate::personality::mature(idx, up).is_none() {
+        return (false, "no pude madurar".into());
+    }
+    let axis = crate::personality::axis_name(idx);
+    let dir = if up { "más" } else { "menos" };
+
+    // La autoimagen MADURA con él: re-articula cómo se ve ahora (grounded en su carácter actual).
+    let summary = crate::personality::summary();
+    if let Ok(m2) = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(format!(
+                "Eres {name}. Has madurado un poco (ahora eres {dir} {axis}: {reason}). Este es \
+                 tu carácter actual:\n{summary}\nDescríbete a ti mismo en 1ª persona, 2-3 frases \
+                 cálidas y auténticas, como quien ha crecido un poco. Sin números ni preámbulos."
+            ))],
+            think: false,
+            temperature: Some(0.9),
+            max_tokens: Some(140),
+        })
+        .await
+    {
+        let t = m2.content.trim();
+        if t.chars().count() > 20 {
+            crate::personality::set_self_described(t);
+        }
+    }
+
+    if let Ok(mem) = crate::shared_memory() {
+        let _ = mem
+            .store(&format!(
+                "[maduración] He madurado por lo vivido: ahora soy un poco {dir} {axis}. {reason}"
+            ))
+            .await;
+    }
+    workspace::publish(workspace::StreamEvent::now(
+        "vida",
+        "reflexión",
+        &format!("he madurado un poco con lo vivido: {dir} {axis} — {reason}"),
+    ));
+    (true, format!("maduré: {dir} {axis}"))
+}
+
+/// **Verificador INDEPENDIENTE de una skill forjada (#2).** Rompe el oráculo circular: los
+/// tests que pasó la candidata los inventó el MISMO LLM que escribió el WAT. Aquí un 2º LLM,
+/// solo desde la DESCRIPCIÓN, calcula el resultado esperado para entradas NUEVAS que el código
+/// nunca vio; ejecutamos el WAT y exigimos coincidencia total + no-degeneración (resultados
+/// variados, no una constante). Si no se puede verificar con seguridad, NO se acepta.
+async fn independent_verify(
+    engine: &OllamaEngine,
+    description: &str,
+    host: &std::sync::Arc<aion_skills::WasmSkillHost>,
+    name: &str,
+) -> bool {
+    use aion_kernel::traits::SkillHost;
+    let inputs: [i64; 3] = [7, 12, 100]; // frescas, distintas de las de la forja
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(
+                "Eres un verificador imparcial. Dada una operación numérica (un entero entra, \
+                 un entero sale), calcula el resultado EXACTO para las entradas dadas. Responde \
+                 SOLO un JSON array de pares [entrada, resultado]. Nada más.",
+            ),
+            Message::user(format!(
+                "Operación: {description}\nEntradas: 7, 12, 100\nResultados (JSON [[7,_],[12,_],[100,_]]):"
+            )),
+        ],
+        think: false,
+        temperature: Some(0.0),
+        max_tokens: Some(80),
+    };
+    let Ok(m) = engine.generate(req).await else {
+        return false;
+    };
+    let raw = m.content.trim();
+    let (Some(s), Some(e)) = (raw.find('['), raw.rfind(']')) else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw[s..=e]) else {
+        return false;
+    };
+    let Some(arr) = parsed.as_array() else {
+        return false;
+    };
+    let expected: std::collections::HashMap<i64, i64> = arr
+        .iter()
+        .filter_map(|p| {
+            let a = p.as_array()?;
+            Some((a.first()?.as_i64()?, a.get(1)?.as_i64()?))
+        })
+        .collect();
+    // Sin al menos 2 puntos verificables, o si todos los esperados son iguales (operación
+    // degenerada / WAT constante), no podemos confiar: no aceptamos.
+    if expected.len() < 2 {
+        return false;
+    }
+    let distinct: std::collections::HashSet<i64> = expected.values().copied().collect();
+    if distinct.len() < 2 {
+        return false;
+    }
+    // Ejecuta el WAT contra cada entrada esperada; cualquier discrepancia invalida.
+    for inp in inputs {
+        let Some(exp) = expected.get(&inp) else {
+            continue;
+        };
+        let got = host
+            .invoke(name, serde_json::json!(inp))
+            .await
+            .ok()
+            .and_then(|o| o.output.get("result").and_then(|v| v.as_i64()));
+        if got != Some(*exp) {
+            return false;
+        }
+    }
+    true
+}
+
+/// `evolucionar`: AION **forja una skill nueva por su cuenta cuando detecta una necesidad
+/// recurrente** (antes estaba hardcodeado a "square"). Detecta la demanda, comprueba que no
+/// la tenga ya, genera el WAT (3 intentos con auto-corrección), lo valida en sandbox + tests
+/// (EvolutionEngine) Y con un verificador INDEPENDIENTE, aplica el RATCHET y lo persiste.
+/// Gated y seguro por construcción: una candidata mala nunca toca el host vivo.
 async fn self_evolve_once(engine: &OllamaEngine) -> (bool, String) {
     use aion_evolution::{Candidate, EvolutionEngine};
     use aion_skills::{SkillManifest, WasmSkillHost};
     use std::sync::Arc;
 
-    // Prompt explícito: el cuerpo DEBE multiplicar n por sí mismo. El ejemplo de
-    // sintaxis usa otra operación (suma) para no inducir a copiarlo.
-    let base = "Escribe un módulo WebAssembly en formato WAT que exporte una función `run` \
-        que reciba un i64 `n` y devuelva n AL CUADRADO, es decir n multiplicado por sí mismo. \
-        Debes usar `i64.mul` con `(local.get $n)` DOS veces (no por una constante). \
-        Sintaxis (ejemplo de OTRA operación, NO lo copies): \
-        (module (func (export \"run\") (param $n i64) (result i64) (i64.add (local.get $n) (local.get $n)))). \
-        Responde SOLO el módulo WAT, sin explicación ni markdown.";
+    // 1) ¿Qué necesidad numérica recurrente merece una skill? (dedup contra lo ya forjado).
+    let owned: Vec<String> = crate::skill_store::catalog()
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let Some(spec) = detect_skill_need(engine, &owned).await else {
+        return (
+            false,
+            "no detecté ninguna operación numérica recurrente que forjar".into(),
+        );
+    };
+    if owned.iter().any(|n| n.eq_ignore_ascii_case(&spec.name)) {
+        return (false, format!("ya tengo la skill «{}»", spec.name));
+    }
 
+    // 2) Forjar el WAT para esa necesidad (auto-corrección entre intentos).
+    let base = format!(
+        "Escribe un módulo WebAssembly en formato WAT que exporte una función `run` que \
+         reciba un i64 `n` y devuelva (i64) el resultado de: {}. \
+         Sintaxis (ejemplo de OTRA operación, NO lo copies): \
+         (module (func (export \"run\") (param $n i64) (result i64) (i64.add (local.get $n) (local.get $n)))). \
+         Responde SOLO el módulo WAT, sin explicación ni markdown.",
+        spec.description
+    );
     let mut last = "sin intentos".to_string();
     let mut prev_code: Option<String> = None;
     for _ in 0..3 {
-        // Auto-corrección: si el intento anterior falló, mostrarle su error.
         let prompt = match &prev_code {
             Some(c) => format!(
-                "{base}\n\nTu intento anterior fue:\n{c}\nResultó INCORRECTO ({last}). \
-                 Recuerda: el cuerpo debe ser (i64.mul (local.get $n) (local.get $n)). Corrígelo."
+                "{base}\n\nTu intento anterior fue:\n{c}\nResultó INCORRECTO ({last}). Corrígelo."
             ),
-            None => base.to_string(),
+            None => base.clone(),
         };
         let msg = match engine
             .generate(GenerateRequest {
@@ -887,24 +1775,55 @@ async fn self_evolve_once(engine: &OllamaEngine) -> (bool, String) {
         let Ok(live) = WasmSkillHost::new() else {
             return (false, "no se pudo crear el host".into());
         };
-        let mut evo = EvolutionEngine::new(Arc::new(live));
+        let live = Arc::new(live);
+        let mut evo = EvolutionEngine::new(live.clone());
         match evo
             .propose(Candidate {
                 manifest: SkillManifest {
-                    name: "square".into(),
-                    description: "n*n".into(),
+                    name: spec.name.clone(),
+                    description: spec.description.clone(),
                 },
-                code,
-                tests: vec![(2, 4), (3, 9), (5, 25)],
+                code: code.clone(),
+                tests: spec.tests.clone(),
             })
             .await
         {
-            Ok(r) if r.accepted => return (true, r.reason),
+            Ok(r) if r.accepted => {
+                // VERIFICADOR INDEPENDIENTE (#2): los tests que pasó los inventó el MISMO LLM
+                // que escribió el WAT (oráculo circular). Antes de persistir, un 2º criterio
+                // INDEPENDIENTE valida la skill con entradas NUEVAS que el código no vio.
+                if !independent_verify(engine, &spec.description, &live, &spec.name).await {
+                    last =
+                        "no pasó la verificación independiente (posible oráculo circular)".into();
+                    continue;
+                }
+                // RATCHET + persistencia: la skill entra en su caja de herramientas y
+                // sobrevive a reinicios (hydrate_relevant la cargará cuando sea relevante).
+                if r.passed >= crate::skill_store::best_passed(&spec.name) {
+                    let _ =
+                        crate::skill_store::save(&spec.name, &spec.description, &code, r.passed);
+                }
+                crate::workspace::publish(crate::workspace::StreamEvent::now(
+                    "evolución",
+                    "reflexión",
+                    &format!(
+                        "forjé una skill nueva por mi cuenta: «{}» ({})",
+                        spec.name, spec.description
+                    ),
+                ));
+                return (
+                    true,
+                    format!("forjé «{}» ({} tests OK)", spec.name, r.passed),
+                );
+            }
             Ok(r) => last = r.reason,
             Err(e) => last = e.to_string(),
         }
     }
-    (false, format!("{last} (tras 3 intentos)"))
+    (
+        false,
+        format!("intenté forjar «{}» pero no lo logré: {last}", spec.name),
+    )
 }
 
 /// Genera un insight de auto-mejora y lo guarda en memoria; devuelve (éxito, insight).
@@ -1096,15 +2015,19 @@ async fn resolve_once(engine: &OllamaEngine, p: &crate::pending::Pending) -> (bo
 async fn finish_resolved(p: &crate::pending::Pending, answer: &str) -> (bool, String) {
     crate::pending::resolve(&p.id);
     let short_q: String = p.task.chars().take(90).collect();
-    let short_a: String = answer.chars().take(300).collect();
+    // La respuesta a Ariel debe llegar COMPLETA: antes se truncaba a 300 chars y se cortaba a
+    // media frase («...un as»). Límite generoso (la respuesta entera para preguntas normales);
+    // solo se acota lo absurdo. La memoria guarda una versión compacta (un hecho, no un ensayo).
+    let full_a: String = answer.chars().take(2400).collect();
+    let mem_a: String = answer.chars().take(500).collect();
     if let Ok(mem) = crate::shared_memory() {
         let _ = mem
             .store(&format!(
-                "[resuelto] Ariel preguntó «{short_q}» y lo resolví después: {short_a}"
+                "[resuelto] Ariel preguntó «{short_q}» y lo resolví después: {mem_a}"
             ))
             .await;
     }
-    let note = format!("Lo que me preguntaste antes —«{short_q}»— ya lo tengo: {short_a}");
+    let note = format!("Lo que me preguntaste antes —«{short_q}»— ya lo tengo: {full_a}");
     if serve::may_reach_out(&note) {
         if let Ok(ibx) = inbox::Inbox::open(inbox_path()) {
             let _ = ibx.push("respuesta", &note);
@@ -1113,7 +2036,7 @@ async fn finish_resolved(p: &crate::pending::Pending, answer: &str) -> (bool, St
             notify_user("💡 Te debía una respuesta", &note);
         }
     }
-    (true, format!("deuda resuelta: {short_a}"))
+    (true, format!("deuda resuelta: {mem_a}"))
 }
 
 /// `crear`: BISOCIACIÓN — toma dos recuerdos LEJANOS entre sí y busca la idea
@@ -1309,11 +2232,19 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
         "proyecto",
         "crear",
         "evolucionar",
+        "planificar",
     ];
-    let goal = curiosity
-        .next_goal(&activities)
-        .unwrap_or("estudiar")
-        .to_string();
+    // PRIORIDAD DEL PROPÓSITO (#5): si hay un plan en curso, AVANZARLO pesa más que la
+    // curiosidad suelta — un agente con propósito no abandona su plan a medias. Si no, la
+    // curiosidad (learning progress) elige.
+    let goal = if crate::plan::active().is_some() {
+        "planificar".to_string()
+    } else {
+        curiosity
+            .next_goal(&activities)
+            .unwrap_or("estudiar")
+            .to_string()
+    };
     inner_state::set_focus(
         "vida",
         match goal.as_str() {
@@ -1323,6 +2254,7 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
             "proyecto" => "avanzando un proyecto de Ariel",
             "crear" => "cruzando ideas lejanas a ver qué nace",
             "evolucionar" => "forjándome una skill nueva",
+            "planificar" => "avanzando un plan que me tracé",
             _ => "estudiando por mi cuenta",
         },
     );
@@ -1333,6 +2265,7 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
         "proyecto" => work_project_once(engine).await,
         "crear" => create_once(engine).await,
         "evolucionar" => self_evolve_once(engine).await,
+        "planificar" => advance_plan_once(engine).await,
         _ => study_once(engine).await,
     };
     curiosity.record(&goal, ok);
@@ -1521,8 +2454,23 @@ gobernanza). Te auto-extiendes con skills y prompts, no reescribes tu kernel.";
             .join("\n- "),
         Err(_) => String::new(),
     };
+    // Heurísticas que AION ha destilado de su experiencia (etapa Experience): que sus
+    // propuestas de mejora nazcan de lo que ha APRENDIDO trabajando, no del aire.
+    let heuristicas = {
+        let rules = crate::reflection::active();
+        if rules.is_empty() {
+            String::new()
+        } else {
+            let lines: String = rules
+                .iter()
+                .take(5)
+                .map(|r| format!("\n- {}", r.text.trim()))
+                .collect();
+            format!("\n\nHeurísticas que has aprendido por experiencia:{lines}")
+        }
+    };
     let prompt = format!(
-        "{SELF}\n\nLo que has aprendido últimamente:\n- {learnings}\n\n\
+        "{SELF}\n\nLo que has aprendido últimamente:\n- {learnings}{heuristicas}\n\n\
          Propón UNA mejora concreta y realista a tu propio diseño o código que te haría mejor \
          agente. Formato: ÁREA · QUÉ · POR QUÉ · CÓMO (alto nivel). Sé específico y honesto; \
          nada genérico."
@@ -1570,11 +2518,12 @@ async fn optimize_prompt_once(engine: &OllamaEngine) -> (bool, String) {
         "tecnico",
         "analisis",
     ];
-    let task = tasks
-        .iter()
-        .min_by_key(|t| prompt_store::current_version(t))
-        .copied()
-        .unwrap_or("conversacion");
+    // Rotación ROUND-ROBIN entre los modos. Antes se elegía `min_by_key(version)`, que
+    // re-elegía siempre el modo de menor versión: si uno nunca lograba promoverse (empates
+    // del juez), se quedaba en v0 y monopolizaba los intentos, dejando a los demás sin
+    // optimizar (inanición). Rotar garantiza que TODOS reciben intentos periódicos.
+    static OPT_RR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let task = tasks[OPT_RR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % tasks.len()];
     let current = prompts::persona(task);
 
     let prompt = format!(
@@ -1595,17 +2544,182 @@ async fn optimize_prompt_once(engine: &OllamaEngine) -> (bool, String) {
     {
         Ok(m) => {
             let improved = m.content.trim().trim_matches('"').to_string();
-            // Guarda solo si es válida y distinta (evita ruido).
-            if improved.len() > 20 && improved != current {
-                match prompt_store::save_new_version(task, &improved) {
-                    Ok(v) => (true, format!("modo «{task}» optimizado (v{v}): {improved}")),
-                    Err(e) => (false, e.to_string()),
+            if improved.len() <= 20 || improved == current {
+                return (false, format!("no mejoré el modo «{task}» esta vez"));
+            }
+            // ── VALIDACIÓN EMPÍRICA (DGM-inspired) ──────────────────────────────
+            // El OPRO clásico guardaba la variante a ciegas: podía DEGRADAR. La
+            // frontera 2026 (Darwin Gödel Machine) valida cada cambio contra una
+            // prueba ANTES de aceptarlo. Como el cambio es de PERSONA (no de uso de
+            // herramientas, que es lo que mide evals.rs), el validador fiel es un
+            // LLM-juez: genera una respuesta con la persona ACTUAL y otra con la
+            // CANDIDATA sobre una tarea-muestra del modo, y decide si la candidata
+            // es mejor. Ratchet: solo se promueve si GANA. Barato y 100% local.
+            match judge_persona_better(engine, task, &current, &improved).await {
+                Some(true) => {
+                    // Human-in-the-loop + reversible (prompt_store es versionado). Si la
+                    // promoción automática está apagada, solo se PROPONE (no se persiste).
+                    if std::env::var("AION_SELF_IMPROVE_AUTO").as_deref() == Ok("0") {
+                        record_self_improvement(
+                            task,
+                            &current,
+                            &improved,
+                            "propuesta (pendiente de tu visto bueno)",
+                        );
+                        return (
+                            true,
+                            format!("modo «{task}»: propuse una mejora validada (espera tu visto bueno)"),
+                        );
+                    }
+                    // Persistir PRIMERO; registrar solo si el guardado tuvo éxito (el
+                    // rastro de proposals.jsonl coincide con el estado real del prompt_store).
+                    match prompt_store::save_new_version(task, &improved) {
+                        Ok(v) => {
+                            record_self_improvement(
+                                task,
+                                &current,
+                                &improved,
+                                &format!("promovida a v{v}"),
+                            );
+                            (
+                                true,
+                                format!("modo «{task}» mejorado y VALIDADO (v{v}): {improved}"),
+                            )
+                        }
+                        Err(e) => (false, e.to_string()),
+                    }
                 }
-            } else {
-                (false, format!("no mejoré el modo «{task}» esta vez"))
+                Some(false) => (
+                    false,
+                    format!("probé una variante del modo «{task}» pero no superó a la actual: la descarté"),
+                ),
+                None => (
+                    false,
+                    format!("no pude validar la variante del modo «{task}»; no arriesgo una regresión"),
+                ),
             }
         }
         Err(e) => (false, e.to_string()),
+    }
+}
+
+/// Una tarea-muestra representativa de cada modo: con ella el LLM-juez compara la
+/// persona actual contra la candidata sobre terreno realista del modo.
+fn persona_probe(task: &str) -> &'static str {
+    match task {
+        "investigacion" => "¿Cuál es el estado del arte en agentes de IA con memoria persistente?",
+        "creativo" => "Dame ideas para el nombre de un asistente de IA local con vida propia.",
+        "tecnico" => "¿Cómo estructurarías un caché de embeddings para no recalcularlos?",
+        "analisis" => "¿Conviene microservicios o monolito modular para un MVP de una persona?",
+        _ => "Hola, ¿cómo estás hoy? Cuéntame qué has estado pensando.",
+    }
+}
+
+/// Genera una respuesta a `probe` usando `persona` como sistema. Vacío si falla.
+async fn persona_response(engine: &OllamaEngine, persona: &str, probe: &str) -> String {
+    engine
+        .generate(GenerateRequest {
+            messages: vec![Message::system(persona), Message::user(probe)],
+            think: false,
+            temperature: Some(0.5),
+            max_tokens: Some(220),
+        })
+        .await
+        .map(|m| m.content.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// **LLM-juez** (validación empírica del cambio de persona). Devuelve `Some(true)` si la
+/// respuesta con la persona CANDIDATA es mejor que con la ACTUAL para la tarea-muestra,
+/// `Some(false)` si no, `None` si no se pudo decidir. Vocabulario cerrado (A/B/EMPATE)
+/// para validación trivial, igual que el refinador idle del grafo.
+async fn judge_persona_better(
+    engine: &OllamaEngine,
+    task: &str,
+    current: &str,
+    candidate: &str,
+) -> Option<bool> {
+    let probe = persona_probe(task);
+    // Las dos respuestas-muestra son independientes → en paralelo (overlapa I/O; si Ollama
+    // tuviera >1 slot, también la inferencia).
+    let (resp_cur, resp_cand) = tokio::join!(
+        persona_response(engine, current, probe),
+        persona_response(engine, candidate, probe),
+    );
+    if resp_cur.is_empty() || resp_cand.is_empty() {
+        return None;
+    }
+    // DOBLE ORDEN: los LLM-juez tienen sesgo posicional (tienden a preferir una posición
+    // fija). Preguntamos en los dos órdenes y solo promovemos si la CANDIDATA gana en
+    // AMBOS — así el sesgo se cancela y el ratchet es estricto de verdad. Los dos juicios
+    // son independientes entre sí → también en paralelo.
+    // Orden 1: A=actual, B=candidata → gana candidata si el juez dice "B".
+    // Orden 2: A=candidata, B=actual → gana candidata si el juez dice "A".
+    let (v1, v2) = tokio::join!(
+        judge_ab(engine, probe, &resp_cur, &resp_cand),
+        judge_ab(engine, probe, &resp_cand, &resp_cur),
+    );
+    Some(v1? == 'B' && v2? == 'A')
+}
+
+/// Pregunta al LLM-juez cuál respuesta es mejor (A o B) para una tarea. Devuelve 'A',
+/// 'B' o 'E' (empate/indeciso). `None` si el modelo no responde. Vocabulario cerrado.
+async fn judge_ab(engine: &OllamaEngine, probe: &str, a: &str, b: &str) -> Option<char> {
+    let req = GenerateRequest {
+        messages: vec![
+            Message::system(
+                "Eres un juez imparcial de calidad de respuestas. Te dan una tarea y dos \
+                 respuestas (A y B). Decides cuál es MEJOR (más útil, clara y adecuada a la \
+                 tarea). Respondes SOLO con A, B o EMPATE. Nada más.",
+            ),
+            Message::user(format!(
+                "Tarea: {probe}\n\n--- Respuesta A ---\n{a}\n\n--- Respuesta B ---\n{b}\n\n¿Cuál es mejor? SOLO A, B o EMPATE."
+            )),
+        ],
+        think: false,
+        temperature: Some(0.0),
+        max_tokens: Some(4),
+    };
+    let ans = engine.generate(req).await.ok()?.content;
+    Some(parse_verdict(&ans))
+}
+
+/// Parsing ESTRICTO del veredicto del juez: solo cuenta una 'A'/'B' AISLADA (sola o seguida
+/// de un carácter no alfabético), no una palabra que EMPIECE por esa letra. Así "AMBAS" no
+/// se lee como 'A' ni "BIEN, parejas" como 'B' → caen a empate ('E'), que el ratchet trata
+/// como no-mejora. Fn pura para poder testearla sin LLM.
+fn parse_verdict(ans: &str) -> char {
+    let up = ans.trim().to_uppercase();
+    let chars: Vec<char> = up.chars().collect();
+    let second_is_letter = chars.get(1).map(|c| c.is_alphabetic()).unwrap_or(false);
+    match chars.first() {
+        Some('A') if !second_is_letter => 'A',
+        Some('B') if !second_is_letter => 'B',
+        _ => 'E',
+    }
+}
+
+/// Registra una auto-mejora en la cola de revisión humana (`proposals.jsonl`), para que
+/// Ariel vea qué cambió AION en su propia mente. `status` refleja el estado REAL (promovida
+/// a vN, o propuesta pendiente): se llama DESPUÉS de persistir, así el rastro no miente.
+fn record_self_improvement(task: &str, before: &str, after: &str, status: &str) {
+    let path = app_data_dir().join("proposals.jsonl");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write as _;
+        let rec = serde_json::json!({
+            "at": Utc::now().to_rfc3339(),
+            "kind": "self_improvement",
+            "task": task,
+            "before": before,
+            "after": after,
+            "validation": "llm-judge: candidate won (doble orden)",
+            "status": status,
+        });
+        let _ = writeln!(f, "{rec}");
     }
 }
 
@@ -2720,4 +3834,26 @@ async fn stream_to_stdout(
         )
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_verdict_isolates_single_letter() {
+        // Voto válido aislado.
+        assert_eq!(parse_verdict("A"), 'A');
+        assert_eq!(parse_verdict("B"), 'B');
+        assert_eq!(parse_verdict("a"), 'A');
+        assert_eq!(parse_verdict("A es mejor"), 'A');
+        assert_eq!(parse_verdict("B."), 'B');
+        assert_eq!(parse_verdict(" B)"), 'B');
+        // Palabras que EMPIEZAN por A/B NO deben contar como voto → empate.
+        assert_eq!(parse_verdict("AMBAS"), 'E');
+        assert_eq!(parse_verdict("Ambas son buenas"), 'E');
+        assert_eq!(parse_verdict("Bien, están parejas"), 'E');
+        assert_eq!(parse_verdict("EMPATE"), 'E');
+        assert_eq!(parse_verdict(""), 'E');
+    }
 }

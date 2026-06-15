@@ -1200,20 +1200,57 @@ impl Tool for MakeNoteTool {
 
 /// Formatea una instantánea de accesibilidad para el LLM: texto visible + lista de
 /// elementos interactivos NUMERADOS (el agente actúa por número, no por selector CSS).
+/// Máx. de texto de página por snapshot. Sin esto, una página grande (p. ej. un README de
+/// GitHub) entra ENTERA en la observación, se re-inyecta en cada paso del ReAct y, con un LLM
+/// local lento, agota el timeout de pared → el agente «se queda atascado». Acotar el snapshot
+/// (texto + elementos) mantiene cada paso ligero; si hace falta más, el agente puede hacer
+/// scroll/find.
+const SNAPSHOT_MAX_TEXT: usize = 2000;
+/// Máx. de elementos interactivos listados. Se priorizan los ETIQUETADOS (los «(sin etiqueta)»
+/// —decenas en webs como GitHub— rara vez sirven al agente y solo inflan el contexto).
+const SNAPSHOT_MAX_ELEMENTS: usize = 20;
+
 fn format_snapshot(s: &aion_browser::Snapshot) -> String {
-    let mut out = format!("[{}] {}\n{}\n", s.view.title, s.view.url, s.view.text);
+    let full_len = s.view.text.chars().count();
+    let text: String = s.view.text.chars().take(SNAPSHOT_MAX_TEXT).collect();
+    let mut out = format!("[{}] {}\n{}", s.view.title, s.view.url, text);
+    if full_len > SNAPSHOT_MAX_TEXT {
+        out.push_str(&format!(
+            "\n…(+{} caracteres recortados; haz scroll o usa browser_find para ver más)",
+            full_len - SNAPSHOT_MAX_TEXT
+        ));
+    }
+    out.push('\n');
     if s.elements.is_empty() {
         out.push_str("\n(sin elementos interactivos detectados)");
         return out;
     }
+    // Prioriza elementos CON etiqueta; si casi ninguno la tiene, muestra todos (acotados).
+    let labeled: Vec<_> = s
+        .elements
+        .iter()
+        .filter(|e| !e.name.trim().is_empty())
+        .collect();
+    let chosen: Vec<_> = if labeled.len() >= 3 {
+        labeled
+    } else {
+        s.elements.iter().collect()
+    };
+    let shown = chosen.len().min(SNAPSHOT_MAX_ELEMENTS);
     out.push_str("\nElementos interactivos (usa el número con browser_click / browser_type):\n");
-    for e in &s.elements {
+    for e in chosen.iter().take(SNAPSHOT_MAX_ELEMENTS) {
         let name = if e.name.is_empty() {
             "(sin etiqueta)"
         } else {
             &e.name
         };
         out.push_str(&format!("[{}] {} «{}»\n", e.ref_id, e.kind, name));
+    }
+    if s.elements.len() > shown {
+        out.push_str(&format!(
+            "(+{} elementos más omitidos)\n",
+            s.elements.len() - shown
+        ));
     }
     out
 }
@@ -1233,10 +1270,12 @@ fn resolve_target(input: &str) -> String {
 /// interactivos numerados (snapshot de accesibilidad).
 pub struct BrowserOpenTool {
     driver: Arc<dyn BrowserDriver>,
+    /// Fallback HTTP: si el navegador real falla/se cuelga, descargamos el texto plano.
+    web: Arc<aion_browser::WebClient>,
 }
 impl BrowserOpenTool {
-    pub fn new(driver: Arc<dyn BrowserDriver>) -> Self {
-        Self { driver }
+    pub fn new(driver: Arc<dyn BrowserDriver>, web: Arc<aion_browser::WebClient>) -> Self {
+        Self { driver, web }
     }
 }
 #[async_trait]
@@ -1245,18 +1284,47 @@ impl Tool for BrowserOpenTool {
         "browser_open"
     }
     fn description(&self) -> &str {
-        "Abre una URL en un navegador REAL (con JavaScript) y devuelve el texto visible \
-         MÁS la lista de elementos interactivos numerados. Úsalo para webs dinámicas o \
-         para interactuar (luego browser_click / browser_type usando esos números). \
-         Entrada: la URL."
+        "Abre una URL en un navegador REAL (con JavaScript). Es LENTO y pesado: úsalo SOLO si \
+         la página necesita JS o vas a INTERACTUAR (luego browser_click / browser_type con los \
+         números). Para solo LEER o resumir el texto de una página, usa web_fetch (mucho más \
+         rápido). Entrada: la URL."
     }
     async fn run(&self, input: &str) -> Result<String, String> {
-        self.driver
-            .open(input.trim())
-            .await
-            .map_err(|e| e.to_string())?;
-        let s = self.driver.snapshot().await.map_err(|e| e.to_string())?;
-        Ok(format_snapshot(&s))
+        // Timeout propio: chromiumoxide puede colgarse al lanzar/navegar y, sin esto, se come
+        // el presupuesto entero del agente (síntoma: «me quedé atascado»). Si excede, fallamos
+        // rápido para que el agente caiga a web_fetch o responda con honestidad.
+        let snap = tokio::time::timeout(std::time::Duration::from_secs(25), async {
+            self.driver
+                .open(input.trim())
+                .await
+                .map_err(|e| e.to_string())?;
+            self.driver.snapshot().await.map_err(|e| e.to_string())
+        })
+        .await;
+        let reason = match snap {
+            Ok(Ok(s)) => return Ok(format_snapshot(&s)),
+            // Conserva el motivo REAL (no lo traga): un timeout y un «Chrome no instalado»
+            // o un rechazo de URL son cosas distintas; el operador necesita verlo.
+            Ok(Err(e)) => format!("el navegador falló: {e}"),
+            Err(_) => "el navegador no respondió en 25s".to_string(),
+        };
+        // OBSERVABILIDAD: deja rastro del fallo real del navegador (si no, un chromiumoxide
+        // que se cuelga SIEMPRE quedaría invisible y nadie sabría por qué browser_click no va).
+        tracing::warn!(url = %input.trim(), reason = %reason, "browser_open falló; caigo a HTTP (web_fetch)");
+        // FALLBACK a descarga HTTP simple (sin JS): para LEER/resumir basta. Así «abre/investiga
+        // esta URL» funciona elija lo que elija el agente, sin atascarse.
+        match self.web.fetch_text(input.trim()).await {
+            Ok(text) => {
+                let t: String = text.chars().take(2500).collect();
+                Ok(format!(
+                    "({reason}; te doy el TEXTO PLANO de la página vía HTTP, sin JavaScript \
+                     ni elementos interactivos):\n{t}"
+                ))
+            }
+            Err(e) => Err(format!(
+                "no pude abrir la página ni con navegador ({reason}) ni por HTTP: {e}"
+            )),
+        }
     }
 }
 
@@ -1279,7 +1347,10 @@ impl Tool for BrowserReadTool {
          numerados (úsalo tras browser_click o cuando la página cargó más contenido)."
     }
     async fn run(&self, _input: &str) -> Result<String, String> {
-        let s = self.driver.snapshot().await.map_err(|e| e.to_string())?;
+        let s = tokio::time::timeout(std::time::Duration::from_secs(25), self.driver.snapshot())
+            .await
+            .map_err(|_| "el navegador tardó demasiado (>25s) al releer la página".to_string())?
+            .map_err(|e| e.to_string())?;
         Ok(format_snapshot(&s))
     }
 }
@@ -1766,6 +1837,63 @@ impl Tool for SkillForgeTool {
 // ── 3) Invocar skill: usar una skill (semilla o forjada) ────────────────────
 
 /// Invoca una skill registrada (incluidas las que el agente acaba de forjar).
+/// Herramienta de RECUERDO EPISÓDICO: deja al agente «ir a la biblioteca y traer un libro
+/// concreto» — buscar micromomentos específicos de conversaciones pasadas bajo demanda, sin
+/// cargar toda la memoria. Complementa a memory_search (hechos destilados) con el DETALLE.
+pub struct EpisodicRecallTool;
+
+impl EpisodicRecallTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for EpisodicRecallTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for EpisodicRecallTool {
+    fn name(&self) -> &str {
+        "episodic_recall"
+    }
+    fn description(&self) -> &str {
+        "Recuerda MICROMOMENTOS concretos de conversaciones pasadas con Ariel (detalles \
+         específicos: qué dijo, cuándo, sobre qué) — como ir a una biblioteca y traer UN \
+         libro concreto. Entrada: lo que quieres recordar, opcionalmente seguido de \
+         ' :: días' para limitar a los últimos N días (p. ej. «qué opinó del color azul :: 30»). \
+         Úsala cuando necesites un detalle exacto del pasado; para hechos/preferencias \
+         destilados usa memory_search."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let (query, days) = match input.rsplit_once("::") {
+            Some((q, d)) if d.trim().parse::<i64>().is_ok() => {
+                (q.trim(), d.trim().parse::<i64>().unwrap_or(0).max(0))
+            }
+            _ => (input.trim(), 0),
+        };
+        if query.is_empty() {
+            return Err("dame qué quieres recordar, p. ej. «qué dijo de su viaje :: 14»".into());
+        }
+        let hits = crate::episodic::recall(query, 5, days).await;
+        if hits.is_empty() {
+            return Ok("(no encuentro micromomentos sobre eso en mi biblioteca episódica)".into());
+        }
+        let now = chrono::Utc::now().timestamp();
+        let mut out = String::from("Micromomentos que recuerdo:\n");
+        for h in hits {
+            out.push_str(&format!(
+                "- hace {}: {}\n",
+                crate::awareness::humanize_secs(now - h.at),
+                h.detail.trim()
+            ));
+        }
+        Ok(out)
+    }
+}
+
 pub struct SkillInvokeTool {
     host: Arc<WasmSkillHost>,
 }
