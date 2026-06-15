@@ -138,6 +138,7 @@ impl WebClient {
                 title: json["Heading"].as_str().unwrap_or("Resumen").to_string(),
                 url: abstract_url.to_string(),
                 snippet: abstract_text.to_string(),
+                source: "web".into(),
             });
         }
         // Temas relacionados (enlazan a sitios reales).
@@ -156,6 +157,7 @@ impl WebClient {
                     title: text.chars().take(80).collect(),
                     url: u.to_string(),
                     snippet: text.to_string(),
+                    source: "web".into(),
                 });
             }
         }
@@ -189,10 +191,228 @@ impl WebClient {
                     url: format!("https://es.wikipedia.org/wiki/{}", urlencode(&page)),
                     title,
                     snippet,
+                    source: "enciclopedia".into(),
                 });
             }
         }
         Ok(out)
+    }
+
+    /// **OpenAlex** — papers académicos revisados por pares (~250M works), sin clave.
+    /// `mailto` entra al *polite pool* (más estable). Para rigor y estado del arte.
+    async fn search_openalex(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let url = format!(
+            "https://api.openalex.org/works?search={}&per_page={limit}\
+             &mailto=info@prontoclick.it",
+            urlencode(query)
+        );
+        let json = self.fetch_json(&url).await?;
+        let mut out = Vec::new();
+        if let Some(arr) = json["results"].as_array() {
+            for w in arr.iter().take(limit) {
+                let title = w["title"].as_str().unwrap_or("").to_string();
+                let u = w["primary_location"]["landing_page_url"]
+                    .as_str()
+                    .or_else(|| w["doi"].as_str())
+                    .or_else(|| w["id"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if title.is_empty() || u.is_empty() {
+                    continue;
+                }
+                let year = w["publication_year"]
+                    .as_i64()
+                    .map(|y| y.to_string())
+                    .unwrap_or_default();
+                let cites = w["cited_by_count"].as_i64().unwrap_or(0);
+                out.push(SearchResult {
+                    title,
+                    url: u,
+                    snippet: format!("Paper académico ({year}) · {cites} citas"),
+                    source: "académico".into(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// **Hacker News** (Algolia) — discusiones de profesionales tech (foros).
+    async fn search_hackernews(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let url = format!(
+            "https://hn.algolia.com/api/v1/search?query={}&tags=story&hitsPerPage={limit}",
+            urlencode(query)
+        );
+        let json = self.fetch_json(&url).await?;
+        let mut out = Vec::new();
+        if let Some(arr) = json["hits"].as_array() {
+            for h in arr.iter().take(limit) {
+                let title = h["title"].as_str().unwrap_or("").to_string();
+                if title.is_empty() {
+                    continue;
+                }
+                let id = h["objectID"].as_str().unwrap_or("");
+                let u = h["url"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("https://news.ycombinator.com/item?id={id}"));
+                let pts = h["points"].as_i64().unwrap_or(0);
+                let nc = h["num_comments"].as_i64().unwrap_or(0);
+                out.push(SearchResult {
+                    title,
+                    url: u,
+                    snippet: format!("Hacker News · {pts} puntos · {nc} comentarios"),
+                    source: "foro".into(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// **Stack Exchange** (Stack Overflow) — Q&A técnico. La API responde gzip.
+    async fn search_stackexchange(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let url = format!(
+            "https://api.stackexchange.com/2.3/search/advanced?q={}&site=stackoverflow\
+             &order=desc&sort=relevance&pagesize={limit}",
+            urlencode(query)
+        );
+        let json = self.fetch_json(&url).await?;
+        let mut out = Vec::new();
+        if let Some(arr) = json["items"].as_array() {
+            for it in arr.iter().take(limit) {
+                let title = strip_html_tags(it["title"].as_str().unwrap_or(""));
+                let u = it["link"].as_str().unwrap_or("").to_string();
+                if title.is_empty() || u.is_empty() {
+                    continue;
+                }
+                let score = it["score"].as_i64().unwrap_or(0);
+                let answered = it["is_answered"].as_bool().unwrap_or(false);
+                out.push(SearchResult {
+                    title,
+                    url: u,
+                    snippet: format!(
+                        "Stack Overflow · score {score}{}",
+                        if answered { " · resuelto" } else { "" }
+                    ),
+                    source: "foro".into(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// **GitHub** — repos relevantes (proyectos/herramientas reales), por estrellas. Sin clave.
+    async fn search_github(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let url = format!(
+            "https://api.github.com/search/repositories?q={}&sort=stars&order=desc&per_page={limit}",
+            urlencode(query)
+        );
+        let json: serde_json::Value = self
+            .http
+            .get(&url)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+            .map_err(|e| AionError::Internal(format!("github falló: {e}")))?
+            .json()
+            .await
+            .map_err(|e| AionError::Internal(format!("github json inválido: {e}")))?;
+        let mut out = Vec::new();
+        if let Some(arr) = json["items"].as_array() {
+            for r in arr.iter().take(limit) {
+                let title = r["full_name"].as_str().unwrap_or("").to_string();
+                let u = r["html_url"].as_str().unwrap_or("").to_string();
+                if title.is_empty() || u.is_empty() {
+                    continue;
+                }
+                let desc = r["description"].as_str().unwrap_or("(sin descripción)");
+                let stars = r["stargazers_count"].as_i64().unwrap_or(0);
+                out.push(SearchResult {
+                    title,
+                    url: u,
+                    snippet: format!("GitHub ⭐{stars} · {desc}"),
+                    source: "código".into(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Búsqueda acotada a un DOMINIO vía DDG (`site:`), para fuentes que bloquean su API
+    /// directa (Reddit, YouTube). Reusa el parser de DDG; `label` marca la familia.
+    async fn search_site(
+        &self,
+        query: &str,
+        site: &str,
+        label: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let mut rs = self
+            .search_ddg(&format!("{query} site:{site}"), limit)
+            .await?;
+        for r in rs.iter_mut() {
+            r.source = label.to_string();
+        }
+        Ok(rs)
+    }
+
+    /// **Búsqueda PROFUNDA multi-fuente** (investigación profesional). Consulta MUCHAS fuentes
+    /// diversas y creíbles EN PARALELO —web general, académico (OpenAlex), foros (Hacker News,
+    /// Stack Exchange, Reddit), código (GitHub), vídeo (YouTube)— SIN depender de Wikipedia, y
+    /// devuelve hasta `limit` URLs únicas, diversificadas por dominio (máx. 3/host) y etiquetadas
+    /// por familia. Fail-soft: una fuente caída/lenta no vacía el resultado.
+    pub async fn search_deep(&self, query: &str, limit: usize) -> Vec<SearchResult> {
+        let per = 6usize;
+        let (ddg, oa, hn, se, gh, rd, yt) = tokio::join!(
+            self.search_ddg(query, per * 2),
+            self.search_openalex(query, per),
+            self.search_hackernews(query, per),
+            self.search_stackexchange(query, per),
+            self.search_github(query, per),
+            self.search_site(query, "reddit.com", "foro", per),
+            self.search_site(query, "youtube.com", "vídeo", per),
+        );
+        let mut out: Vec<SearchResult> = Vec::new();
+        let mut seen_url: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut host_count: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        // ROUND-ROBIN entre fuentes: toma 1 de cada una por turno (web, académico, foro, código,
+        // vídeo…) en vez de encadenar (que dejaba que DDG llenara el cupo antes de llegar a las
+        // demás). Así el resultado es DIVERSO de verdad, no dominado por un solo motor.
+        let pools: Vec<Vec<SearchResult>> = vec![
+            ddg.unwrap_or_default(),
+            oa.unwrap_or_default(),
+            hn.unwrap_or_default(),
+            se.unwrap_or_default(),
+            gh.unwrap_or_default(),
+            rd.unwrap_or_default(),
+            yt.unwrap_or_default(),
+        ];
+        let depth = pools.iter().map(|p| p.len()).max().unwrap_or(0);
+        'fill: for col in 0..depth {
+            for pool in &pools {
+                let Some(r) = pool.get(col) else {
+                    continue;
+                };
+                if r.url.is_empty() || !r.url.starts_with("http") {
+                    continue;
+                }
+                if !seen_url.insert(r.url.clone()) {
+                    continue;
+                }
+                let host = host_of(&r.url);
+                let c = host_count.entry(host).or_insert(0);
+                if *c >= 3 {
+                    continue; // máx 3 por dominio: evita que un sitio domine
+                }
+                *c += 1;
+                out.push(r.clone());
+                if out.len() >= limit {
+                    break 'fill;
+                }
+            }
+        }
+        out
     }
 
     /// **Clima EN TIEMPO REAL de un lugar** vía Open-Meteo (sin API key): geocodifica
@@ -466,6 +686,9 @@ pub struct SearchResult {
     pub title: String,
     pub url: String,
     pub snippet: String,
+    /// Familia de fuente de la que vino ("web", "académico", "foro", "código", "vídeo"…).
+    /// Permite al informe profesional citar y ponderar por tipo de fuente.
+    pub source: String,
 }
 
 /// Un lugar/negocio encontrado por dirección (OpenStreetMap).
@@ -521,6 +744,7 @@ fn parse_ddg_results(html: &str, limit: usize) -> Vec<SearchResult> {
                 title: title.trim().to_string(),
                 url,
                 snippet: snippet.trim().to_string(),
+                source: "web".into(),
             });
             if out.len() >= limit {
                 break;

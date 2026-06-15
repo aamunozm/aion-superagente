@@ -1561,6 +1561,38 @@ async fn agent(
             return;
         }
 
+        // 🔬 INVESTIGACIÓN PROFUNDA multi-agente: si Ariel pide investigar a fondo (no una
+        // búsqueda rápida ni una URL concreta), desplegamos el pipeline profesional —descompone,
+        // busca en muchas fuentes diversas, lee en paralelo y redacta un informe cruzado—. Emite
+        // su progreso en vivo. Pesado a propósito; por eso solo ante una petición clara.
+        if crate::deep_research::is_deep_research(&body.task) && extract_url(&body.task).is_none() {
+            crate::inner_state::set_focus("agente", "investigación profunda para Ariel");
+            let web = aion_browser::WebClient::new();
+            let txp = tx.clone();
+            let emit = move |kind: &str, text: &str| {
+                let _ = txp.try_send(
+                    Event::default()
+                        .data(serde_json::json!({ "kind": kind, "text": text }).to_string()),
+                );
+            };
+            // Exhaustiva (acordado con Ariel): reunir ~28 fuentes diversas, leer hasta READ_CAP.
+            let report = crate::deep_research::run(&*engine, &web, &body.task, 28, emit).await;
+            crate::workspace::publish(crate::workspace::StreamEvent::now(
+                "agente",
+                "pensamiento",
+                "completé una investigación profunda con informe cruzado para Ariel",
+            ));
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "answer", "text": report, "steps": 1 }).to_string(),
+                ))
+                .await;
+            let _ = tx
+                .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                .await;
+            return;
+        }
+
         // 🌐 FAST-PATH DE LECTURA WEB: para "lee/investiga/resume esta URL", el bucle ReAct
         // es un mal encaje con un LLM local lento (divaga entre pasos y agota el timeout
         // aunque ya tenga el contenido). Camino directo y determinista: descargar el texto +
