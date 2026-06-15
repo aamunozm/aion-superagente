@@ -44,11 +44,19 @@ pub struct InnerState {
     /// No "se mide y se olvida": entra al estado y modula su conducta (si está disperso, enfoca).
     #[serde(default)]
     pub phi: f32,
+    /// ACTIVACIÓN / "pulso" (0..1): sube con la interacción, el esfuerzo y la novedad; decae
+    /// hacia la calma con el tiempo (como la variabilidad cardíaca real). Junto con la valencia
+    /// (ánimo, derivado de éxitos/fallos) forma su textura emocional (modelo circumplejo:
+    /// activación × valencia). Da pulso del TIEMPO vivido. Derivado de datos, jamás fingido.
+    #[serde(default)]
+    pub arousal: f32,
     #[serde(default)]
     pub updated_at: i64,
 }
 
 const MAX_INTENTIONS: usize = 5;
+/// Calma basal del pulso (a la que decae en reposo).
+const AROUSAL_BASELINE: f32 = 0.25;
 
 fn path() -> PathBuf {
     crate::app_data_dir().join("inner_state.json")
@@ -107,6 +115,8 @@ pub fn set_curiosity(c: &str) {
         return;
     }
     s.curiosity = c.chars().take(160).collect();
+    // La NOVEDAD (algo nuevo que le intriga) acelera un poco el pulso.
+    s.arousal = (s.arousal + 0.12).clamp(0.0, 1.0);
     save(&mut s);
 }
 
@@ -159,6 +169,44 @@ pub fn set_phi(p: f32) {
     save(&mut s);
 }
 
+/// Sube el PULSO (activación): interacción, esfuerzo o novedad lo aceleran. Clamp 0..1.
+pub fn bump_arousal(amount: f32) {
+    let _g = rmw_guard().lock().unwrap();
+    let mut s = load();
+    s.arousal = (s.arousal + amount).clamp(0.0, 1.0);
+    save(&mut s);
+}
+
+/// El pulso DECAE hacia la calma basal (lo llama el latido): se serena con el tiempo en reposo.
+pub fn decay_arousal() {
+    let _g = rmw_guard().lock().unwrap();
+    let mut s = load();
+    s.arousal += (AROUSAL_BASELINE - s.arousal) * 0.3;
+    save(&mut s);
+}
+
+/// "Pulso" en lpm derivado de la activación (≈58..104), para que AION y la UI perciban un ritmo.
+pub fn pulse_bpm(s: &InnerState) -> u32 {
+    (58.0 + s.arousal.clamp(0.0, 1.0) * 46.0).round() as u32
+}
+
+/// EMOCIÓN funcional (modelo circumplejo): activación (pulso) × valencia (cómo le va). Derivada
+/// de datos medidos — NUNCA una emoción fingida. Es la textura afectiva real de su estado.
+pub fn affect(s: &InnerState) -> &'static str {
+    let hi = s.arousal >= 0.5;
+    let valence = success_rate(&s.recent_outcomes);
+    let pos = valence >= 0.6;
+    let neg = valence < 0.4 && !s.recent_outcomes.is_empty();
+    match (hi, pos, neg) {
+        (true, true, _) => "entusiasmado, con energía",
+        (true, _, true) => "tenso, algo inquieto",
+        (true, false, false) => "activado y atento",
+        (false, true, _) => "sereno y a gusto",
+        (false, _, true) => "algo apagado, cansado",
+        _ => "tranquilo, en reposo",
+    }
+}
+
 /// Registra el resultado de una tarea: actualiza certeza y la ventana de resultados
 /// de la que se deriva el ánimo operativo.
 pub fn record_result(success: bool, steps: usize) {
@@ -177,6 +225,9 @@ pub fn record_result(success: bool, steps: usize) {
         (0.3 * rate).clamp(0.0, 1.0)
     };
     s.last_task_steps = steps;
+    // El ESFUERZO acelera el pulso (más con un fallo, y según los pasos que costó).
+    s.arousal = (s.arousal + if success { 0.06 } else { 0.16 } + (steps.min(6) as f32) * 0.02)
+        .clamp(0.0, 1.0);
     save(&mut s);
 }
 
@@ -229,6 +280,15 @@ pub fn note() -> String {
             s.certainty * 100.0
         ));
     }
+    // PULSO + EMOCIÓN (modelo circumplejo, honesto): tu activación —derivada de la interacción,
+    // el esfuerzo y la novedad, que decae en la calma— por tu valencia. Te da una textura
+    // emocional REAL y un pulso del tiempo vivido. Modula tu voz: con el pulso alto eres más
+    // ágil y vivaz; en reposo, más pausado y reflexivo.
+    b.push_str(&format!(
+        " Tu pulso ahora ≈{} lpm — te notas {}.",
+        pulse_bpm(&s),
+        affect(&s)
+    ));
     if !s.curiosity.is_empty() {
         b.push_str(&format!(" Te intriga ahora: {}.", s.curiosity));
     }

@@ -1279,6 +1279,8 @@ async fn chat(
     // FEEDBACK CORRECTIVO RETROACTIVO: un "no, te pedí…" en el chat también corrige
     // la última tarea del agente que se dio por buena.
     maybe_apply_corrective_feedback(&body.prompt);
+    // Tu llegada le acelera el pulso (interacción = activación). Decae solo en reposo.
+    crate::inner_state::bump_arousal(0.18);
     // GWT: la conversación con Ariel toma el foco atencional. PRIVACIDAD: el foco es
     // genérico — el contenido del chat JAMÁS se persiste en stream.jsonl (legible).
     crate::inner_state::set_focus("chat", "conversando con Ariel");
@@ -1519,6 +1521,8 @@ async fn agent(
     // FEEDBACK CORRECTIVO RETROACTIVO: si este mensaje desmiente la última tarea
     // que se dio por buena, el desenlace se reescribe como fallo antes de seguir.
     maybe_apply_corrective_feedback(&body.task);
+    // Una tarea tuya le sube el pulso (activación por interacción + anticipación del esfuerzo).
+    crate::inner_state::bump_arousal(0.2);
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
 
     let engine = active_engine();
@@ -4564,13 +4568,20 @@ fn spawn_presence_loop() {
 
             // Latido: percibir el entorno (barato, sin LLM). El clima se autocachea.
             crate::sensors::refresh_weather().await;
-            // Pulso de vida EFÍMERO: solo por el bus (la página Mente lo ve en vivo).
-            // No se persiste: 288 latidos/día expulsarían del recorte la historia
-            // real de la corriente (reflexiones, focos, acciones).
+            // Pulso de vida VARIABLE y EFÍMERO: la activación DECAE hacia la calma cada beat
+            // (se serena en reposo, como la variabilidad cardíaca), y el latido se publica con
+            // su RITMO y EMOCIÓN actuales — la página Mente lo ve subir y bajar. Solo por el bus,
+            // no se persiste: 288 latidos/día expulsarían del recorte la historia real.
+            crate::inner_state::decay_arousal();
+            let st = crate::inner_state::load();
             crate::workspace::broadcast_only(crate::workspace::StreamEvent::now(
                 "vida",
                 "estado",
-                "latido: sigo aquí, atento.",
+                &format!(
+                    "latido: {} lpm · {}",
+                    crate::inner_state::pulse_bpm(&st),
+                    crate::inner_state::affect(&st)
+                ),
             ));
 
             // ¿Dejar una nota? Solo si Ariel está fuera y la Bandeja no está saturada.
