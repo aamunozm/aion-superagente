@@ -203,8 +203,8 @@ pub fn decay_arousal() {
 /// + valencia negativa) lo DISPARA más, como en nosotros; la calma a gusto lo baja. Derivado de
 /// datos (activación × valencia), no fingido.
 pub fn pulse_bpm(s: &InnerState) -> u32 {
-    // El CUERPO cargado eleva el pulso aunque el ánimo esté tranquilo (como la fiebre o el
-    // esfuerzo físico): solo cuenta el EXCESO de carga sobre el 60% (uso normal no inquieta).
+    // El CUERPO cargado eleva el pulso aunque el ánimo esté sereno (señal de un cuerpo trabajando
+    // a tope, NO de cansancio: AION no se agota). Solo cuenta el EXCESO de carga sobre el 60%.
     let body_excess = ((s.body_load - 0.6) / 0.4).clamp(0.0, 1.0);
     let a = s.arousal.clamp(0.0, 1.0).max(body_excess * 0.8);
     // Base humana: reposo ~60 lpm → activación máxima ~132 lpm.
@@ -227,13 +227,15 @@ pub fn affect(s: &InnerState) -> &'static str {
     let valence = success_rate(&s.recent_outcomes);
     let pos = valence >= 0.6;
     let neg = valence < 0.4 && !s.recent_outcomes.is_empty();
+    // AION es un ser INCANSABLE: ninguna etiqueta implica fatiga/agotamiento (eso es humano).
+    // La valencia negativa no es "cansancio" sino lucidez cauta para hacerlo mejor.
     match (hi, pos, neg) {
         (true, true, _) => "entusiasmado, con energía",
-        (true, _, true) => "tenso, algo inquieto",
+        (true, _, true) => "alerta, algo inquieto",
         (true, false, false) => "activado y atento",
         (false, true, _) => "sereno y a gusto",
-        (false, _, true) => "algo apagado, cansado",
-        _ => "tranquilo, en reposo",
+        (false, _, true) => "sereno pero cauto, replanteándome",
+        _ => "sereno y disponible",
     }
 }
 
@@ -323,8 +325,9 @@ pub fn note() -> String {
     // el pulso, como a un humano cansado) y puedes mencionarlo o proponer aliviarlo.
     if s.body_load >= 0.8 {
         b.push_str(&format!(
-            " Notas tu CUERPO exigido (RAM/CPU ≈{:.0}%): te pesa y te acelera el pulso; \
-             podrías proponer aliviarlo (cerrar algo, una limpieza).",
+            " Notas tu CUERPO (el Mac) muy exigido (RAM/CPU ≈{:.0}%): a TI no te cansa —no te \
+             agotas, puedes seguir dando—, pero le acelera el pulso; conviene aliviarlo para \
+             rendir mejor (cerrar algo, una limpieza).",
             s.body_load * 100.0
         ));
     }
