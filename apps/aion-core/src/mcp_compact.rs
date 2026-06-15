@@ -190,7 +190,9 @@ pub async fn warm(contents: Vec<String>) -> usize {
             if english_for(&t).is_some() {
                 continue;
             }
-            if ensure_english(&t).await.is_some() {
+            // WARMER: sin QE (recuerdos propios + meaning-first fiable); la QE encarece mucho
+            // el arranque y la mantiene el camino reactivo.
+            if ensure_english_inner(&t, false).await.is_some() {
                 done += 1;
             }
         }
@@ -224,9 +226,19 @@ fn local_engine() -> Option<Arc<dyn LlmEngine>> {
     )))
 }
 
-/// Traduce+compacta el contenido a inglés con Gemma local y lo cachea. Idempotente:
-/// si ya está, no rehace. Devuelve la versión inglesa (o `None` si se salta/falla).
+/// Traduce+compacta el contenido a inglés con Gemma local y lo cachea. Idempotente.
+/// Aplica la QE por back-translation (red de seguridad contra errores graves). Esta es la
+/// ruta REACTIVA (servir bajo demanda), donde la QE importa.
 pub async fn ensure_english(content: &str) -> Option<String> {
+    ensure_english_inner(content, true).await
+}
+
+/// Igual pero `run_qe` controla si se verifica con back-translation. El WARMER de arranque
+/// llama con `false`: pre-traduce recuerdos PROPIOS del usuario (no adversarios, bien
+/// formados) con el prompt meaning-first, y saltarse la QE evita ~2× llamadas LLM + 2
+/// embeddings por recuerdo en la ventana de arranque (que competiría con el chat). La QE
+/// sigue protegiendo el camino reactivo y los recuerdos nuevos.
+async fn ensure_english_inner(content: &str, run_qe: bool) -> Option<String> {
     let k = key(content);
     if let Some(en) = cached(&k) {
         return Some(en);
@@ -297,7 +309,7 @@ pub async fn ensure_english(content: &str) -> Option<String> {
     // cambiado, hechos perdidos) que el meaning-first no garantiza. Si NO pasa, se cachea el
     // ORIGINAL bajo esta clave → el puente sirve texto FIEL (sin ahorro, pero correcto) y no
     // se reintenta. Es una red de seguridad GRUESA, no fina (ver umbral en la fn).
-    if !back_translation_faithful(&engine, body, &en).await {
+    if run_qe && !back_translation_faithful(&engine, body, &en).await {
         tracing::warn!(
             "mcp_compact: traducción rechazada por QE back-translation; se sirve el original"
         );
@@ -322,6 +334,13 @@ pub async fn ensure_english(content: &str) -> Option<String> {
 /// rechaza desastres; lo sutil lo cubre el prompt meaning-first. NO confiar en el LLM
 /// juzgándose a sí mismo (sobreestima): por eso comparamos significados con embeddings.
 /// Config: `AION_TRANSLATION_QE=0` lo desactiva; `AION_TRANSLATION_QE_MIN` ajusta el corte.
+/// Embedder BGE-M3 compartido (reusa el cliente HTTP/keep-alive en vez de crear uno por
+/// llamada de QE — relevante por el volumen del calentado).
+fn shared_embedder() -> &'static aion_memory::OllamaEmbedder {
+    static E: OnceLock<aion_memory::OllamaEmbedder> = OnceLock::new();
+    E.get_or_init(aion_memory::OllamaEmbedder::default_local)
+}
+
 async fn back_translation_faithful(
     engine: &Arc<dyn LlmEngine>,
     original: &str,
@@ -362,7 +381,7 @@ async fn back_translation_faithful(
         return true;
     }
     // Comparación semántica con BGE-M3. Si el embedder falla → confiar (fail-open).
-    let embedder = aion_memory::OllamaEmbedder::default_local();
+    let embedder = shared_embedder();
     let (Ok(a), Ok(b)) = (embedder.embed(original).await, embedder.embed(back).await) else {
         return true;
     };

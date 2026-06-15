@@ -3288,12 +3288,10 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         "pdf",
         "word",
         "excel",
-        "nota",
         "web",
         "internet",
         "busca",
         "abre",
-        "crea",
         "ejecuta",
         "comando",
         "terminal",
@@ -3318,23 +3316,26 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         "cancella",
         "sposta",
         "cartella",
-        "cerca",
         "apri",
         "esegui",
         "scarica",
         "installa",
         "schermo",
-        "posta",
         "naviga",
         "calcol",
     ];
+    // Tokens que SOLO disparan como PALABRA EXACTA (no por `starts_with`): son prefijos de
+    // palabras de contenido frecuentes en ES/IT y darían falsos positivos. "red"(local)≠
+    // "reducir"; "cerca"(it: busca)≠"cercano"; "posta"≠"postal"; "crea"≠"creativo";
+    // "nota"≠"notable". El imperativo real ("cerca su internet", "crea un doc") sí casa.
+    const TOOLISH_EXACT: &[&str] = &["red", "cerca", "posta", "crea", "nota"];
     // Stems de herramienta: ya NO toman la decisión final. Si alguno aparece, el mensaje es
     // solo AMBIGUO (Unsure) → lo resuelve el clasificador LLM leyendo el SENTIDO COMPLETO, no
     // la palabra suelta. Antes esto devolvía Tool directo y un «estoy BUSCANDO qué mejoras
     // agregarte» (stem «busca») se enrutaba como tarea al ReAct y se atascaba.
     let toolish = words
         .iter()
-        .any(|w| *w == "red" || TOOLISH.iter().any(|s| w.starts_with(s)));
+        .any(|w| TOOLISH_EXACT.contains(w) || TOOLISH.iter().any(|s| w.starts_with(s)));
     if toolish {
         return TalkClass::Unsure;
     }
@@ -3611,10 +3612,22 @@ fn is_trivial_query(prompt: &str) -> bool {
         "thank you",
         "bye",
     ];
-    if words <= 2 && GREETINGS.iter().any(|g| p.starts_with(g)) {
+    // Tokens cortos (hi, ok, bye…) deben casar como PALABRA COMPLETA, no por prefijo: con
+    // `starts_with` "hi" tragaba "hijo/historia/high", "ok"→"okay", etc., tratando mensajes
+    // reales como saludo trivial (y saltándose comprensión/grounding). Los saludos de varias
+    // palabras ("va bene", "thank you") sí van por prefijo del mensaje.
+    let first = p.split_whitespace().next().unwrap_or("");
+    let is_greeting = GREETINGS.iter().any(|g| {
+        if g.contains(' ') {
+            p.starts_with(g)
+        } else {
+            first == *g
+        }
+    });
+    if words <= 2 && is_greeting {
         return true;
     }
-    p.is_empty() || p.len() < 4
+    p.is_empty() || p.chars().count() < 4
 }
 
 /// ¿Este intercambio merece ir a la memoria de LARGO PLAZO? La memoria permanente
