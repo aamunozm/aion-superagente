@@ -1075,6 +1075,19 @@ fn looks_like_question(prompt: &str) -> bool {
         "necesito saber",
         "me puedes decir",
         "puedes decirme",
+        // Peticiones tipo «¿puedes…?» / «¿podrías…?»: son marcadores interrogativos/de
+        // petición (conjunto cerrado), NO vocabulario de dominio. Disparan que el SENTIDO
+        // decida (charla vs herramienta), en vez de que la longitud lo mande a charla.
+        "puedes",
+        "podrías",
+        "podrias",
+        "podés",
+        "podes",
+        "puedo",
+        "puoi",
+        "potresti",
+        "can you",
+        "could you",
         // Italiano (Ariel vive en Italia; AION lo usarán también italianos).
         "cosa",
         "che cosa",
@@ -3398,9 +3411,17 @@ fn classify_message_cheap(task: &str) -> TalkClass {
     if SHARING.iter().any(|k| t.contains(k)) {
         return TalkClass::Chat;
     }
-    // Mensaje corto sin intención de herramienta → charla (rápido).
+    // Mensaje corto: si NO parece pedir/preguntar algo (un ack, una afirmación), es charla
+    // rápida. Pero si PARECE una pregunta o petición («¿puedes saber…?»), NO lo mande la
+    // longitud a charla: que el SENTIDO decida (Unsure → clasificador LLM). Antes, «puedes
+    // saber en qué ocupamos la RAM» (8 palabras, sin keyword de herramienta) caía a charla y
+    // el Agente respondía «estoy en modo chat» — justo el fallo de enrutar por palabras.
     if words.len() <= 8 {
-        return TalkClass::Chat;
+        return if looks_like_question(task) {
+            TalkClass::Unsure
+        } else {
+            TalkClass::Chat
+        };
     }
     // Largo, sin marcas claras: que lo decida el clasificador LLM.
     TalkClass::Unsure
@@ -3432,7 +3453,10 @@ async fn classify_intent_is_chat(engine: &dyn LlmEngine, task: &str) -> bool {
         ],
         think: false,
         temperature: Some(0.0),
-        max_tokens: Some(6),
+        // ≥10: gemma4-reason emite un token inicial antes de la palabra; con 6 salía vacío y
+        // `!"".contains("herramienta")` daba SIEMPRE charla → el Agente nunca usaba tools en
+        // los casos ambiguos. Con holgura, el SENTIDO decide de verdad charla vs herramienta.
+        max_tokens: Some(12),
     };
     match engine.generate(req).await {
         Ok(m) => !m.content.to_lowercase().contains("herramienta"),
@@ -5968,5 +5992,19 @@ mod intent_tests {
             ),
             TalkClass::Unsure
         );
+    }
+
+    #[test]
+    fn short_tool_request_not_forced_to_chat() {
+        // REGRESIÓN: en modo Agente, «puedes saber en qué ocupamos tanta RAM» (8 palabras,
+        // sin keyword de herramienta como «ram») caía a Chat por la regla «≤8 palabras» y el
+        // Agente respondía «estoy en modo chat». Ahora, al parecer una petición («puedes…»),
+        // NO se fuerza a charla: va al clasificador de SENTIDO (Unsure), que la enruta a tools.
+        assert_eq!(
+            classify_message_cheap("puedes saber en que estamos ocupando tanta ram"),
+            TalkClass::Unsure
+        );
+        // Un ack corto que NO es petición sigue siendo charla rápida (sin gasto de LLM).
+        assert_eq!(classify_message_cheap("si tienes razón"), TalkClass::Chat);
     }
 }
