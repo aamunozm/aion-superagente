@@ -107,6 +107,11 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         convos: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
+    // SKILLS (playbooks): siembra los defaults embebidos en disco al ARRANCAR, no de forma
+    // perezosa en la primera tarea-agente. Así el catálogo está siempre presente (p. ej. para
+    // el panel de skills) sin pisar los que Ariel haya editado. Barato e idempotente.
+    crate::skills_lib::ensure_seeded();
+
     // AUTOCONTENCIÓN local-first: garantiza el RUNTIME local (Ollama hoy; intercambiable
     // tras crate::local_runtime). El chat, los embeddings y la compactación EN del puente lo
     // necesitan vivo. EN BACKGROUND a propósito: el bind HTTP no debe esperar al arranque de
@@ -349,6 +354,8 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/provider/toggle", post(provider_toggle))
         .route("/api/provider/test", post(provider_test))
         .route("/api/governance/setup", post(governance_setup))
+        .route("/api/skills", get(skills_list).post(skills_save))
+        .route("/api/skills/delete", post(skills_delete))
         .route("/api/chat", post(chat))
         .route("/api/chat/new", post(chat_reset))
         .route("/api/agent", post(agent))
@@ -895,6 +902,40 @@ async fn governance_setup(Json(body): Json<GovSetup>) -> Json<serde_json::Value>
             Json(serde_json::json!({ "ok": true, "posture": body.posture }))
         }
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// Lista todas las skills (playbooks) con su cuerpo, para el panel de la UI.
+async fn skills_list() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "skills": crate::skills_lib::all() }))
+}
+
+/// Crea o actualiza una skill desde la UI (escribe su SKILL.md). Requiere al menos nombre.
+async fn skills_save(Json(s): Json<crate::skills_lib::PlaybookSkill>) -> Json<serde_json::Value> {
+    if s.name.trim().is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "la skill necesita un nombre" }));
+    }
+    if s.body.trim().is_empty() {
+        return Json(
+            serde_json::json!({ "ok": false, "error": "la skill necesita instrucciones (cuerpo)" }),
+        );
+    }
+    match crate::skills_lib::save_skill(&s) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct SkillDelete {
+    name: String,
+}
+
+/// Borra una skill por nombre.
+async fn skills_delete(Json(b): Json<SkillDelete>) -> Json<serde_json::Value> {
+    match crate::skills_lib::remove_skill(&b.name) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
 }
 
@@ -3085,7 +3126,33 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         "proyecto",
         "skill",
         "calcul",
+        // Verbos de ACCIÓN / diagnóstico de SISTEMA: piden herramientas (run_command, etc.),
+        // no charla. Antes «haz un escaneo de mi mac» (8 palabras) caía en la regla de
+        // mensaje corto → charla. Sobre-enrutar a herramientas es seguro: si resulta charla,
+        // el propio ReAct lo detecta y responde cálido (run.conversational).
+        "escane",
+        "escáner",
+        "escanea",
+        "revisa",
+        "revísa",
+        "verifica",
+        "analiza",
+        "analíz",
+        "diagnos",
+        "limpia",
+        "monitor",
+        "rendimiento",
+        "procesos",
+        "sistema",
+        "memoria",
+        "uptime",
         // Italiano (stems): meteo/prezzo/invia/spegni/accendi/cancella/sposta/cartella/
+        "scansiona",
+        "analizza",
+        "controlla",
+        "pulisci",
+        "processi",
+        "verifica",
         // cerca/apri/esegui/scarica/installa/schermo/posta/naviga/calcol/previsioni.
         "meteo",
         "previsioni",

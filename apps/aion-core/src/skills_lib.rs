@@ -95,13 +95,18 @@ const SEEDS: &[(&str, &str)] = &[
     ),
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlaybookSkill {
     pub name: String,
+    #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub when_to_use: String,
+    #[serde(default)]
     pub category: String,
+    #[serde(default)]
     pub tools: Vec<String>,
+    #[serde(default)]
     pub body: String,
 }
 
@@ -109,9 +114,66 @@ fn dir() -> PathBuf {
     crate::app_data_dir().join("skills_lib")
 }
 
+/// Normaliza un nombre de skill a un nombre de archivo SEGURO (kebab, sin traversal). Evita
+/// que un nombre con `../` o barras escape de la carpeta de skills.
+fn safe_filename(name: &str) -> String {
+    let slug: String = name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "skill".to_string()
+    } else {
+        slug
+    }
+}
+
+/// Serializa una skill a su `SKILL.md` (frontmatter + cuerpo) y la guarda. Crea o sobrescribe.
+/// El nombre se normaliza para el archivo (anti-traversal); el `name` del frontmatter se respeta.
+pub fn save_skill(s: &PlaybookSkill) -> std::io::Result<()> {
+    let d = dir();
+    std::fs::create_dir_all(&d)?;
+    let md = format!(
+        "---\nname: {}\ndescription: {}\nwhen_to_use: {}\ncategory: {}\ntools: {}\n---\n{}\n",
+        s.name.trim(),
+        s.description.trim(),
+        s.when_to_use.trim(),
+        s.category.trim(),
+        s.tools.join(", "),
+        s.body.trim()
+    );
+    std::fs::write(d.join(format!("{}.md", safe_filename(&s.name))), md)
+}
+
+/// Borra una skill por nombre (busca el archivo cuyo `name` coincide; cae al nombre de archivo).
+pub fn remove_skill(name: &str) -> std::io::Result<()> {
+    let n = name.trim();
+    // Primero por nombre parseado (el archivo puede llamarse distinto que el name).
+    if let Ok(rd) = std::fs::read_dir(dir()) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            if let Ok(txt) = std::fs::read_to_string(&p) {
+                if let Some(s) = parse(&txt) {
+                    if s.name.eq_ignore_ascii_case(n) {
+                        return std::fs::remove_file(&p);
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: por nombre de archivo normalizado.
+    std::fs::remove_file(dir().join(format!("{}.md", safe_filename(n))))
+}
+
 /// Siembra los defaults embebidos en disco si faltan. Idempotente: solo escribe los que no
 /// existan por nombre de archivo, así que NO pisa skills que Ariel haya editado o añadido.
-fn ensure_seeded() {
+pub fn ensure_seeded() {
     let d = dir();
     let _ = std::fs::create_dir_all(&d);
     for (fname, content) in SEEDS {

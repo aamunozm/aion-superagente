@@ -663,6 +663,29 @@ export const providerTest = (cfg: { base_url: string; api_key?: string }) =>
     body: JSON.stringify({ api_key: "", ...cfg }),
   });
 
+// ── Skills (playbooks que el agente sabe ejecutar) ──────────────────────────
+export type Skill = {
+  name: string;
+  description: string;
+  when_to_use: string;
+  category: string;
+  tools: string[];
+  body: string;
+};
+export const skillsList = () => jsonCall<{ skills: Skill[] }>("/api/skills");
+export const skillSave = (s: Skill) =>
+  jsonCall<{ ok: boolean; error?: string }>("/api/skills", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(s),
+  });
+export const skillDelete = (name: string) =>
+  jsonCall<{ ok: boolean; error?: string }>("/api/skills/delete", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+
 // Alterna en un clic el motor activo local↔API (solo si ambos están configurados).
 export const providerToggle = () =>
   jsonCall<{ ok?: boolean; kind?: string; model?: string; has_key?: boolean; error?: string }>(
