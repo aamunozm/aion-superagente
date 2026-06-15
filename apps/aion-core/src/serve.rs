@@ -786,6 +786,9 @@ async fn provider_get() -> Json<serde_json::Value> {
         "kind": c.kind, "model": c.model, "base_url": c.base_url,
         "has_key": !c.api_key.is_empty(),
         "local_model": c.local_model, "ext_model": c.ext_model,
+        // Modelo LOCAL ligero para tareas de fondo (comprensión, traducción). Vacío = usa el
+        // de chat local. Lo expone la UI para que se pueda elegir uno pequeño y rápido.
+        "utility_model": c.utility_model,
         // Se puede alternar local↔API si AMBOS están configurados/recordados.
         "can_toggle": c.has_external() && c.has_local(),
     }))

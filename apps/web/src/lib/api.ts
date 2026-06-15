@@ -632,6 +632,7 @@ export const providerSet = (cfg: {
   model: string;
   base_url?: string;
   api_key?: string;
+  utility_model?: string; // modelo local ligero para tareas de fondo (opcional)
 }) =>
   jsonCall<{ ok?: boolean; error?: string }>("/api/provider", {
     method: "POST",
@@ -646,6 +647,7 @@ export type ProviderState = {
   has_key: boolean;
   local_model: string;
   ext_model: string;
+  utility_model: string; // modelo local ligero para tareas de fondo (comprensión, traducción)
   can_toggle: boolean;
 };
 // Lee el proveedor activo. NUNCA devuelve la API key (solo `has_key`).

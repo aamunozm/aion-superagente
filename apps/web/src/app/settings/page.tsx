@@ -118,6 +118,7 @@ export default function SettingsPage() {
   // Guard de secuencia: si Ariel re-prueba mientras una prueba previa sigue en vuelo, solo la
   // ÚLTIMA aplica resultados (evita que una respuesta lenta y vieja pise a la nueva).
   const testSeq = useRef(0);
+  const [utilMsg, setUtilMsg] = useState<string>(""); // feedback del modelo utilitario
 
   function applyProv(p: ProviderState) {
     setProv(p);
@@ -219,6 +220,21 @@ export default function SettingsPage() {
     } finally {
       if (testSeq.current === myseq) setProvTesting(false);
     }
+  }
+
+  // Guarda el modelo utilitario (tareas de fondo: comprensión/traducción) SIN tocar el motor
+  // de chat. Un modelo local pequeño acelera mucho esas tareas internas.
+  async function saveUtilityModel(m: string) {
+    if (!prov) return;
+    setUtilMsg("Guardando…");
+    await providerSet({
+      kind: prov.kind,
+      model: prov.model,
+      base_url: prov.base_url,
+      utility_model: m,
+    }).catch(() => {});
+    await providerGet().then(applyProv).catch(() => {});
+    setUtilMsg(m ? `✅ Tareas de fondo con «${m}» (local, rápido).` : "");
   }
 
   useEffect(() => {
@@ -712,6 +728,30 @@ export default function SettingsPage() {
             {provBusy ? "Guardando…" : provSel === "local" ? "Usar motor local" : `Activar ${PROVIDERS[provSel].label}`}
           </button>
           {provMsg && <p className="mt-3 text-sm" style={{ color: "var(--accent)" }}>{provMsg}</p>}
+
+          {/* Modelo utilitario: tareas de fondo (comprensión, traducción) con un modelo LOCAL ligero.
+              Independiente del motor de chat: aunque chatees con DeepSeek, esto siempre es local. */}
+          <div className="mt-4 pt-3" style={{ borderTop: "1px solid var(--surface-2)" }}>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs" style={{ color: "var(--text-3)" }}>
+                Modelo utilitario · tareas de fondo (comprensión, traducción)
+              </span>
+              <select
+                className="input"
+                value={prov?.utility_model ?? ""}
+                onChange={(e) => saveUtilityModel(e.target.value)}
+              >
+                <option value="">— usa el modelo de chat local —</option>
+                {installed.map((m) => (
+                  <option key={m.name} value={m.name}>{m.name}</option>
+                ))}
+              </select>
+            </label>
+            <p className="text-[11px] mt-1" style={{ color: "var(--text-3)" }}>
+              Un modelo pequeño (1-3B) acelera las tareas internas y libera al modelo grande. Siempre local, gratis.
+            </p>
+            {utilMsg && <p className="text-xs mt-1" style={{ color: "var(--accent)" }}>{utilMsg}</p>}
+          </div>
         </div>
 
         <div className="card flex items-center justify-between">

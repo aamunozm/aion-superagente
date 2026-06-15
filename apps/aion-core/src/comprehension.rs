@@ -240,13 +240,19 @@ pub async fn comprehend(prompt: &str, grounding: &str) -> Option<Comprension> {
         max_tokens: Some(200),
     };
 
-    // SIEMPRE local: privado y barato, aunque el chat principal sea cloud.
-    let engine = aion_llm::OllamaEngine::default_local();
-    // TIMEOUT DURO: la comprensión usa el mismo 12B que el chat. Bajo presión de RAM el
-    // modelo se evacúa entre turnos y una carga en frío puede costar ~13s. En el camino de
-    // PREGUNTA esto bloquea la respuesta, así que si tarda demasiado preferimos seguir SIN
-    // comprensión (fail-open a None) antes que dejar a AION pegado. El chat principal ya
-    // recargará el modelo igual; aquí no esperamos por él.
+    // SIEMPRE local (privado y barato, aunque el chat sea cloud) y con el modelo de FONDO
+    // configurado: `utility_model` LIGERO si Ariel lo eligió, si no cae al local de siempre.
+    // Antes usaba el 12B fijo; en turnos-pregunta eso podía pagar un cold-load de ~13s que
+    // bloqueaba la respuesta. Con un modelo de 1-3B la comprensión es casi instantánea.
+    let bg = crate::provider::load().background_model();
+    let engine = if bg.is_empty() {
+        aion_llm::OllamaEngine::default_local()
+    } else {
+        aion_llm::OllamaEngine::new(aion_llm::OllamaEngine::base_url_from_env(), &bg)
+    };
+    // TIMEOUT DURO: si el modelo de fondo tarda demasiado (p. ej. cold-load del 12B cuando no
+    // hay utility_model ligero), seguimos SIN comprensión (fail-open a None) en vez de dejar a
+    // AION pegado: es el único camino que aún bloquea la respuesta (turnos-pregunta).
     let out =
         match tokio::time::timeout(std::time::Duration::from_secs(8), engine.generate(req)).await {
             Ok(Ok(out)) => out,
