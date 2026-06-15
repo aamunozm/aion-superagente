@@ -336,6 +336,12 @@ impl VectorMemory {
         recs.retain(|r| !set.contains(&r.id));
         let n = before - recs.len();
         if n > 0 {
+            // Saneo del grafo GAAMA: quita las aristas (`links`) de los supervivientes que
+            // apuntaban a ids borrados. Sin esto quedarían referencias colgantes que fragmentan
+            // la recuperación asociativa y dejan basura permanente en el JSONL.
+            for r in recs.iter_mut() {
+                r.links.retain(|l| !set.contains(l));
+            }
             if let Some(path) = &self.path {
                 rewrite_jsonl(path, &recs)?;
             }
@@ -571,6 +577,8 @@ impl MemoryStore for VectorMemory {
     async fn retrieve(&self, query: &str, k: usize) -> Result<Vec<MemoryHit>> {
         let q = self.embedder.embed(query).await?;
         let q_ents = entities(query);
+        // Pliega/tokeniza la consulta UNA sola vez (antes se re-plegaba por cada recuerdo).
+        let q_words = fold_words(query);
 
         let mut recs = self.records.lock().unwrap();
         let max_access = recs.iter().map(|r| r.access_count).max().unwrap_or(0) as f32;
@@ -584,7 +592,7 @@ impl MemoryStore for VectorMemory {
             .filter(|(_, r)| !r.superseded) // memoria temporal: ignora lo obsoleto
             .map(|(i, r)| {
                 let sem = cosine(&q, &r.embedding).clamp(0.0, 1.0);
-                let lex = lexical_overlap(query, &r.content);
+                let lex = lexical_overlap_pre(&q_words, &r.content);
                 let ent = entity_overlap(&q_ents, &entities(&r.content));
                 // Recencia REAL (Generative Agents): decay exponencial por edad con
                 // semivida de 7 días — antes era el índice ordinal, que premiaba la
@@ -742,7 +750,7 @@ fn entities(s: &str) -> std::collections::HashSet<String> {
     })
     .filter_map(|tok| {
         let t = tok.trim();
-        if t.len() < 2 {
+        if t.chars().count() < 2 {
             return None;
         }
         let has_digit = t.chars().any(|c| c.is_ascii_digit());
@@ -792,27 +800,42 @@ fn fold(s: &str) -> String {
         .collect()
 }
 
-/// Solapamiento léxico (Jaccard de palabras significativas, normalizadas con `fold`). Capta
-/// coincidencias exactas (nombres, términos) que el embedding semántico puede diluir.
-fn lexical_overlap(a: &str, b: &str) -> f32 {
-    fn words(s: &str) -> std::collections::HashSet<String> {
-        fold(s)
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| w.len() > 3) // ignora palabras muy cortas/funcionales
-            .map(|w| w.to_string())
-            .collect()
-    }
-    let (wa, wb) = (words(a), words(b));
-    if wa.is_empty() || wb.is_empty() {
+/// Palabras significativas de un texto, normalizadas con `fold` (minúscula + sin acentos).
+/// Filtro por CARÁCTERES (no bytes): así el umbral es estable al plegar acentos (`año`→`ano`
+/// no cambia de categoría por pasar de 4 bytes a 3). Ignora palabras muy cortas/funcionales.
+fn fold_words(s: &str) -> std::collections::HashSet<String> {
+    fold(s)
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() > 3)
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// Jaccard entre un conjunto de palabras YA plegado (la consulta) y un texto. Evita re-plegar
+/// la consulta una vez por cada recuerdo en el bucle de `retrieve` (antes era O(N·len_query)).
+fn lexical_overlap_pre(qa: &std::collections::HashSet<String>, b: &str) -> f32 {
+    if qa.is_empty() {
         return 0.0;
     }
-    let inter = wa.intersection(&wb).count() as f32;
-    let union = wa.union(&wb).count() as f32;
+    let wb = fold_words(b);
+    if wb.is_empty() {
+        return 0.0;
+    }
+    let inter = qa.intersection(&wb).count() as f32;
+    let union = qa.union(&wb).count() as f32;
     if union > 0.0 {
         inter / union
     } else {
         0.0
     }
+}
+
+/// Solapamiento léxico (Jaccard de palabras significativas, normalizadas con `fold`). El hot
+/// path (`retrieve`) usa `lexical_overlap_pre` con la consulta pre-plegada; este wrapper queda
+/// para los tests de comodidad.
+#[cfg(test)]
+fn lexical_overlap(a: &str, b: &str) -> f32 {
+    lexical_overlap_pre(&fold_words(a), b)
 }
 
 /// Configuración del ciclo de consolidación ("sueño") darwiniano.
@@ -1151,6 +1174,19 @@ mod tests {
     }
 
     #[test]
+    fn fold_words_filters_by_chars_not_bytes() {
+        // "año"→"ano" (3 chars → fuera), "añil"→"anil" (4 → dentro), "decisión"→"decision".
+        // Con el filtro por BYTES anterior, "año" (4 bytes) habría entrado incoherentemente.
+        let w = fold_words("año añil decisión");
+        assert!(w.contains("anil"));
+        assert!(w.contains("decision"));
+        assert!(
+            !w.contains("ano"),
+            "palabra de 3 chars debe filtrarse pese a tener acento"
+        );
+    }
+
+    #[test]
     fn lexical_overlap_is_accent_insensitive() {
         // La misma frase con acentos y sin (typo de acento) debe casar fuerte: el plegado
         // une "decisión"/"decision", "está"/"esta", "autenticación"/"autenticacion".
@@ -1166,7 +1202,9 @@ mod tests {
     fn forget_removes_by_id_and_persists() {
         let path = std::env::temp_dir().join(format!("aion-forget-{}.jsonl", Uuid::new_v4()));
         let a = rec(vec![1.0, 0.0], 0.5, 0);
-        let b = rec(vec![0.0, 1.0], 0.5, 0);
+        let mut b = rec(vec![0.0, 1.0], 0.5, 0);
+        // b tiene una ARISTA hacia a (grafo GAAMA): debe limpiarse al borrar a.
+        b.links = vec![a.id.clone()];
         std::fs::write(
             &path,
             format!(
@@ -1184,10 +1222,18 @@ mod tests {
         assert_eq!(removed, 1);
         assert_eq!(mem.len(), 1);
 
-        // Persistió en disco: una memoria nueva sobre el mismo archivo ya no ve el borrado.
+        // Persistió en disco: una memoria nueva sobre el mismo archivo ya no ve el borrado…
         let mem2 = VectorMemory::persistent(OllamaEmbedder::default_local(), &path).unwrap();
         assert_eq!(mem2.len(), 1);
         assert!(mem2.recent_with_ids(10).iter().all(|(id, _)| *id != a.id));
+        // …y la arista colgante hacia a fue saneada en el superviviente b.
+        {
+            let recs = mem2.records.lock().unwrap();
+            assert!(
+                recs.iter().all(|r| !r.links.contains(&a.id)),
+                "forget debe limpiar los links hacia ids borrados"
+            );
+        }
 
         std::fs::remove_file(&path).ok();
     }

@@ -2884,12 +2884,10 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         "pdf",
         "word",
         "excel",
-        "nota",
         "web",
         "internet",
         "busca",
         "abre",
-        "crea",
         "ejecuta",
         "comando",
         "terminal",
@@ -2914,19 +2912,22 @@ fn classify_message_cheap(task: &str) -> TalkClass {
         "cancella",
         "sposta",
         "cartella",
-        "cerca",
         "apri",
         "esegui",
         "scarica",
         "installa",
         "schermo",
-        "posta",
         "naviga",
         "calcol",
     ];
+    // Tokens que SOLO disparan como PALABRA EXACTA (no por `starts_with`): son prefijos de
+    // palabras de contenido frecuentes en ES/IT y darían falsos positivos. "red"(local)≠
+    // "reducir"; "cerca"(it: busca)≠"cercano"; "posta"≠"postal"; "crea"≠"creativo";
+    // "nota"≠"notable". El imperativo real ("cerca su internet", "crea un doc") sí casa.
+    const TOOLISH_EXACT: &[&str] = &["red", "cerca", "posta", "crea", "nota"];
     let toolish = words
         .iter()
-        .any(|w| *w == "red" || TOOLISH.iter().any(|s| w.starts_with(s)));
+        .any(|w| TOOLISH_EXACT.contains(w) || TOOLISH.iter().any(|s| w.starts_with(s)));
     if toolish {
         return TalkClass::Tool;
     }
@@ -3104,10 +3105,22 @@ fn is_trivial_query(prompt: &str) -> bool {
         "thank you",
         "bye",
     ];
-    if words <= 2 && GREETINGS.iter().any(|g| p.starts_with(g)) {
+    // Tokens cortos (hi, ok, bye…) deben casar como PALABRA COMPLETA, no por prefijo: con
+    // `starts_with` "hi" tragaba "hijo/historia/high", "ok"→"okay", etc., tratando mensajes
+    // reales como saludo trivial (y saltándose comprensión/grounding). Los saludos de varias
+    // palabras ("va bene", "thank you") sí van por prefijo del mensaje.
+    let first = p.split_whitespace().next().unwrap_or("");
+    let is_greeting = GREETINGS.iter().any(|g| {
+        if g.contains(' ') {
+            p.starts_with(g)
+        } else {
+            first == *g
+        }
+    });
+    if words <= 2 && is_greeting {
         return true;
     }
-    p.is_empty() || p.len() < 4
+    p.is_empty() || p.chars().count() < 4
 }
 
 /// ¿Este intercambio merece ir a la memoria de LARGO PLAZO? La memoria permanente
@@ -5380,6 +5393,41 @@ mod guard_tests {
 #[cfg(test)]
 mod intent_tests {
     use super::{classify_message_cheap, is_trivial_query, looks_like_question, TalkClass};
+
+    #[test]
+    fn short_greeting_tokens_match_whole_word_not_prefix() {
+        // "hi"/"ok" como PALABRA: saludo. Como PREFIJO de palabra real: NO trivial.
+        assert!(is_trivial_query("hi"));
+        assert!(is_trivial_query("ok gracias"));
+        assert!(!is_trivial_query("hijo enfermo"), "'hijo' no es saludo");
+        assert!(
+            !is_trivial_query("historia clinica"),
+            "'historia' no es saludo"
+        );
+        assert!(!is_trivial_query("high cpu"), "'high' no es saludo");
+    }
+
+    #[test]
+    fn toolish_exact_tokens_avoid_content_word_false_positives() {
+        // Palabras de contenido ES que ANTES caían a Tool por `starts_with`: ahora NO.
+        assert_eq!(
+            classify_message_cheap("el parque está cercano y es bonito"),
+            TalkClass::Chat
+        );
+        assert_eq!(
+            classify_message_cheap("tengo una idea muy creativa para esto"),
+            TalkClass::Chat
+        );
+        // Pero el imperativo real sí dispara herramienta.
+        assert_eq!(
+            classify_message_cheap("cerca su internet el precio del bitcoin"),
+            TalkClass::Tool
+        );
+        assert_eq!(
+            classify_message_cheap("crea un documento con el resumen"),
+            TalkClass::Tool
+        );
+    }
 
     #[test]
     fn italian_messages_classified_like_spanish() {
