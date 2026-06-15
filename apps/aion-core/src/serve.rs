@@ -1363,6 +1363,8 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
+        tools.register(Arc::new(crate::agent_tools::FileWriteTool::new()));
+        tools.register(Arc::new(crate::agent_tools::SkillLoadTool::new()));
         tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
         tools.register(Arc::new(crate::agent_tools::GraphSearchTool::new()));
         let browser: std::sync::Arc<dyn aion_browser::BrowserDriver> =
@@ -1500,6 +1502,9 @@ async fn agent(
                 ctx.push_str(&format!("- {n}: {d}\n"));
             }
         }
+        // CATÁLOGO DE SKILLS (playbooks): nombre + descripción de cada procedimiento que el
+        // agente sabe ejecutar. Carga el cuerpo de la que encaje con `skill_load`.
+        ctx.push_str(&crate::skills_lib::catalog_brief());
         // Tiempo (ms) que el agente pasó BLOQUEADO esperando a Ariel (confirmaciones y
         // preguntas HITL). NO es cómputo del agente, así que el salvavidas de pared lo
         // descuenta de su presupuesto: tu deliberación no debe hacer que el agente aborte.
@@ -1721,6 +1726,8 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
+        tools.register(Arc::new(crate::agent_tools::FileWriteTool::new()));
+        tools.register(Arc::new(crate::agent_tools::SkillLoadTool::new()));
         tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
         tools.register(Arc::new(crate::agent_tools::GraphSearchTool::new()));
         let browser: std::sync::Arc<dyn aion_browser::BrowserDriver> =

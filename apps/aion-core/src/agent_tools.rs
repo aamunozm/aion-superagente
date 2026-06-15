@@ -361,6 +361,152 @@ pub(crate) fn safe_home_path(raw: &str) -> Result<std::path::PathBuf, String> {
     Ok(canon)
 }
 
+/// Como [`safe_home_path`] pero para ESCRIBIR: el archivo destino puede no existir aún. Confina
+/// al HOME validando el DIRECTORIO PADRE (canonicalizado → resuelve symlinks y `..`, no se puede
+/// escapar) y rechaza las subrutas protegidas (claves/credenciales). Devuelve la ruta destino.
+pub(crate) fn safe_home_path_for_write(raw: &str) -> Result<std::path::PathBuf, String> {
+    let home =
+        std::env::var("HOME").map_err(|_| "no encuentro tu carpeta de usuario".to_string())?;
+    let home = std::path::PathBuf::from(&home);
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("indica la ruta del archivo".into());
+    }
+    let p = if let Some(rest) = raw.strip_prefix("~/") {
+        home.join(rest)
+    } else {
+        std::path::PathBuf::from(raw)
+    };
+    let parent = p.parent().ok_or("ruta inválida")?;
+    let parent_canon = parent
+        .canonicalize()
+        .map_err(|_| format!("la carpeta destino no existe para «{raw}»"))?;
+    let file_name = p.file_name().ok_or("falta el nombre del archivo")?;
+    let canon = parent_canon.join(file_name);
+    if !canon.starts_with(&home) {
+        return Err("por seguridad solo puedo escribir dentro de tu carpeta de usuario".into());
+    }
+    if is_protected_subpath(&canon, &home) {
+        return Err("esa ruta está protegida (claves o credenciales): no escribo ahí".into());
+    }
+    Ok(canon)
+}
+
+/// Crea o sobrescribe un archivo de texto dentro del HOME. Atómica para el agente: imprescindible
+/// para Desarrollo (scaffold, tests) y para guardar informes. Sobrescribir uno existente pide
+/// confirmación (HITL); crear uno nuevo no.
+pub struct FileWriteTool;
+impl FileWriteTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for FileWriteTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for FileWriteTool {
+    fn name(&self) -> &str {
+        "file_write"
+    }
+    fn description(&self) -> &str {
+        "Crea o sobrescribe un archivo de texto dentro de tu carpeta de usuario. Entrada: \
+         «ruta ::: contenido» (la ruta admite ~). La carpeta destino debe existir. \
+         Sobrescribir un archivo existente pide tu confirmación. Útil para guardar informes, \
+         código, configs o notas."
+    }
+    fn needs_confirm(&self, input: &str) -> Option<String> {
+        let (path, _) = input.split_once(":::")?;
+        match safe_home_path_for_write(path.trim()) {
+            // Solo pide confirmación si el archivo YA existe (sobrescribir = destructivo).
+            Ok(p) if p.exists() => Some(format!(
+                "vas a SOBRESCRIBIR el archivo existente «{}»",
+                p.display()
+            )),
+            _ => None,
+        }
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let (raw_path, content) = input
+            .split_once(":::")
+            .ok_or("formato inválido. Usa: «ruta ::: contenido»")?;
+        let canon = safe_home_path_for_write(raw_path.trim())?;
+        // El agente suele escribir «ruta ::: contenido»; quito un único espacio inicial tras el
+        // separador, conservando el resto del contenido tal cual (no toco indentación de código).
+        let content = content.strip_prefix(' ').unwrap_or(content);
+        if content.len() > 5_000_000 {
+            return Err("contenido demasiado grande (>5 MB)".into());
+        }
+        std::fs::write(&canon, content).map_err(|e| format!("no pude escribir el archivo: {e}"))?;
+        Ok(format!(
+            "✅ escrito «{}» ({} bytes) en {}",
+            canon
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("archivo"),
+            content.len(),
+            canon.display()
+        ))
+    }
+}
+
+/// Carga el cuerpo (instrucciones) de una SKILL (playbook) por su nombre. El agente la usa
+/// cuando una tarea encaja con una skill del catálogo: recibe los pasos y los ejecuta con sus
+/// demás herramientas. Progressive disclosure: el catálogo (nombre+descripción) ya va en el
+/// prompt; aquí se carga SOLO la que hace falta.
+pub struct SkillLoadTool;
+impl SkillLoadTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for SkillLoadTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for SkillLoadTool {
+    fn name(&self) -> &str {
+        "skill_load"
+    }
+    fn description(&self) -> &str {
+        "Carga las instrucciones de una SKILL (playbook) por su nombre, p. ej. \
+         «system-health-scan» o «deep-research». Úsala en cuanto la tarea encaje con una skill \
+         del catálogo: te devuelve los pasos a seguir, que ejecutas con tus demás herramientas."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let name = input.trim();
+        match crate::skills_lib::get(name) {
+            Some(s) => Ok(format!(
+                "SKILL «{}» ({}):\nHerramientas sugeridas: {}\n\n{}",
+                s.name,
+                s.category,
+                if s.tools.is_empty() {
+                    "—".to_string()
+                } else {
+                    s.tools.join(", ")
+                },
+                s.body
+            )),
+            None => {
+                let avail: Vec<String> = crate::skills_lib::all()
+                    .into_iter()
+                    .map(|s| s.name)
+                    .collect();
+                Err(format!(
+                    "no tengo una skill llamada «{name}». Disponibles: {}",
+                    avail.join(", ")
+                ))
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for FileReadTool {
     fn name(&self) -> &str {
