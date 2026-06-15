@@ -60,6 +60,12 @@ pub struct ReActAgent<'a> {
     confirm: Option<ConfirmFn>,
     /// Pregunta al usuario (pausa la tarea y espera su respuesta). Opcional.
     ask: Option<AskFn>,
+    /// PRESUPUESTO DE TIEMPO REAL del bucle. El límite por `max_steps` es solo un
+    /// proxy del tiempo: un único paso con una herramienta lenta (navegador, red)
+    /// puede agotar el timeout de pared ANTES de que la síntesis final rescate lo
+    /// recopilado. Con un deadline el bucle cede a tiempo y SIEMPRE pasa por la
+    /// síntesis con lo que tenga, en vez de morir a media iteración. Opcional.
+    deadline: Option<std::time::Duration>,
 }
 
 impl<'a> ReActAgent<'a> {
@@ -74,7 +80,16 @@ impl<'a> ReActAgent<'a> {
             verify: false,
             confirm: None,
             ask: None,
+            deadline: None,
         }
+    }
+
+    /// Fija el PRESUPUESTO DE TIEMPO del bucle. Debe dejar holgura bajo el timeout
+    /// de pared externo para que la síntesis final (una generación más) quepa: p. ej.
+    /// con 150 s de pared, un deadline de ~120 s deja ~30 s para sintetizar.
+    pub fn with_deadline(mut self, d: std::time::Duration) -> Self {
+        self.deadline = Some(d);
+        self
     }
 
     /// Registra el callback de PREGUNTA al usuario (pausa la tarea y espera texto).
@@ -250,7 +265,26 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
         // prefijo estable → mejor reutilización del KV-cache de Ollama (prefill barato).
         let system_msg = Message::system(self.system_prompt());
 
+        // Reloj del presupuesto de tiempo (ver `deadline`). `steps_taken` recuerda
+        // cuántos pasos llegamos a dar para reportarlo en la síntesis de rescate.
+        let started = std::time::Instant::now();
+        let mut steps_taken = 0usize;
+
         for step in 0..self.max_steps {
+            // PRESUPUESTO DE TIEMPO: si nos quedamos sin margen, no arranques otro paso
+            // (que dispararía una generación + posible herramienta lenta y reventaría el
+            // timeout de pared). Cede AQUÍ y deja que la síntesis final rescate lo que
+            // ya hay en el scratchpad — respuesta honesta en vez de «me quedé atascado».
+            if let Some(budget) = self.deadline {
+                if started.elapsed() >= budget {
+                    self.bus.publish(AionEvent::ThoughtEmitted {
+                        agent: self.name.clone(),
+                        text: "Se agota el tiempo: cierro con lo recopilado.".into(),
+                    });
+                    break;
+                }
+            }
+            steps_taken = step + 1;
             let user = format!(
                 "Tarea: {task}\n\n{scratchpad}\n\
                  Escribe el siguiente paso (Thought + Action/Action Input, o Thought + Final Answer):"
@@ -511,7 +545,7 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
         if !useful_obs {
             return Ok(AgentRun {
                 answer: HONEST_REFUSAL.into(),
-                steps: self.max_steps,
+                steps: steps_taken,
                 failures: failed.values().cloned().collect(),
                 ..Default::default()
             });
@@ -543,7 +577,7 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
         };
         Ok(AgentRun {
             answer,
-            steps: self.max_steps,
+            steps: steps_taken,
             failures: failed.values().cloned().collect(),
             ..Default::default()
         })

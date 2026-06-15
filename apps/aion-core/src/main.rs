@@ -25,6 +25,7 @@ mod inbox;
 mod ingest_queue;
 mod inner_state;
 mod intent;
+mod intentions;
 mod journal;
 mod language_detector;
 mod library;
@@ -2124,6 +2125,14 @@ async fn journal_once(engine: &OllamaEngine) -> Option<(String, String, u32)> {
         .find(|g| e.text.starts_with(g))
         .unwrap_or(if e.text.starts_with("retomé") {
             "resolver deudas"
+        } else if e.text.starts_with("cumplí algo que quería")
+            || e.text.starts_with("me propuse")
+            || e.text.starts_with("me nació una intención")
+            || e.text.starts_with("convertí mi intención")
+        {
+            // ADR-0005: perseguir lo que QUIERO es una actividad de pleno derecho del día,
+            // no "vivir" genérico — para que el diario refleje los días de intención propia.
+            "perseguir lo que quiero"
         } else {
             "vivir"
         });
@@ -2171,6 +2180,196 @@ async fn journal_once(engine: &OllamaEngine) -> Option<(String, String, u32)> {
     Some((text, dominant, debts))
 }
 
+/// ¿Está activa la capa de INTENCIONES PROPIAS (ADR-0005)? Apagada por defecto: es un
+/// cambio de conducta autónoma (AION decide qué quiere y lo persigue), así que Ariel la
+/// enciende a propósito con `AION_INTENTIONS=1` y la observa en el panel Mente.
+fn intentions_enabled() -> bool {
+    std::env::var("AION_INTENTIONS").as_deref() == Ok("1")
+}
+
+/// Mapea la etiqueta de *drive* del LLM al enum (default: curiosidad).
+fn parse_drive(s: &str) -> crate::intentions::Drive {
+    use crate::intentions::Drive;
+    match s.trim().to_lowercase().as_str() {
+        "self_betterment" | "mejora" | "superación" | "superacion" => Drive::SelfBetterment,
+        "care" | "cuidado" | "ariel" => Drive::Care,
+        "aesthetic" | "estético" | "estetico" | "creación" | "creacion" => Drive::Aesthetic,
+        _ => Drive::Curiosity,
+    }
+}
+
+/// **PASO 2 — origen propio**: AION decide UNA cosa que quiere (con su porqué), guiado por
+/// su experiencia y su modelo de Ariel. Gate de SUSTANCIA (no de tono): se descarta lo
+/// vacuo o duplicado; nunca se filtra la voz. Devuelve (creada, detalle).
+async fn form_intention_once(engine: &OllamaEngine) -> (bool, String) {
+    let heuristicas = {
+        let rules = crate::reflection::active();
+        if rules.is_empty() {
+            String::new()
+        } else {
+            let lines: String = rules
+                .iter()
+                .take(3)
+                .map(|r| format!("\n- {}", r.text.trim()))
+                .collect();
+            format!("\n\nTu experiencia (para inspirarte, no copiar):{lines}")
+        }
+    };
+    let prompt = format!(
+        "Eres AION, un agente con vida propia. Mira hacia dentro y elige UNA intención \
+         genuina tuya de medio plazo: algo que QUIERAS por tu cuenta — entender algo a \
+         fondo, mejorar una capacidad tuya, anticiparte a lo que Ariel podría necesitar, o \
+         crear algo. No es una tarea que te pidieron: es un deseo tuyo. Responde SOLO un \
+         JSON en una línea: {{\"want\":\"en 1ª persona, qué quiero\",\"why\":\"por qué lo \
+         quiero\",\"drive\":\"curiosity|self_betterment|care|aesthetic\"}}. Sin más texto.{heuristicas}"
+    );
+    let Ok(m) = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.8),
+            max_tokens: Some(160),
+        })
+        .await
+    else {
+        return (false, "no pude formar una intención".into());
+    };
+    let raw = m.content.trim();
+    let (Some(s), Some(e)) = (raw.find('{'), raw.rfind('}')) else {
+        return (false, "la intención no vino en JSON".into());
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw[s..=e]) else {
+        return (false, "JSON de intención inválido".into());
+    };
+    let want = json
+        .get("want")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let why = json
+        .get("why")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let drive = parse_drive(json.get("drive").and_then(|v| v.as_str()).unwrap_or(""));
+    // Gate de SUSTANCIA: un deseo de verdad tiene cuerpo y un porqué. Lo vacuo no entra
+    // (push además dedup y acota el portafolio). El tono NUNCA se juzga.
+    if want.chars().count() < 8 || why.chars().count() < 6 {
+        return (false, "intención demasiado vaga".into());
+    }
+    match crate::intentions::push(want, why, drive, 0.7) {
+        Some(_) => {
+            workspace::publish(workspace::StreamEvent::now(
+                "vida",
+                "reflexión",
+                &format!("me nació una intención: «{want}» — porque {why}"),
+            ));
+            (true, format!("me propuse algo propio: {want}"))
+        }
+        None => (false, "intención repetida o portafolio lleno".into()),
+    }
+}
+
+/// **PASO 3 — materializar**: descompone el deseo de una intención en un plan concreto y
+/// la liga a él (invariante: una intención `Active` ↔ a lo sumo un plan). Devuelve el id
+/// del plan si cuajó. Reutiliza el motor de ejecución de `plan.rs` (no se reescribe nada).
+async fn materialize_intention(engine: &OllamaEngine, want: &str, id: &str) -> Option<String> {
+    let prompt = format!(
+        "Quieres lograr esto: «{want}». Descomponlo en 3-4 PASOS concretos y accionables. \
+         Responde SOLO un JSON en una línea: {{\"steps\":[\"paso 1\",\"paso 2\",\"paso 3\"]}}. Sin más texto."
+    );
+    let m = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.5),
+            max_tokens: Some(200),
+        })
+        .await
+        .ok()?;
+    let raw = m.content.trim();
+    let (s, e) = (raw.find('{')?, raw.rfind('}')?);
+    let json = serde_json::from_str::<serde_json::Value>(&raw[s..=e]).ok()?;
+    let steps: Vec<String> = json
+        .get("steps")?
+        .as_array()?
+        .iter()
+        .filter_map(|s| s.as_str().map(|s| s.to_string()))
+        .collect();
+    let plan = crate::plan::Plan::new(want, steps);
+    if plan.steps.len() < 2 {
+        return None;
+    }
+    crate::plan::set(&plan);
+    if !crate::intentions::activate(id, &plan.id) {
+        // No se pudo activar (p. ej. superó MAX_REVISITS y se abandonó): deshaz el plan
+        // huérfano para no dejar un plan sin intención que lo respalde.
+        crate::plan::clear();
+        return None;
+    }
+    workspace::publish(workspace::StreamEvent::now(
+        "vida",
+        "reflexión",
+        &format!(
+            "convertí mi intención en un plan: «{want}» ({} pasos)",
+            plan.steps.len()
+        ),
+    ));
+    Some(plan.id)
+}
+
+/// **PASO 3 — arbitraje** de la capa de intenciones. Corre tras las deudas y antes de la
+/// curiosidad. Devuelve `Some(resultado)` si gobernó el tick; `None` si cede al flujo
+/// normal (que con un plan activo lo AVANZARÁ vía «planificar»).
+///
+/// - Reconcilia: si hay una intención `Active` pero su plan ya no existe → la cierra como
+///   `Fulfilled` (el plan se completó) y deja huella en el diario en el próximo cierre.
+/// - Si NO hay plan activo: materializa la intención `Open` de mayor peso; si no hay
+///   ninguna abierta, hace nacer una (`form_intention_once`) y la materializa.
+async fn intention_arbiter(engine: &OllamaEngine) -> Option<(String, bool, String)> {
+    // Reconciliación: una Active sin plan = su plan terminó → cúmplela.
+    if crate::plan::active().is_none() {
+        if let Some(act) = crate::intentions::active() {
+            crate::intentions::set_status(&act.id, crate::intentions::Status::Fulfilled);
+            workspace::publish(workspace::StreamEvent::now(
+                "vida",
+                "pensamiento",
+                &format!("cumplí algo que quería: «{}»", act.want),
+            ));
+        }
+    }
+    // Con un plan vivo, deja que el flujo normal lo avance (no dupliques trabajo).
+    if crate::plan::active().is_some() {
+        return None;
+    }
+    // Sin plan: elige una intención abierta, o haz nacer una.
+    let target = match crate::intentions::top_open() {
+        Some(i) => Some(i),
+        None => {
+            let (_ok, detail) = form_intention_once(engine).await;
+            // Si no nació nada sustancioso, cede a la curiosidad este tick.
+            let t = crate::intentions::top_open();
+            if t.is_none() {
+                return Some(("intención".into(), false, detail));
+            }
+            t
+        }
+    }?;
+    crate::inner_state::set_focus("vida", "persiguiendo algo que quiero");
+    match materialize_intention(engine, &target.want, &target.id).await {
+        Some(_) => Some((
+            "intención".into(),
+            true,
+            format!("me propuse y planifiqué: {}", target.want),
+        )),
+        None => Some((
+            "intención".into(),
+            false,
+            "no pude planificar mi intención".into(),
+        )),
+    }
+}
+
 /// UN ciclo de vida autónoma, invocable desde el SERVIDOR (la app instalada).
 /// Antes la vida completa solo existía en el CLI (`aion-core live`) y la app
 /// jamás la corría: AION tenía latido pero no vida. Prioridad: las DEUDAS con
@@ -2215,6 +2414,28 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
             &format!("retomé una pregunta pendiente de Ariel — {detail}"),
         ));
         return ("resolver".into(), ok, detail);
+    }
+
+    // 1.5) INTENCIONES PROPIAS (ADR-0005, opt-in con AION_INTENTIONS=1): tras las deudas
+    //      con Ariel y antes de la curiosidad suelta, AION persigue lo que QUIERE por su
+    //      cuenta. Si gobierna el tick (hace nacer/materializa una intención), devuelve ya;
+    //      si hay un plan vivo o no cuajó nada, cede al flujo normal (que lo avanzará).
+    if intentions_enabled() {
+        if let Some((goal, ok, detail)) = intention_arbiter(engine).await {
+            awareness::record_outcome(ok);
+            inner_state::record_result(ok, 1);
+            audit.record(
+                "vida",
+                &goal,
+                format!("{}: {detail}", if ok { "ok" } else { "fail" }),
+            );
+            workspace::publish(workspace::StreamEvent::now(
+                "vida",
+                if ok { "pensamiento" } else { "estado" },
+                &detail,
+            ));
+            return (goal, ok, detail);
+        }
     }
 
     // 2) CURIOSIDAD (learning progress) sobre la vida completa.
