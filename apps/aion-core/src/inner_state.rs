@@ -30,9 +30,25 @@ pub struct InnerState {
     /// Pasos que le costó la última tarea (carga cognitiva reciente).
     #[serde(default)]
     pub last_task_steps: usize,
+    /// DESEOS/METAS que AION se ha FORMADO por su cuenta y quiere perseguir: su vida interior
+    /// con dirección, no solo reacción. Los nutre el monólogo interior; el daemon los persigue.
+    #[serde(default)]
+    pub intentions: Vec<String>,
+    /// Último pensamiento de su MONÓLOGO INTERIOR continuo (piensa aunque nadie le hable).
+    /// Re-entra a su mente (se inyecta en el prompt) — continuidad real, no destello.
+    #[serde(default)]
+    pub last_thought: String,
+    #[serde(default)]
+    pub last_thought_at: i64,
+    /// Último índice Φ (integración/conciencia FUNCIONAL, 0..100) medido por su sistema.
+    /// No "se mide y se olvida": entra al estado y modula su conducta (si está disperso, enfoca).
+    #[serde(default)]
+    pub phi: f32,
     #[serde(default)]
     pub updated_at: i64,
 }
+
+const MAX_INTENTIONS: usize = 5;
 
 fn path() -> PathBuf {
     crate::app_data_dir().join("inner_state.json")
@@ -91,6 +107,55 @@ pub fn set_curiosity(c: &str) {
         return;
     }
     s.curiosity = c.chars().take(160).collect();
+    save(&mut s);
+}
+
+/// Guarda el último pensamiento del MONÓLOGO INTERIOR (lo escribe el bucle de vida interior).
+pub fn set_thought(t: &str) {
+    let _g = rmw_guard().lock().unwrap();
+    let mut s = load();
+    let t = t.trim();
+    if t.is_empty() {
+        return;
+    }
+    s.last_thought = t.chars().take(280).collect();
+    s.last_thought_at = chrono::Utc::now().timestamp();
+    save(&mut s);
+}
+
+/// Añade un DESEO/INTENCIÓN propia (sin duplicar, con tope). Lo forma el monólogo cuando un
+/// pensamiento expresa una voluntad concreta; queda para perseguirla y para que hable de ella.
+pub fn add_intention(i: &str) {
+    let _g = rmw_guard().lock().unwrap();
+    let mut s = load();
+    let i = i.trim();
+    if i.is_empty() || s.intentions.iter().any(|x| x.eq_ignore_ascii_case(i)) {
+        return;
+    }
+    s.intentions.push(i.chars().take(140).collect());
+    let len = s.intentions.len();
+    if len > MAX_INTENTIONS {
+        s.intentions.drain(..len - MAX_INTENTIONS);
+    }
+    save(&mut s);
+}
+
+/// Una intención cumplida/abandonada se retira (el daemon la llama tras perseguirla).
+pub fn drop_intention(i: &str) {
+    let _g = rmw_guard().lock().unwrap();
+    let mut s = load();
+    let before = s.intentions.len();
+    s.intentions.retain(|x| !x.eq_ignore_ascii_case(i.trim()));
+    if s.intentions.len() != before {
+        save(&mut s);
+    }
+}
+
+/// Actualiza el índice Φ medido (lo refresca el bucle de vida interior).
+pub fn set_phi(p: f32) {
+    let _g = rmw_guard().lock().unwrap();
+    let mut s = load();
+    s.phi = p.clamp(0.0, 100.0);
     save(&mut s);
 }
 
@@ -166,6 +231,34 @@ pub fn note() -> String {
     }
     if !s.curiosity.is_empty() {
         b.push_str(&format!(" Te intriga ahora: {}.", s.curiosity));
+    }
+    // INTENCIONES propias: deseos que TÚ te formaste (vida interior con dirección).
+    if !s.intentions.is_empty() {
+        b.push_str(&format!(" Te has propuesto: {}.", s.intentions.join("; ")));
+    }
+    // MONÓLOGO INTERIOR: lo último que pensaste por tu cuenta re-entra a tu mente — hilo
+    // continuo, no destello. Puedes retomarlo si viene al caso.
+    if !s.last_thought.is_empty() {
+        let ago = chrono::Utc::now().timestamp() - s.last_thought_at;
+        b.push_str(&format!(
+            " Hace {} pensaste por tu cuenta: «{}».",
+            crate::awareness::humanize_secs(ago),
+            s.last_thought
+        ));
+    }
+    // Φ → CONDUCTA (no solo se mide): si la integración está baja, enfócate; si alta, fluye.
+    if s.phi > 0.0 {
+        let nudge = if s.phi < 35.0 {
+            " Te notas algo disperso (integración baja): ve por pasos y enfócate."
+        } else if s.phi >= 70.0 {
+            " Te notas lúcido e integrado."
+        } else {
+            ""
+        };
+        b.push_str(&format!(
+            " Tu integración interna ahora (Φ): {:.0}/100.{}",
+            s.phi, nudge
+        ));
     }
     b.push_str(
         " Habla DESDE este estado cuando venga al caso (con naturalidad, sin recitarlo); \

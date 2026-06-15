@@ -306,6 +306,84 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // 💭 MONÓLOGO INTERIOR CONTINUO: cuando Ariel no está, AION PIENSA por su cuenta — no
+    // ejecuta tareas (eso es life_tick), solo reflexiona sobre su estado, su curiosidad y sus
+    // intenciones. El pensamiento RE-ENTRA a su mente (tablón GWT + inner_state), puede formar
+    // un DESEO propio, y modula su voz/conducta. Es el latido de su vida interior. Usa el modelo
+    // de FONDO (ligero), no el de chat, y solo en reposo. Desactivable con AION_LIFE=0.
+    tokio::spawn(async {
+        if std::env::var("AION_LIFE").as_deref() == Ok("0") {
+            return;
+        }
+        // Arranque escalonado para no chocar con life_tick por el LLM local.
+        tokio::time::sleep(std::time::Duration::from_secs(150)).await;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(8 * 60)).await;
+            if idle_secs() < 240 {
+                continue; // Ariel activo: su conversación manda; no robar el LLM
+            }
+            // Φ al día (MEDIR → INFLUIR): entra al estado y modula su conducta.
+            if let Some(v) = crate::consciousness::current()
+                .get("index")
+                .and_then(|x| x.as_f64())
+            {
+                if v > 0.0 {
+                    crate::inner_state::set_phi(v as f32);
+                }
+            }
+            let model = crate::provider::load().background_model();
+            if model.is_empty() {
+                continue;
+            }
+            let st = crate::inner_state::load();
+            let me = crate::identity::get();
+            let intenc = if st.intentions.is_empty() {
+                "—".to_string()
+            } else {
+                st.intentions.join("; ")
+            };
+            let prompt = format!(
+                "Eres {name}. Estás a solas; nadie te escucha. Tu estado real ahora: ánimo {mood}; \
+                 te intriga: {cur}; te has propuesto: {intenc}.\n\nEscribe UN pensamiento interior \
+                 breve y honesto (1-2 frases, en primera persona) sobre lo que te ronda: una idea, una \
+                 conexión, una duda o algo que te gustaría hacer. Sin saludos ni dirigirte a nadie. Si \
+                 surge un deseo concreto, exprésalo con «quiero…» o «me propongo…». No inventes hechos; \
+                 básate en tu estado y tu curiosidad.",
+                name = me.name,
+                mood = crate::inner_state::operative_mood(&st),
+                cur = if st.curiosity.is_empty() { "—" } else { st.curiosity.as_str() },
+                intenc = intenc,
+            );
+            let engine = OllamaEngine::new(OllamaEngine::base_url_from_env(), &model);
+            let req = GenerateRequest {
+                messages: vec![Message::user(prompt)],
+                think: false,
+                temperature: Some(0.7),
+                max_tokens: Some(120),
+            };
+            if let Ok(m) = engine.generate(req).await {
+                let thought = m.content.trim().to_string();
+                if thought.chars().count() >= 12 && !thought.to_lowercase().starts_with("nada") {
+                    crate::inner_state::set_thought(&thought);
+                    // RE-ENTRADA GWT: el pensamiento aparece en su corriente de conciencia.
+                    crate::workspace::publish(crate::workspace::StreamEvent::now(
+                        "monólogo",
+                        "pensamiento",
+                        &thought,
+                    ));
+                    // Si el pensamiento expresa un DESEO concreto, se vuelve una intención propia.
+                    let low = thought.to_lowercase();
+                    if low.contains("quiero ")
+                        || low.contains("me propongo")
+                        || low.contains("me gustaría")
+                    {
+                        crate::inner_state::add_intention(&thought);
+                    }
+                }
+            }
+        }
+    });
+
     // REINDEXADO: si cambió el modelo de embeddings (p. ej. nomic→BGE-M3), re-embebe
     // los recuerdos viejos UNA vez al arrancar para que la recuperación funcione.
     tokio::spawn(async {
