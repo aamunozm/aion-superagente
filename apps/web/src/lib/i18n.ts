@@ -306,7 +306,7 @@ const EN: Dict = {
   "nav.memory": "Memory",
   "nav.mind": "Mind",
   "nav.skills": "Skills",
-  "nav.routines": "Rutinas",
+  "nav.routines": "Routines",
   "nav.settings": "Settings",
   "group.main": "Main",
   "group.intelligence": "Intelligence",
