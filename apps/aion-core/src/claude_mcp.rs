@@ -725,7 +725,7 @@ mod tests {
         let out = serve_within_budget(hits.iter().copied(), 40);
         let n = out.lines().count();
         assert!(
-            n >= 1 && n < 3,
+            (1..3).contains(&n),
             "el presupuesto debe recortar pero servir ≥1 (sirvió {n})"
         );
         // Presupuesto enorme → sirve los tres.
