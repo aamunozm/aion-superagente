@@ -3490,9 +3490,42 @@ async fn conversational_reply(
             (true, true) => "⚠️ el modelo local no respondió".into(),
         };
     }
-    match engine.generate(mk()).await {
+    // 🧠 METACOGNICIÓN ADAPTATIVA (Pilar Inteligencia): para lo que el heurístico de palabras
+    // NO marcó como difícil, genera un borrador y ESTIMA su propia confianza. Si AION duda de
+    // verdad de su respuesta (no por keywords), ESCALA el esfuerzo (2º candidato + juez); si tras
+    // pensar más sigue inseguro, lo DICE con honestidad calibrada. Así el cómputo va donde hace
+    // falta. Solo en respuestas SUSTANCIALES (no en charla corta): no penaliza la chispa casual.
+    let draft = match engine.generate(mk()).await {
         Ok(m) => m.content.trim().to_string(),
-        Err(e) => format!("⚠️ {e}"),
+        Err(e) => return format!("⚠️ {e}"),
+    };
+    if draft.is_empty() {
+        return "⚠️ el modelo local no respondió".into();
+    }
+    // Gate de coste: solo metacognición sobre respuestas con sustancia (donde equivocarse importa).
+    if is_trivial_query(task) || draft.chars().count() <= 160 {
+        return draft;
+    }
+    let conf = crate::metacog::self_confidence(engine, task, &draft).await;
+    if conf > crate::metacog::ESCALATE_AT {
+        return draft; // suficientemente seguro → una sola generación (rápido)
+    }
+    // Duda real → escalar: un segundo candidato y el juez elige el mejor.
+    let alt = engine
+        .generate(mk())
+        .await
+        .map(|m| m.content.trim().to_string())
+        .unwrap_or_default();
+    let best = if alt.is_empty() || pick_first_is_better(engine, task, &draft, &alt).await {
+        draft
+    } else {
+        alt
+    };
+    // ¿Sigue siendo terreno incierto tras pensar más? Honestidad calibrada: marca la duda.
+    let conf2 = crate::metacog::self_confidence(engine, task, &best).await;
+    match crate::metacog::hedge(conf2) {
+        Some(h) => format!("{h}{best}"),
+        None => best,
     }
 }
 
@@ -3511,7 +3544,9 @@ async fn pick_first_is_better(engine: &dyn LlmEngine, question: &str, a: &str, b
         ],
         think: false,
         temperature: Some(0.0),
-        max_tokens: Some(4),
+        // ≥10: gemma4-reason emite un token inicial antes de la letra; con 4 salía vacío y el
+        // juez caía SIEMPRE a A (self-consistency no elegía de verdad). Con holgura, decide.
+        max_tokens: Some(12),
     };
     match engine.generate(req).await {
         // No es B explícita → A (incluye empates y fallos): preferimos la primera muestra.

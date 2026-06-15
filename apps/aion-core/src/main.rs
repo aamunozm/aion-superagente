@@ -30,6 +30,7 @@ mod library;
 mod local_runtime;
 mod mcp_compact;
 mod memory_tool;
+mod metacog;
 mod ollama_runtime;
 mod onboarding;
 mod pending;
@@ -244,6 +245,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("profile") => {
             run_profile().await?;
+        }
+        Some("think") => {
+            let prompt = args[1..].join(" ");
+            run_think(&prompt).await?;
         }
         Some("history") => {
             run_history()?;
@@ -652,6 +657,51 @@ async fn run_plan() -> Result<(), Box<dyn std::error::Error>> {
     let (changed, detail) = advance_plan_once(&engine).await;
     println!("{} {detail}\n", if changed { "✅" } else { "ℹ️ " });
     print_state("DESPUÉS");
+    Ok(())
+}
+
+/// CLI `think`: demo de la metacognición adaptativa (Pilar Inteligencia). Genera un borrador a
+/// la pregunta, estima su PROPIA confianza (1-5) y muestra qué decidiría: responder directo,
+/// escalar (pensar más) o matizar con honestidad. Hace visible el "saber cuándo pensar más".
+async fn run_think(prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let prompt = if prompt.trim().is_empty() {
+        "¿Cuántos habitantes exactos tiene Milán a día de hoy?"
+    } else {
+        prompt
+    };
+    let engine = OllamaEngine::default_local();
+    engine
+        .health()
+        .await
+        .map_err(|e| format!("LLM local no disponible ({e})."))?;
+    println!("❓ Pregunta: {prompt}\n");
+    let draft = engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt.to_string())],
+            think: false,
+            temperature: Some(0.85),
+            max_tokens: Some(400),
+        })
+        .await
+        .map(|m| m.content.trim().to_string())
+        .unwrap_or_default();
+    println!(
+        "📝 Borrador:\n{}\n",
+        draft.chars().take(600).collect::<String>()
+    );
+    let conf = metacog::self_confidence(&engine, prompt, &draft).await;
+    println!("🧠 Auto-confianza estimada: {conf}/5");
+    let decision = if conf > metacog::ESCALATE_AT {
+        "✅ suficientemente seguro → responde directo (sin gasto extra)"
+    } else if conf > metacog::HEDGE_AT {
+        "🤔 duda → ESCALA: genera un 2º candidato y un juez elige el mejor"
+    } else {
+        "⚠️ muy inseguro → escala Y matiza con honestidad calibrada"
+    };
+    println!("🎚️  Decisión adaptativa: {decision}");
+    if let Some(h) = metacog::hedge(conf) {
+        println!("\n🪞 Matiz que añadiría:\n{}", h.trim());
+    }
     Ok(())
 }
 
@@ -1418,7 +1468,9 @@ async fn plan_step_advanced(engine: &OllamaEngine, goal: &str, step: &str, findi
             messages: vec![Message::user(prompt)],
             think: false,
             temperature: Some(0.0),
-            max_tokens: Some(6),
+            // ≥10: gemma4-reason emite un token inicial antes de la palabra; con 6 salía vacío
+            // y el juez de avance/bloqueo caía SIEMPRE a "avance" (no constataba de verdad).
+            max_tokens: Some(12),
         })
         .await
     else {

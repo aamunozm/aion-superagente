@@ -205,7 +205,9 @@ async fn contradicts(engine: &OllamaEngine, a: &str, b: &str) -> bool {
         ],
         think: false,
         temperature: Some(0.0),
-        max_tokens: Some(4),
+        // ≥10: gemma4-reason emite un token inicial antes del SI/NO; con 4 salía vacío y la
+        // guarda de contradicción caía SIEMPRE a "no contradice" (gobernanza SSGM degradada).
+        max_tokens: Some(12),
     };
     match engine.generate(req).await {
         Ok(m) => {
