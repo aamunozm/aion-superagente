@@ -175,7 +175,7 @@ impl VectorMemory {
     }
 
     pub fn len(&self) -> usize {
-        self.records.lock().unwrap().len()
+        self.records.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -197,7 +197,7 @@ impl VectorMemory {
     /// más reciente), para que el agente sitúe en el tiempo lo que ha vivido
     /// («hace 2 horas estudié…») en vez de un pasado plano.
     pub fn recent_with_time(&self, n: usize) -> Vec<(String, DateTime<Utc>)> {
-        let recs = self.records.lock().unwrap();
+        let recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         let mut v: Vec<(String, DateTime<Utc>)> = recs
             .iter()
             .filter(|r| !r.superseded)
@@ -212,7 +212,7 @@ impl VectorMemory {
     /// Últimos `n` recuerdos vigentes como (id, contenido), para capas que puentean
     /// la memoria con otras estructuras (p. ej. el grafo de conocimiento).
     pub fn recent_with_ids(&self, n: usize) -> Vec<(String, String)> {
-        let recs = self.records.lock().unwrap();
+        let recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         recs.iter()
             .filter(|r| !r.superseded)
             .rev()
@@ -226,7 +226,10 @@ impl VectorMemory {
     /// borrar el archivo a mano dejaría el snapshot en RAM y la próxima escritura lo
     /// resucitaría). Idempotente si ya está vacía.
     pub fn clear(&self) -> Result<()> {
-        self.records.lock().unwrap().clear();
+        self.records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         if let Some(path) = &self.path {
             if path.exists() {
                 std::fs::remove_file(path).map_err(|e| AionError::Memory(e.to_string()))?;
@@ -242,7 +245,7 @@ impl VectorMemory {
     pub fn reload(&self) -> Result<()> {
         if let Some(path) = &self.path {
             let fresh = load_jsonl(path)?;
-            *self.records.lock().unwrap() = fresh;
+            *self.records.lock().unwrap_or_else(|e| e.into_inner()) = fresh;
         }
         Ok(())
     }
@@ -265,7 +268,7 @@ impl VectorMemory {
     /// que dejó de ser válido en esa ventana. Permite responder «¿qué ha cambiado desde
     /// la semana pasada?» sin un grafo completo.
     pub fn changes_since(&self, since: DateTime<Utc>) -> (Vec<String>, Vec<String>) {
-        let recs = self.records.lock().unwrap();
+        let recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         let nuevos: Vec<String> = recs
             .iter()
             .filter(|r| !r.superseded && r.created_at >= since)
@@ -282,7 +285,7 @@ impl VectorMemory {
     /// Agrupa recuerdos vigentes en CLÚSTERES de casi-duplicados (cosine ≥ umbral).
     /// Base de la consolidación jerárquica: fundir cada grupo en un "tema" superior.
     pub fn duplicate_clusters(&self, threshold: f32) -> Vec<Vec<(String, String)>> {
-        let recs = self.records.lock().unwrap();
+        let recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         let active: Vec<&MemoryRecord> = recs.iter().filter(|r| !r.superseded).collect();
         let mut used = vec![false; active.len()];
         let mut clusters = Vec::new();
@@ -309,7 +312,7 @@ impl VectorMemory {
     /// Marca recuerdos como obsoletos por id (al fundirlos en un tema superior).
     pub fn supersede(&self, ids: &[String]) -> Result<usize> {
         let set: std::collections::HashSet<&String> = ids.iter().collect();
-        let mut recs = self.records.lock().unwrap();
+        let mut recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         let mut n = 0;
         for r in recs.iter_mut() {
             if !r.superseded && set.contains(&r.id) {
@@ -331,7 +334,7 @@ impl VectorMemory {
     /// (ids inexistentes se ignoran). Persiste de forma atómica bajo el mismo lock.
     pub fn forget(&self, ids: &[String]) -> Result<usize> {
         let set: std::collections::HashSet<&String> = ids.iter().collect();
-        let mut recs = self.records.lock().unwrap();
+        let mut recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         let before = recs.len();
         recs.retain(|r| !set.contains(&r.id));
         let n = before - recs.len();
@@ -354,7 +357,7 @@ impl VectorMemory {
     /// normalmente no se toca. `None` si hay pocos recuerdos o todos se parecen
     /// (sim mínima ≥ 0.5): la creatividad forzada produce ruido, no ideas.
     pub fn distant_pair(&self) -> Option<(String, String)> {
-        let recs = self.records.lock().unwrap();
+        let recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         let pool: Vec<&MemoryRecord> = recs
             .iter()
             .filter(|r| !r.superseded && !r.embedding.is_empty())
@@ -388,7 +391,7 @@ impl VectorMemory {
     pub fn reinforce(&self, ids: &[String], success: bool) -> Result<usize> {
         let set: std::collections::HashSet<&String> = ids.iter().collect();
         let delta = if success { 0.05 } else { -0.10 };
-        let mut recs = self.records.lock().unwrap();
+        let mut recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         let mut n = 0;
         for r in recs.iter_mut() {
             if set.contains(&r.id) {
@@ -418,7 +421,7 @@ impl VectorMemory {
         }
         // Recoge los que necesitan re-embeber (sin mantener el lock cruzando await).
         let stale: Vec<(String, String)> = {
-            let recs = self.records.lock().unwrap();
+            let recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
             recs.iter()
                 .filter(|r| r.embedding.len() != target)
                 .map(|r| (r.id.clone(), r.content.clone()))
@@ -432,7 +435,7 @@ impl VectorMemory {
             let v = self.embedder.embed(content).await?;
             new_vecs.push((id.clone(), v));
         }
-        let mut recs = self.records.lock().unwrap();
+        let mut recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         let map: std::collections::HashMap<String, Vec<f32>> = new_vecs.into_iter().collect();
         let mut n = 0;
         for r in recs.iter_mut() {
@@ -465,7 +468,7 @@ impl VectorMemory {
     /// los recuerdos cuyo `id` ya existe (idempotente). No requiere re-embeddings
     /// porque los vectores viajan en el archivo. Devuelve cuántos se añadieron.
     pub fn import_jsonl(&self, text: &str) -> Result<usize> {
-        let mut records = self.records.lock().unwrap();
+        let mut records = self.records.lock().unwrap_or_else(|e| e.into_inner());
         let existing: std::collections::HashSet<String> =
             records.iter().map(|r| r.id.clone()).collect();
         let mut added = 0usize;
@@ -516,7 +519,7 @@ impl VectorMemory {
             origin: origin.to_string(),
         };
         let now = Utc::now();
-        let mut recs = self.records.lock().unwrap();
+        let mut recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         // MEMORIA TEMPORAL: si actualiza a otro casi idéntico, marca el viejo obsoleto.
         // GRAFO ASOCIATIVO: si está RELACIONADO (sin ser idéntico), crea una arista
         // bidireccional → recuerdos de chats distintos quedan conectados (GAAMA).
@@ -580,7 +583,7 @@ impl MemoryStore for VectorMemory {
         // Pliega/tokeniza la consulta UNA sola vez (antes se re-plegaba por cada recuerdo).
         let q_words = fold_words(query);
 
-        let mut recs = self.records.lock().unwrap();
+        let mut recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         let max_access = recs.iter().map(|r| r.access_count).max().unwrap_or(0) as f32;
         let now = Utc::now();
 
@@ -665,7 +668,7 @@ impl VectorMemory {
         let mut seen: std::collections::HashSet<String> =
             base.iter().map(|h| h.id.clone()).collect();
 
-        let recs = self.records.lock().unwrap();
+        let recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         let by_id: std::collections::HashMap<&str, &MemoryRecord> =
             recs.iter().map(|r| (r.id.as_str(), r)).collect();
 
@@ -877,7 +880,7 @@ impl VectorMemory {
     /// Conservador por diseño: si es persistente, guarda un snapshot `.bak`
     /// antes de reescribir — nunca destruye sin copia de seguridad.
     pub fn consolidate(&self, cfg: &ConsolidationConfig) -> Result<ConsolidationReport> {
-        let mut recs = self.records.lock().unwrap();
+        let mut recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         let before = recs.len();
 
         // 1) Decaimiento de aptitud.
@@ -1017,7 +1020,7 @@ mod tests {
     fn reinforce_adjusts_fitness_by_real_outcome() {
         let mem = VectorMemory::default_local();
         let (id_a, id_b) = {
-            let mut r = mem.records.lock().unwrap();
+            let mut r = mem.records.lock().unwrap_or_else(|e| e.into_inner());
             r.push(rec(vec![1.0, 0.0, 0.0], 0.5, 0));
             r.push(rec(vec![0.0, 1.0, 0.0], 0.5, 0));
             (r[0].id.clone(), r[1].id.clone())
@@ -1028,7 +1031,7 @@ mod tests {
             mem.reinforce(std::slice::from_ref(&id_b), false).unwrap(),
             1
         );
-        let r = mem.records.lock().unwrap();
+        let r = mem.records.lock().unwrap_or_else(|e| e.into_inner());
         assert!((r[0].fitness - 0.55).abs() < 1e-6);
         assert!((r[1].fitness - 0.40).abs() < 1e-6);
         drop(r);
@@ -1036,14 +1039,14 @@ mod tests {
         for _ in 0..20 {
             let _ = mem.reinforce(std::slice::from_ref(&id_b), false);
         }
-        assert!(mem.records.lock().unwrap()[1].fitness >= 0.0);
+        assert!(mem.records.lock().unwrap_or_else(|e| e.into_inner())[1].fitness >= 0.0);
     }
 
     #[test]
     fn consolidation_merges_duplicates_and_prunes_weak() {
         let mem = VectorMemory::default_local();
         {
-            let mut r = mem.records.lock().unwrap();
+            let mut r = mem.records.lock().unwrap_or_else(|e| e.into_inner());
             r.push(rec(vec![1.0, 0.0, 0.0], 0.5, 1)); // usado
             r.push(rec(vec![1.0, 0.0, 0.0], 0.5, 0)); // casi-dup → se fusiona
             r.push(rec(vec![0.0, 1.0, 0.0], 0.05, 0)); // débil y sin uso → poda
@@ -1060,7 +1063,7 @@ mod tests {
     fn consolidation_keeps_accessed_memories() {
         let mem = VectorMemory::default_local();
         {
-            let mut r = mem.records.lock().unwrap();
+            let mut r = mem.records.lock().unwrap_or_else(|e| e.into_inner());
             r.push(rec(vec![0.0, 0.0, 1.0], 0.01, 5)); // aptitud baja pero MUY usada
         }
         let report = mem.consolidate(&ConsolidationConfig::default()).unwrap();
@@ -1095,7 +1098,7 @@ mod tests {
     fn merge_prefers_user_provenance_over_external() {
         let mem = VectorMemory::default_local();
         {
-            let mut r = mem.records.lock().unwrap();
+            let mut r = mem.records.lock().unwrap_or_else(|e| e.into_inner());
             // Mismo embedding → se funden. El externo entró primero (superviviente),
             // el del usuario después: tras fundir, gana la procedencia del usuario.
             let mut externo = rec(vec![1.0, 0.0, 0.0], 0.5, 0);
@@ -1111,7 +1114,7 @@ mod tests {
         }
         let report = mem.consolidate(&ConsolidationConfig::default()).unwrap();
         assert_eq!(report.merged, 1);
-        let r = mem.records.lock().unwrap();
+        let r = mem.records.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].origin, "", "el superviviente queda como del usuario");
         assert_eq!(r[0].content, "decisión del usuario");
@@ -1151,7 +1154,7 @@ mod tests {
     fn origins_for_maps_ids_to_provenance() {
         let mem = VectorMemory::default_local();
         let (id_u, id_e) = {
-            let mut r = mem.records.lock().unwrap();
+            let mut r = mem.records.lock().unwrap_or_else(|e| e.into_inner());
             let mut u = rec(vec![1.0, 0.0], 0.5, 0);
             u.origin = String::new();
             let mut e = rec(vec![0.0, 1.0], 0.5, 0);
@@ -1228,7 +1231,7 @@ mod tests {
         assert!(mem2.recent_with_ids(10).iter().all(|(id, _)| *id != a.id));
         // …y la arista colgante hacia a fue saneada en el superviviente b.
         {
-            let recs = mem2.records.lock().unwrap();
+            let recs = mem2.records.lock().unwrap_or_else(|e| e.into_inner());
             assert!(
                 recs.iter().all(|r| !r.links.contains(&a.id)),
                 "forget debe limpiar los links hacia ids borrados"
@@ -1243,7 +1246,7 @@ mod tests {
         let mem = VectorMemory::default_local();
         let t0 = epoch();
         {
-            let mut r = mem.records.lock().unwrap();
+            let mut r = mem.records.lock().unwrap_or_else(|e| e.into_inner());
             let mut viejo = rec(vec![1.0, 0.0], 0.5, 0);
             viejo.content = "creo X".into();
             viejo.superseded = true;
