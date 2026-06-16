@@ -546,6 +546,24 @@ export async function credentialRemove(host: string): Promise<void> {
   });
 }
 
+// ── APIs externas opcionales (gratis) que el usuario añade en Ajustes ────
+// La clave NUNCA se devuelve al cliente: el backend solo informa si está puesta (`set`).
+
+export type ApiKeyMeta = { provider: string; label: string; help: string; set: boolean };
+
+export async function apiKeysList(): Promise<ApiKeyMeta[]> {
+  const r = await jsonCall<{ keys: ApiKeyMeta[] }>(`/api/apikeys`);
+  return r.keys;
+}
+
+export async function apiKeySet(provider: string, key: string): Promise<void> {
+  await jsonCall(`/api/apikeys`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ provider, key }),
+  });
+}
+
 // ── Memoria de largo plazo ──────────────────────────────────────────────
 
 export type MemoryStats = { count: number; path: string };
