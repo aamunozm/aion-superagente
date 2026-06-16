@@ -47,4 +47,5 @@ AION corre localmente y expone memoria vía MCP (`mcp__aion__*`) en `http://127.
 - Si las tools no responden, AION está cerrado: continúa sin él, no es un error.
 
 ## Pendientes conocidos (de auditorías)
-- Crítico: **auth + CORS** de la API local `:8765` (ver `docs/auditoria-*` y la memoria `aion-auditoria-2026-06`).
+- ✅ Resuelto: **auth + CORS** de la API local `:8765` (P0-1 fase 1+2): `local_guard` (Host anti-DNS-rebinding + Origin obligatorio en mutaciones), Bearer local timing-safe (`require_api_token`) en todo `/api/*`, CORS allowlist de orígenes locales. Ver `docs/auditoria-*` y la memoria `aion-auditoria-2026-06`.
+- Pendiente (NO auth): **concurrencia inter-proceso** del JSONL de memoria — un subcomando CLI (`aion sleep`/`remember`) en paralelo al daemon puede perder un update (`tmp+rename` evita corrupción, no lost-update). Se cierra con file-lock o ruteo por HTTP.
