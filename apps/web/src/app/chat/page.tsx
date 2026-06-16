@@ -387,7 +387,7 @@ export default function ChatPage() {
 
   return (
     <AppShell title={t("nav.chat")}>
-      <div className="flex flex-col h-full max-w-4xl mx-auto w-full px-6">
+      <div className="flex flex-col h-full max-w-7xl mx-auto w-full px-6">
       <div className="flex items-center gap-2 py-3 shrink-0">
         {/* Nuevo chat */}
         <button
@@ -525,12 +525,12 @@ export default function ChatPage() {
             {/* Mensaje iniciado por AION: mismo agente, misma voz — se muestra como
                 cualquier otra respuesta suya (solo que sin burbuja de usuario). */}
             {t.reach ? (
-              <div className="msg max-w-[85%] self-start">
+              <div className="msg w-full self-start">
                 <Markdown>{t.answer}</Markdown>
               </div>
             ) : (
             <>
-            {t.prompt && <div className="self-end msg-user max-w-[75%]">{t.prompt}</div>}
+            {t.prompt && <div className="self-end msg-user max-w-[80%]">{t.prompt}</div>}
 
             {t.mode === "chat" && t.thinking && (
               <details className="text-sm" style={{ color: "var(--text-3)" }}>
@@ -560,7 +560,7 @@ export default function ChatPage() {
               ))}
 
             {t.answer && (
-              <div className="msg max-w-[85%] self-start">
+              <div className="msg w-full self-start">
                 <Markdown>{t.answer}</Markdown>
                 {t.meta && (
                   <p className="text-[11px] mt-1.5" style={{ color: "var(--text-3)" }}>
