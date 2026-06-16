@@ -1122,6 +1122,32 @@ fn looks_like_question(prompt: &str) -> bool {
     STARTS.iter().any(|w| p.starts_with(w))
 }
 
+/// **Segundo plano presente en el instante de leer.** Snapshot COMPACTO de la mente continua de
+/// AION para que la comprensión interprete el mensaje COMO alguien que conoce a su interlocutor y
+/// venía pensando en algo —no aislado—: (1) quién es Ariel (lo destilado en su modelo de usuario)
+/// y (2) qué estaba viviendo/pensando hace un momento (última huella de su corriente GWT). Corto a
+/// propósito (la comprensión es una llamada local pequeña). Es la unión primer plano↔segundo plano.
+fn comprehension_background() -> String {
+    let mut b = String::new();
+    let facts = crate::usermodel::active();
+    if !facts.is_empty() {
+        let who: String = facts
+            .iter()
+            .take(3)
+            .map(|f| f.text.trim())
+            .collect::<Vec<_>>()
+            .join("; ");
+        b.push_str(&format!("Lo que sabes de Ariel: {who}. "));
+    }
+    if let Some(ev) = crate::workspace::recent(1).into_iter().next_back() {
+        b.push_str(&format!(
+            "Hace un momento estabas: {}.",
+            ev.text.chars().take(140).collect::<String>()
+        ));
+    }
+    b
+}
+
 /// Efectos de la comprensión: deja huella en la corriente (GWT, etiqueta genérica — el
 /// contenido NUNCA se persiste ahí) y, si Ariel COMPARTIÓ/corrigió hechos, los memoriza
 /// como hechos atómicos (en background). Compartido por el camino que bloquea (preguntas)
@@ -1178,13 +1204,16 @@ async fn chat(
     // franqueza / ofrece buscar). Cuando Ariel solo "te cuenta algo", la corrige o charla,
     // la comprensión corre en SEGUNDO PLANO —sigue memorizando los hechos— y la respuesta
     // arranca de inmediato en vez de esperar una inferencia que no cambia el tono.
+    // Segundo plano PRESENTE en el instante de leer: quién es Ariel + qué venía viviendo AION.
+    let bg = comprehension_background();
     let comp = if looks_like_question(&body.prompt) {
-        crate::comprehension::comprehend(&body.prompt, &grounding).await
+        crate::comprehension::comprehend(&body.prompt, &grounding, &bg).await
     } else {
         let p = body.prompt.clone();
         let g = grounding.clone();
+        let bg = bg.clone();
         tokio::spawn(async move {
-            if let Some(c) = crate::comprehension::comprehend(&p, &g).await {
+            if let Some(c) = crate::comprehension::comprehend(&p, &g, &bg).await {
                 comprehension_side_effects(&c);
             }
         });
