@@ -119,10 +119,10 @@ where
     );
     let mut notes: Vec<Note> = Vec::new();
     for batch in sources[..to_read].chunks(READ_CONCURRENCY) {
+        // idx provisional 0: se renumera de forma estable tras reunir todas las notas.
         let futs = batch
             .iter()
-            .enumerate()
-            .map(|(j, sr)| read_source(engine, web, sr, topic, notes.len() + j + 1));
+            .map(|sr| read_source(engine, web, sr, topic, 0));
         for n in futures_util::future::join_all(futs)
             .await
             .into_iter()
@@ -130,6 +130,12 @@ where
         {
             notes.push(n);
         }
+    }
+    // RENUMERA [1..N] estable y único: la asignación por lote (`notes.len() + j + 1`) solo
+    // contaba los ÉXITOS, así que dos lotes podían repetir el mismo índice → citas [n]
+    // duplicadas/incoherentes en el informe (claim citando una fuente y la bibliografía otra).
+    for (i, n) in notes.iter_mut().enumerate() {
+        n.idx = i + 1;
     }
     if notes.is_empty() {
         return format!(
