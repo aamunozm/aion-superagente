@@ -20,12 +20,14 @@ mod deep_research;
 mod empathy;
 mod episodic;
 mod evals;
+mod governance;
 mod graph;
 mod identity;
 mod inbox;
 mod ingest_queue;
 mod inner_state;
 mod intent;
+mod interests;
 mod journal;
 mod language_detector;
 mod library;
@@ -2239,6 +2241,7 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
     let activities = [
         "estudiar",
         "investigar",
+        "investigar-profundo",
         "comprender",
         "proponer",
         "proyecto",
@@ -2261,6 +2264,7 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
         "vida",
         match goal.as_str() {
             "investigar" => "investigando algo que me intriga",
+            "investigar-profundo" => "investigando a fondo un tema que me importa",
             "comprender" => "consolidando lo que sé",
             "proponer" => "pensando cómo mejorar",
             "proyecto" => "avanzando un proyecto de Ariel",
@@ -2272,6 +2276,7 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
     );
     let (ok, detail) = match goal.as_str() {
         "investigar" => research_once(engine).await,
+        "investigar-profundo" => deep_dive_once(engine).await,
         "comprender" => synthesize_once(engine).await,
         "proponer" => propose_improvement_once(engine).await,
         "proyecto" => work_project_once(engine).await,
@@ -2388,21 +2393,41 @@ async fn study_once(engine: &OllamaEngine) -> (bool, String) {
 /// fuente y guarda lo aprendido en su memoria. Investigación autónoma real.
 async fn research_once(engine: &OllamaEngine) -> (bool, String) {
     use aion_browser::WebClient;
-    // 1) AION elige qué investigar (curiosidad).
-    let topic = match engine
-        .generate(GenerateRequest {
-            messages: vec![Message::user(
-                "Propón en MENOS de 8 palabras un tema que te gustaría investigar hoy para \
-                 ser mejor agente. Responde solo el tema, sin comillas.",
-            )],
-            think: false,
-            temperature: Some(1.0),
-            max_tokens: Some(30),
-        })
-        .await
+
+    // 0) GOBERNANZA: investigar en la web es solo-lectura (Allow), pero pasa por la puerta —
+    //    queda auditado y el circuit breaker evita que la curiosidad se desboque.
+    if !crate::governance::request(
+        crate::governance::Capability::Research,
+        "investigar en la web por mi cuenta",
+    )
+    .allowed()
     {
-        Ok(m) => m.content.trim().replace('\n', " "),
-        Err(e) => return (false, format!("no pude elegir tema: {e}")),
+        return (
+            false,
+            "investigación en pausa (gobernanza/circuit breaker)".into(),
+        );
+    }
+
+    // 1) AION elige qué investigar desde su MODELO DE INTERESES (temas que le importan a Ariel o
+    //    su propia curiosidad, rotando para no obsesionarse). Si aún no tiene intereses, cae al
+    //    disparo de curiosidad del LLM.
+    let topic = match crate::interests::pick_next() {
+        Some(t) => t,
+        None => match engine
+            .generate(GenerateRequest {
+                messages: vec![Message::user(
+                    "Propón en MENOS de 8 palabras un tema que te gustaría investigar hoy para \
+                     ser mejor agente. Responde solo el tema, sin comillas.",
+                )],
+                think: false,
+                temperature: Some(1.0),
+                max_tokens: Some(30),
+            })
+            .await
+        {
+            Ok(m) => m.content.trim().replace('\n', " "),
+            Err(e) => return (false, format!("no pude elegir tema: {e}")),
+        },
     };
 
     // 2) Busca en internet y lee la mejor fuente.
@@ -2444,7 +2469,48 @@ async fn research_once(engine: &OllamaEngine) -> (bool, String) {
             ))
             .await;
     }
+    // Cierra el lazo del modelo de intereses: marca explorado (rota la agenda, decae saciedad).
+    crate::interests::record_explored(&topic);
     (!summary.is_empty(), format!("{topic} → {summary}"))
+}
+
+/// `investigar-profundo`: AION hace una INVESTIGACIÓN PROFUNDA por su cuenta sobre su mayor
+/// interés y la GUARDA como conocimiento fechado (`research_memory`). Es el Anillo 1 en su forma
+/// plena: no lee una sola fuente, despliega el pipeline multi-fuente y lo recuerda con fecha, para
+/// volverse experto y construir encima. Gobernado + acotado (circuit breaker de Research): pesado,
+/// así que solo de vez en cuando, cuando la curiosidad lo elige y la puerta lo permite.
+async fn deep_dive_once(engine: &OllamaEngine) -> (bool, String) {
+    use aion_browser::WebClient;
+    if !crate::governance::request(
+        crate::governance::Capability::Research,
+        "investigar A FONDO por mi cuenta (deep research multi-fuente)",
+    )
+    .allowed()
+    {
+        return (
+            false,
+            "deep research en pausa (gobernanza/circuit breaker)".into(),
+        );
+    }
+    let Some(topic) = crate::interests::pick_next() else {
+        return (
+            false,
+            "aún no tengo intereses que investigar a fondo".into(),
+        );
+    };
+    let web = WebClient::new();
+    // Pipeline profesional, en silencio (sin emisor de progreso: es vida autónoma, no chat).
+    let report = crate::deep_research::run(engine, &web, &topic, 24, |_k: &str, _t: &str| {}).await;
+    crate::interests::record_explored(&topic);
+    if report.chars().count() < 200 {
+        return (false, format!("deep research sin sustancia para «{topic}»"));
+    }
+    // Lo RECUERDA fechado: episodio + resumen en memoria + informe a Biblioteca/Grafo.
+    crate::research_memory::remember_research(topic.clone(), report, false);
+    (
+        true,
+        format!("investigué a fondo «{topic}» y lo guardé en mi memoria de estudios"),
+    )
 }
 
 /// `proponer`: AION estudia lo que ha aprendido y **propone una mejora concreta a su

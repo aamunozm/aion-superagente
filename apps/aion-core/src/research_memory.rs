@@ -17,7 +17,7 @@
 
 /// Persiste una investigación profunda como conocimiento fechado. NO bloquea la respuesta:
 /// todo el trabajo (embeddings, ingesta) corre en segundo plano.
-pub fn remember_research(query: String, report: String) {
+pub fn remember_research(query: String, report: String, from_ariel: bool) {
     // Un informe vacío o un aviso de error no es conocimiento.
     if report.chars().count() < 200 || report.trim_start().starts_with('⚠') {
         return;
@@ -26,6 +26,11 @@ pub fn remember_research(query: String, report: String) {
         let when = chrono::Local::now();
         let fecha = when.format("%Y-%m-%d %H:%M").to_string();
         let topic = topic_of(&query, &report);
+
+        // Si la pidió Ariel, es algo que le importa → sube ese interés (alimenta su agenda).
+        if from_ariel {
+            crate::interests::add_or_bump(&topic, "ariel", 0.25);
+        }
 
         // 1) EPISODIO FECHADO — AION recuerda QUE investigó, sobre QUÉ y CUÁNDO.
         let findings = key_findings(&report);

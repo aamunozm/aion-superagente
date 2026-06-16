@@ -1698,7 +1698,7 @@ async fn agent(
             // conocimiento FECHADO (episodio + resumen en memoria + informe completo a la
             // Biblioteca/Grafo), para poder hablar del tema, profundizar y construir encima.
             // En segundo plano: no retrasa el envío del informe al chat.
-            crate::research_memory::remember_research(body.task.clone(), report.clone());
+            crate::research_memory::remember_research(body.task.clone(), report.clone(), true);
             let _ = tx
                 .send(Event::default().data(
                     serde_json::json!({ "kind": "answer", "text": report, "steps": 1 }).to_string(),
