@@ -268,6 +268,132 @@ impl WebClient {
         Ok(out)
     }
 
+    /// **Crossref** — metadatos de ~150M obras académicas, SIN clave ni cuenta. El parámetro
+    /// `mailto` entra al *polite pool* (más caudal). Fuente académica más fiable sin key (OpenAlex
+    /// pasó a exigir clave en feb-2026). El abstract (cuando existe) viaja en el snippet → si el
+    /// DOI lleva a un muro de pago, el lector usa el abstract igualmente.
+    async fn search_crossref(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let url = format!(
+            "https://api.crossref.org/works?query={}&rows={limit}&mailto=info@prontoclick.it",
+            urlencode(query)
+        );
+        let json = self.fetch_json(&url).await?;
+        let mut out = Vec::new();
+        if let Some(arr) = json["message"]["items"].as_array() {
+            for w in arr.iter().take(limit) {
+                let title = w["title"][0].as_str().unwrap_or("").to_string();
+                let doi = w["DOI"].as_str().unwrap_or("");
+                if title.is_empty() || doi.is_empty() {
+                    continue;
+                }
+                let year = w["issued"]["date-parts"][0][0]
+                    .as_i64()
+                    .map(|y| y.to_string())
+                    .unwrap_or_default();
+                let abs = w["abstract"]
+                    .as_str()
+                    .map(strip_html_tags)
+                    .unwrap_or_default();
+                let snippet = if abs.chars().count() > 40 {
+                    format!(
+                        "Paper académico ({year}). {}",
+                        abs.chars().take(500).collect::<String>()
+                    )
+                } else {
+                    format!("Paper académico ({year})")
+                };
+                out.push(SearchResult {
+                    title,
+                    url: format!("https://doi.org/{doi}"),
+                    snippet,
+                    source: "académico".into(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// **Europe PMC** — literatura biomédica y de ciencias de la vida (~40M registros), SIN clave;
+    /// muchos con full-text abierto. `abstractText` va al snippet como respaldo.
+    async fn search_europepmc(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let url = format!(
+            "https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={}&format=json\
+             &pageSize={limit}&resultType=core",
+            urlencode(query)
+        );
+        let json = self.fetch_json(&url).await?;
+        let mut out = Vec::new();
+        if let Some(arr) = json["resultList"]["result"].as_array() {
+            for r in arr.iter().take(limit) {
+                let title = strip_html_tags(r["title"].as_str().unwrap_or(""));
+                if title.is_empty() {
+                    continue;
+                }
+                let doi = r["doi"].as_str().unwrap_or("");
+                let id = r["id"].as_str().unwrap_or("");
+                let src = r["source"].as_str().unwrap_or("MED");
+                let url = if !doi.is_empty() {
+                    format!("https://doi.org/{doi}")
+                } else {
+                    format!("https://europepmc.org/article/{src}/{id}")
+                };
+                let year = r["pubYear"].as_str().unwrap_or("");
+                let abs = strip_html_tags(r["abstractText"].as_str().unwrap_or(""));
+                let snippet = if abs.chars().count() > 40 {
+                    format!(
+                        "Paper ({year}). {}",
+                        abs.chars().take(500).collect::<String>()
+                    )
+                } else {
+                    format!("Paper ({year})")
+                };
+                out.push(SearchResult {
+                    title,
+                    url,
+                    snippet,
+                    source: "académico".into(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// **arXiv** — preprints (CS, física, matemáticas…), SIN clave. Devuelve la URL del PDF (que
+    /// `fetch_readable` SÍ extrae) y el abstract como respaldo. Respuesta en Atom XML (parseo simple).
+    async fn search_arxiv(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let url = format!(
+            "https://export.arxiv.org/api/query?search_query=all:{}&max_results={limit}\
+             &sortBy=relevance",
+            urlencode(query)
+        );
+        let body = self.fetch_raw(&url).await?;
+        let mut out = Vec::new();
+        for entry in body.split("<entry>").skip(1).take(limit) {
+            let title = between(entry, "<title>", "</title>")
+                .map(strip_html_tags)
+                .unwrap_or_default();
+            let summary = between(entry, "<summary>", "</summary>")
+                .map(strip_html_tags)
+                .unwrap_or_default();
+            let id = between(entry, "<id>", "</id>").unwrap_or("").trim();
+            if title.is_empty() || id.is_empty() {
+                continue;
+            }
+            // id = .../abs/XXXX → el PDF está en .../pdf/XXXX (legible por fetch_readable).
+            let pdf = id.replace("/abs/", "/pdf/");
+            out.push(SearchResult {
+                title,
+                url: pdf,
+                snippet: format!(
+                    "Preprint arXiv. {}",
+                    summary.chars().take(500).collect::<String>()
+                ),
+                source: "académico".into(),
+            });
+        }
+        Ok(out)
+    }
+
     /// **Hacker News** (Algolia) — discusiones de profesionales tech (foros).
     async fn search_hackernews(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let url = format!(
@@ -410,13 +536,16 @@ impl WebClient {
         let others = async {
             tokio::join!(
                 self.search_ddg_lite(query, per * 2),
+                self.search_crossref(query, per),
+                self.search_arxiv(query, per),
+                self.search_europepmc(query, per),
                 self.search_openalex(query, per),
                 self.search_hackernews(query, per),
                 self.search_stackexchange(query, per),
                 self.search_github(query, per),
             )
         };
-        let ((ddg, rd, yt), (lite, oa, hn, se, gh)) = tokio::join!(html_ddg, others);
+        let ((ddg, rd, yt), (lite, cr, ax, ep, oa, hn, se, gh)) = tokio::join!(html_ddg, others);
         let mut out: Vec<SearchResult> = Vec::new();
         let mut seen_url: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut host_count: std::collections::HashMap<String, usize> =
@@ -427,11 +556,14 @@ impl WebClient {
         // lite van como dos fuentes web: si una se limita por carga, la otra mantiene la cobertura.
         let pools: Vec<Vec<SearchResult>> = vec![
             ddg.unwrap_or_default(),
-            oa.unwrap_or_default(),
+            cr.unwrap_or_default(),
             hn.unwrap_or_default(),
+            ax.unwrap_or_default(),
             se.unwrap_or_default(),
+            ep.unwrap_or_default(),
             gh.unwrap_or_default(),
             rd.unwrap_or_default(),
+            oa.unwrap_or_default(),
             yt.unwrap_or_default(),
             lite.unwrap_or_default(),
         ];
@@ -448,8 +580,20 @@ impl WebClient {
                     continue;
                 }
                 let host = host_of(&r.url);
+                // Agregadores académicos (doi.org, arXiv, Europe PMC…): cada URL es un paper
+                // distinto aunque compartan host → exentos del tope de 3/dominio.
+                let exempt = matches!(
+                    host.as_str(),
+                    "doi.org"
+                        | "arxiv.org"
+                        | "www.arxiv.org"
+                        | "export.arxiv.org"
+                        | "europepmc.org"
+                        | "www.ncbi.nlm.nih.gov"
+                        | "openalex.org"
+                );
                 let c = host_count.entry(host).or_insert(0);
-                if *c >= 3 {
+                if !exempt && *c >= 3 {
                     continue; // máx 3 por dominio: evita que un sitio domine
                 }
                 *c += 1;
@@ -991,6 +1135,13 @@ async fn extract_pdf(bytes: Vec<u8>) -> Option<String> {
 
 /// Codifica una cadena para usarla en una query string (percent-encoding).
 /// Extrae el host de una URL (para deduplicar por dominio). Best-effort, sin deps.
+/// Devuelve el texto entre `start` y `end` (primera ocurrencia). Para parsear XML/HTML simple.
+fn between<'a>(s: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let i = s.find(start)? + start.len();
+    let j = s[i..].find(end)? + i;
+    Some(&s[i..j])
+}
+
 fn host_of(url: &str) -> String {
     let after = url.split("://").nth(1).unwrap_or(url);
     after
