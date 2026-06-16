@@ -43,7 +43,7 @@ pub struct InMemoryStore {
 
 impl UserStore for InMemoryStore {
     fn create_user(&self, email: &str, password_hash: &str) -> Result<User, String> {
-        let mut users = self.users.lock().unwrap();
+        let mut users = self.users.lock().unwrap_or_else(|e| e.into_inner());
         if users.values().any(|u| u.email == email) {
             return Err("el email ya está registrado".into());
         }
@@ -68,26 +68,30 @@ impl UserStore for InMemoryStore {
     }
 
     fn find_by_id(&self, id: &str) -> Option<User> {
-        self.users.lock().unwrap().get(id).cloned()
+        self.users
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
     }
 
     #[allow(dead_code)]
     fn set_tier(&self, id: &str, tier: &str) -> Result<(), String> {
-        let mut users = self.users.lock().unwrap();
+        let mut users = self.users.lock().unwrap_or_else(|e| e.into_inner());
         let u = users.get_mut(id).ok_or("usuario no encontrado")?;
         u.tier = tier.to_string();
         Ok(())
     }
 
     fn set_recovery(&self, id: &str, recovery_hash: &str) -> Result<(), String> {
-        let mut users = self.users.lock().unwrap();
+        let mut users = self.users.lock().unwrap_or_else(|e| e.into_inner());
         let u = users.get_mut(id).ok_or("usuario no encontrado")?;
         u.recovery_hash = recovery_hash.to_string();
         Ok(())
     }
 
     fn update_password(&self, id: &str, password_hash: &str) -> Result<(), String> {
-        let mut users = self.users.lock().unwrap();
+        let mut users = self.users.lock().unwrap_or_else(|e| e.into_inner());
         let u = users.get_mut(id).ok_or("usuario no encontrado")?;
         u.password_hash = password_hash.to_string();
         Ok(())
@@ -123,7 +127,7 @@ impl FileStore {
     }
 
     pub fn len(&self) -> usize {
-        self.users.lock().unwrap().len()
+        self.users.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Reescribe todo el archivo desde el mapa en memoria.
@@ -145,7 +149,7 @@ impl FileStore {
 
 impl UserStore for FileStore {
     fn create_user(&self, email: &str, password_hash: &str) -> Result<User, String> {
-        let mut users = self.users.lock().unwrap();
+        let mut users = self.users.lock().unwrap_or_else(|e| e.into_inner());
         if users.values().any(|u| u.email.eq_ignore_ascii_case(email)) {
             return Err("el email ya está registrado".into());
         }
@@ -183,11 +187,15 @@ impl UserStore for FileStore {
     }
 
     fn find_by_id(&self, id: &str) -> Option<User> {
-        self.users.lock().unwrap().get(id).cloned()
+        self.users
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
     }
 
     fn set_tier(&self, id: &str, tier: &str) -> Result<(), String> {
-        let mut users = self.users.lock().unwrap();
+        let mut users = self.users.lock().unwrap_or_else(|e| e.into_inner());
         let u = users.get_mut(id).ok_or("usuario no encontrado")?;
         u.tier = tier.to_string();
         let snapshot = users.clone();
@@ -196,7 +204,7 @@ impl UserStore for FileStore {
     }
 
     fn set_recovery(&self, id: &str, recovery_hash: &str) -> Result<(), String> {
-        let mut users = self.users.lock().unwrap();
+        let mut users = self.users.lock().unwrap_or_else(|e| e.into_inner());
         let u = users.get_mut(id).ok_or("usuario no encontrado")?;
         u.recovery_hash = recovery_hash.to_string();
         let snapshot = users.clone();
@@ -205,7 +213,7 @@ impl UserStore for FileStore {
     }
 
     fn update_password(&self, id: &str, password_hash: &str) -> Result<(), String> {
-        let mut users = self.users.lock().unwrap();
+        let mut users = self.users.lock().unwrap_or_else(|e| e.into_inner());
         let u = users.get_mut(id).ok_or("usuario no encontrado")?;
         u.password_hash = password_hash.to_string();
         let snapshot = users.clone();

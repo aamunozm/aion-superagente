@@ -187,7 +187,7 @@ pub fn is_registered() -> bool {
 pub async fn build_brief() -> String {
     static CACHE: OnceLock<Mutex<Option<(Instant, String)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
-    if let Some((t, s)) = cache.lock().unwrap().as_ref() {
+    if let Some((t, s)) = cache.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         if t.elapsed().as_secs() < 300 {
             return s.clone();
         }
@@ -285,7 +285,7 @@ pub async fn build_brief() -> String {
     if out.chars().count() > 1800 {
         out = out.chars().take(1800).collect();
     }
-    *cache.lock().unwrap() = Some((Instant::now(), out.clone()));
+    *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), out.clone()));
     out
 }
 

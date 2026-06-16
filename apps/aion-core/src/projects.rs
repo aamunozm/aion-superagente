@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn crud_proyecto_fuentes_y_studio() {
-        let _g = LOCK.lock().unwrap();
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = isolate();
 
         // Crear → aparece en la lista y se recupera por id.
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn grounding_solo_incluye_fuentes_activas() {
-        let _g = LOCK.lock().unwrap();
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = isolate();
         let p = create("Proyecto X", "objetivo claro", "");
         add_source(&p.id, "Activa", "nota", "DATO_ACTIVO");

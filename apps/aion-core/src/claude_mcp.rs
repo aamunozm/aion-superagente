@@ -136,7 +136,7 @@ pub(crate) fn token_matches(provided: &str, expected: &str) -> bool {
 
 fn rate_limit_ok() -> bool {
     static WINDOW: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
-    let mut w = WINDOW.lock().unwrap();
+    let mut w = WINDOW.lock().unwrap_or_else(|e| e.into_inner());
     match w.as_mut() {
         Some((start, count)) if start.elapsed().as_secs() < 60 => {
             *count += 1;
@@ -540,7 +540,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             let cache = GRAPH_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
             let cache_key = format!("{query}|{mode}");
             {
-                let mut c = cache.lock().unwrap();
+                let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
                 c.retain(|_, (t, _)| t.elapsed().as_secs() < 60); // purga entradas caducadas
                 if let Some((_, cached)) = c.get(&cache_key) {
                     return Ok(cached.clone());
