@@ -238,20 +238,29 @@ async fn read_source(
     topic: &str,
     idx: usize,
 ) -> Option<Note> {
-    // Lectura PROFUNDA: presupuesto amplio (12k) + soporte PDF (fuentes académicas). Antes
-    // fetch_text recortaba a 4k y no leía PDFs → muchas fuentes rendían "NADA".
-    let fetched = web
-        .fetch_readable(&sr.url, 12_000)
-        .await
-        .unwrap_or_default();
-    let text = if fetched.chars().count() >= 80 {
-        fetched
-    } else if sr.snippet.chars().count() >= 120 {
-        // No se pudo leer la página (PDF de pago, muro, JS): usa el abstract/snippet como
-        // RESPALDO para que la fuente (sobre todo papers académicos) contribuya igualmente.
-        sr.snippet.clone()
+    // Hosts JS/con muro (YouTube, Reddit, redes): el HTML rinde basura ("please wait" / chrome de
+    // UI) y leerlo malgasta una lectura del LLM. Su snippet del buscador (título + resumen) es más
+    // útil y gratis → se usa directamente. Para el resto: lectura PROFUNDA (HTML/PDF, 12k chars).
+    let text = if is_low_yield_host(&sr.url) {
+        if sr.snippet.chars().count() >= 40 {
+            sr.snippet.clone()
+        } else {
+            return None;
+        }
     } else {
-        return None; // ni página ni abstract útiles
+        let fetched = web
+            .fetch_readable(&sr.url, 12_000)
+            .await
+            .unwrap_or_default();
+        if fetched.chars().count() >= 80 {
+            fetched
+        } else if sr.snippet.chars().count() >= 120 {
+            // No se pudo leer la página (PDF de pago, muro, JS): usa el abstract/snippet como
+            // RESPALDO para que la fuente (sobre todo papers académicos) contribuya igualmente.
+            sr.snippet.clone()
+        } else {
+            return None; // ni página ni abstract útiles
+        }
     };
     let req = GenerateRequest {
         messages: vec![
@@ -357,6 +366,40 @@ fn interleave_by_family(sources: Vec<SearchResult>) -> Vec<SearchResult> {
         }
     }
     out
+}
+
+/// Hosts cuyo HTML no aporta (JS/SPA, muro de verificación o login): YouTube, Reddit y redes
+/// sociales. Para ellos se usa el snippet del buscador como contenido, en vez de gastar una
+/// lectura del LLM en chrome de UI. (Leerlos de verdad exigiría un navegador headless — futuro.)
+fn is_low_yield_host(url: &str) -> bool {
+    let h = url
+        .split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    matches!(
+        h.as_str(),
+        "youtube.com"
+            | "www.youtube.com"
+            | "m.youtube.com"
+            | "youtu.be"
+            | "reddit.com"
+            | "www.reddit.com"
+            | "old.reddit.com"
+            | "twitter.com"
+            | "x.com"
+            | "instagram.com"
+            | "www.instagram.com"
+            | "facebook.com"
+            | "www.facebook.com"
+            | "tiktok.com"
+            | "www.tiktok.com"
+            | "linkedin.com"
+            | "www.linkedin.com"
+    )
 }
 
 /// **¿Es una petición de INVESTIGACIÓN PROFUNDA?** (no una búsqueda rápida). Conservador: solo
