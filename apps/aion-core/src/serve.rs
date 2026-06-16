@@ -1567,7 +1567,20 @@ async fn agent(
         let is_chat = match crate::intent::route(&body.task).await {
             crate::intent::Route::Chat => true,
             crate::intent::Route::Task => false,
-            crate::intent::Route::Unsure => classify_intent_is_chat(&*engine, &body.task).await,
+            // AMBIGUO → que el SENTIDO decida, pero CON LA MENTE PRESENTE: la comprensión
+            // razona la intención teniendo el segundo plano (quién es Ariel + qué venía viviendo
+            // AION). Solo «pide actuar» va a herramientas; preguntar/charlar/compartir/corregir/
+            // instruir es charla (incluye las preguntas de CAPACIDAD «¿podrías…?»). Si la
+            // comprensión falla, cae al clasificador anterior. Es percibir en tiempo real con
+            // todo lo que AION es, no un filtro de palabras.
+            crate::intent::Route::Unsure => {
+                match crate::comprehension::comprehend(&body.task, "", &comprehension_background())
+                    .await
+                {
+                    Some(c) => c.intent != crate::comprehension::Intent::PideAccion,
+                    None => classify_intent_is_chat(&*engine, &body.task).await,
+                }
+            }
         };
         // Si es charla, respondemos cálido y salimos —sin ReAct—.
         if is_chat {
