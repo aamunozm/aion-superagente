@@ -60,7 +60,11 @@ pub async fn refresh_weather() {
         return;
     }
     let now = chrono::Utc::now().timestamp();
-    if let Some((ts, _)) = weather_cache().lock().unwrap().as_ref() {
+    if let Some((ts, _)) = weather_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
         if now - ts < WEATHER_TTL {
             return;
         }
@@ -83,7 +87,7 @@ pub async fn refresh_weather() {
     if let Some(t) = temp {
         let desc = weather_desc(code);
         let txt = format!("{desc}, {t:.0}°C");
-        *weather_cache().lock().unwrap() = Some((now, txt));
+        *weather_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some((now, txt));
     }
 }
 
@@ -98,7 +102,11 @@ pub fn note() -> String {
     if !cfg.place.is_empty() {
         b.push_str(&format!("DÓNDE ESTÁS: {}.", cfg.place));
     }
-    if let Some((_, w)) = weather_cache().lock().unwrap().as_ref() {
+    if let Some((_, w)) = weather_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
         b.push_str(&format!(" Tiempo ahora: {w}."));
     }
     if b.is_empty() {

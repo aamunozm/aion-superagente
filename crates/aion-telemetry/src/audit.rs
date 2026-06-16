@@ -50,7 +50,7 @@ impl AuditLog {
             detail: detail.into(),
         };
         tracing::info!(actor = %entry.actor, action = %entry.action, "audit");
-        let _guard = self.lock.lock().unwrap();
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(dir) = self.path.parent() {
             if !dir.as_os_str().is_empty() {
                 let _ = std::fs::create_dir_all(dir);

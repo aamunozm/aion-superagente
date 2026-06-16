@@ -114,7 +114,7 @@ async fn ensure_running() -> bool {
         .stderr(std::process::Stdio::null())
         .spawn();
     match spawn {
-        Ok(child) => *SPAWNED.lock().unwrap() = Some(child),
+        Ok(child) => *SPAWNED.lock().unwrap_or_else(|e| e.into_inner()) = Some(child),
         Err(e) => {
             tracing::error!(error = %e, "no pude lanzar Ollama embebido");
             return false;
@@ -137,7 +137,7 @@ async fn ensure_running() -> bool {
 /// Termina el Ollama que lanzamos NOSOTROS (si lo hicimos). No toca un Ollama externo del
 /// usuario. Se llama en el apagado limpio de AION.
 fn shutdown() {
-    if let Some(mut child) = SPAWNED.lock().unwrap().take() {
+    if let Some(mut child) = SPAWNED.lock().unwrap_or_else(|e| e.into_inner()).take() {
         let _ = child.kill();
         let _ = child.wait();
         tracing::info!("Ollama embebido detenido (lo habíamos lanzado nosotros)");
