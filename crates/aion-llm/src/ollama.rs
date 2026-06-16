@@ -219,14 +219,14 @@ impl LlmEngine for OllamaEngine {
         let started = std::time::Instant::now();
         let mut ttft_ms: Option<u128> = None; // tiempo hasta el PRIMER token (prefill real)
         let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
+        // Búfer de BYTES (no String): decodificar cada chunk por separado partiría los
+        // caracteres multibyte que caen en el borde de un chunk. Ver `crate::take_line`.
+        let mut buf: Vec<u8> = Vec::new();
         while let Some(item) = stream.next().await {
             let bytes = item.map_err(|e| AionError::Llm(format!("error de stream: {e}")))?;
-            buf.push_str(&String::from_utf8_lossy(&bytes));
+            buf.extend_from_slice(&bytes);
 
-            while let Some(nl) = buf.find('\n') {
-                let line = buf[..nl].trim().to_string();
-                buf.drain(..=nl);
+            while let Some(line) = crate::take_line(&mut buf) {
                 if line.is_empty() {
                     continue;
                 }

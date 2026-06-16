@@ -932,12 +932,15 @@ async fn models_pull(
             }
         };
         let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
+        // Búfer de BYTES: decodificar cada chunk por separado partiría un carácter multibyte
+        // que cayera en el borde del chunk. Partimos por el byte '\n' (nunca dentro de un
+        // multibyte) y decodificamos solo líneas COMPLETAS (siempre UTF-8 válido).
+        let mut buf: Vec<u8> = Vec::new();
         while let Some(item) = stream.next().await {
             let Ok(bytes) = item else { break };
-            buf.push_str(&String::from_utf8_lossy(&bytes));
-            while let Some(nl) = buf.find('\n') {
-                let line = buf[..nl].trim().to_string();
+            buf.extend_from_slice(&bytes);
+            while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+                let line = String::from_utf8_lossy(&buf[..nl]).trim().to_string();
                 buf.drain(..=nl);
                 if line.is_empty() {
                     continue;

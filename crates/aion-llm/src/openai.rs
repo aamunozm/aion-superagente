@@ -107,14 +107,14 @@ impl LlmEngine for OpenAiEngine {
             return Err(AionError::Llm(format!("API devolvió {}", resp.status())));
         }
         let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
+        // Búfer de BYTES (no String): evita corromper multibyte partido entre chunks. Ver
+        // `crate::take_line`.
+        let mut buf: Vec<u8> = Vec::new();
         let mut tokens = 0u32;
         while let Some(item) = stream.next().await {
             let bytes = item.map_err(|e| AionError::Llm(format!("stream: {e}")))?;
-            buf.push_str(&String::from_utf8_lossy(&bytes));
-            while let Some(nl) = buf.find('\n') {
-                let line = buf[..nl].trim().to_string();
-                buf.drain(..=nl);
+            buf.extend_from_slice(&bytes);
+            while let Some(line) = crate::take_line(&mut buf) {
                 let Some(data) = line.strip_prefix("data:") else {
                     continue;
                 };
