@@ -203,7 +203,14 @@ pub fn top_open() -> Option<Intention> {
 pub fn activate(id: &str, plan_id: &str) -> bool {
     let _g = QLOCK.lock().unwrap();
     let mut items = all();
-    let now = now_secs();
+    let activated = apply_activate(&mut items, id, plan_id, now_secs());
+    save(&items);
+    activated
+}
+
+/// Núcleo PURO de `activate` (sin lock ni disco) → testeable de forma aislada. Mismo
+/// patrón que `reflection::decay_prune_inplace`. Garantiza el invariante «una sola Active».
+fn apply_activate(items: &mut [Intention], id: &str, plan_id: &str, now: i64) -> bool {
     // INVARIANTE «una sola Active»: degrada cualquier otra Active a Open antes de promover
     // esta. Hoy el arbitraje ya evita llamar aquí con otra activa, pero garantizarlo en el
     // punto de mutación lo hace robusto ante futuros llamadores que se salten ese guard.
@@ -229,7 +236,6 @@ pub fn activate(id: &str, plan_id: &str) -> bool {
             }
         }
     }
-    save(&items);
     activated
 }
 
@@ -240,7 +246,14 @@ pub fn activate(id: &str, plan_id: &str) -> bool {
 pub fn note_fail(id: &str) -> bool {
     let _g = QLOCK.lock().unwrap();
     let mut items = all();
-    let now = now_secs();
+    let abandoned = apply_note_fail(&mut items, id, now_secs());
+    save(&items);
+    abandoned
+}
+
+/// Núcleo PURO de `note_fail` (sin lock ni disco) → testeable. Acota los reintentos de
+/// materialización: pasado `MAX_FAILS`, abandona. Devuelve `true` si abandonó.
+fn apply_note_fail(items: &mut [Intention], id: &str, now: i64) -> bool {
     let mut abandoned = false;
     for i in items.iter_mut() {
         if i.id == id && i.status == Status::Open {
@@ -252,7 +265,6 @@ pub fn note_fail(id: &str) -> bool {
             }
         }
     }
-    save(&items);
     abandoned
 }
 
@@ -330,6 +342,61 @@ mod tests {
         let later = now + (WEIGHT_HALFLIFE_DAYS as i64) * 86_400;
         let w = fresh.effective_weight(later);
         assert!(w > 0.45 && w < 0.55, "esperaba ~0.5, fue {w}");
+    }
+
+    fn mk(id: &str, status: Status) -> Intention {
+        Intention {
+            id: id.into(),
+            at: 1,
+            want: format!("quiero {id} algo concreto"),
+            why: "porque sí".into(),
+            drive: Drive::Curiosity,
+            status,
+            weight: 0.7,
+            plan_id: None,
+            last_touch: 1,
+            revisits: 0,
+            fails: 0,
+        }
+    }
+
+    #[test]
+    fn apply_activate_enforces_single_active() {
+        // A ya activa con plan; activar B debe degradar A a Open (invariante una-sola-Active).
+        let mut a = mk("a", Status::Active);
+        a.plan_id = Some("plan-a".into());
+        let items = &mut [a, mk("b", Status::Open)];
+        assert!(apply_activate(items, "b", "plan-b", 100));
+        assert_eq!(
+            items.iter().filter(|i| i.status == Status::Active).count(),
+            1
+        );
+        assert_eq!(items[0].status, Status::Open); // A degradada
+        assert!(items[0].plan_id.is_none()); // y desligada de su plan
+        assert_eq!(items[1].status, Status::Active);
+        assert_eq!(items[1].plan_id.as_deref(), Some("plan-b"));
+    }
+
+    #[test]
+    fn apply_activate_abandons_after_max_revisits() {
+        let mut a = mk("a", Status::Open);
+        a.revisits = MAX_REVISITS; // ya agotó las reactivaciones
+        let items = &mut [a];
+        assert!(!apply_activate(items, "a", "plan", 100)); // no se activa
+        assert_eq!(items[0].status, Status::Abandoned); // se suelta, no se reintenta
+    }
+
+    #[test]
+    fn apply_note_fail_backs_off_then_abandons() {
+        // Reproduce el bug del martilleo: sin tope, una intención no-materializable se
+        // reelegía cada tick. Ahora tras MAX_FAILS se abandona.
+        let items = &mut [mk("a", Status::Open)];
+        for _ in 0..(MAX_FAILS - 1) {
+            assert!(!apply_note_fail(items, "a", 100)); // aún no abandona
+            assert_eq!(items[0].status, Status::Open);
+        }
+        assert!(apply_note_fail(items, "a", 100)); // el N-ésimo fallo la abandona
+        assert_eq!(items[0].status, Status::Abandoned);
     }
 
     #[test]
