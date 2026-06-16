@@ -40,6 +40,14 @@ const CHAT_PROTOS: &[&str] = &[
     "me gustaría que crezcamos juntos en este proyecto",
     "¿qué te gustaría aprender o llegar a ser?",
     "jajaja qué bueno, tienes toda la razón en eso",
+    // Preguntas sobre TUS CAPACIDADES / hipotéticas («¿puedes…?», «¿podrías…?», «¿serías capaz…?»):
+    // el usuario pregunta SI sabes/puedes hacer algo, no te ORDENA hacerlo ahora → es charla
+    // (explicas qué puedes y sus límites). Sin esto, «¿podrías administrar mis perfiles?» se iba
+    // al bucle ReAct, intentaba hacerlo y se colgaba («me quedé atascado»).
+    "¿puedes ver y analizar redes sociales como Facebook o Instagram?",
+    "si creo unos perfiles en un sistema, ¿podrías administrarlos por mí?",
+    "¿serías capaz de gestionar varias cuentas si te doy acceso?",
+    "¿qué cosas puedes hacer tú?, ¿hasta dónde llegan tus capacidades?",
 ];
 
 /// Prototipos de TAREA: pedir un dato del mundo exterior o ejecutar/leer/crear algo concreto.
