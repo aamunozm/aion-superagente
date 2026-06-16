@@ -94,7 +94,13 @@ pub async fn refresh_weather() {
 /// Bloque para el prompt (vacío si está desactivado o aún sin datos). Es ESTADO
 /// volátil: va al final del prompt y nunca se memoriza.
 pub fn note() -> String {
-    let cfg = load();
+    note_from(&load())
+}
+
+/// Construye la nota a partir de una config DADA — función pura (no toca disco), para poder
+/// testear la lógica de forma aislada (antes el test leía `sensors.json` real del Mac y fallaba
+/// en la máquina de Ariel con los sensores activados).
+fn note_from(cfg: &SensorConfig) -> String {
     if !cfg.enabled {
         return String::new();
     }
@@ -147,8 +153,9 @@ mod tests {
 
     #[test]
     fn note_empty_when_disabled() {
-        // Sin config en disco => desactivado => sin bloque.
-        assert_eq!(note(), "");
+        // Lógica PURA (sin leer disco): desactivado => sin bloque. Antes esto llamaba a note(),
+        // que lee el sensors.json real → fallaba en el Mac de Ariel con los sensores activados.
+        assert_eq!(note_from(&SensorConfig::default()), "");
     }
 
     #[test]
