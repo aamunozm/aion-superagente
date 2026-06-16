@@ -538,6 +538,59 @@ impl WebClient {
         Ok(out)
     }
 
+    /// **GitHub code search** — busca dentro del CÓDIGO de repos públicos (ficheros, no solo el
+    /// repo). GitHub lo exige AUTENTICADO desde 2023: solo se activa si hay `AION_GITHUB_TOKEN`
+    /// (Ajustes → APIs); sin token devuelve vacío (keyless-safe). Apunta al RAW del fichero, que
+    /// `fetch_readable` lee como texto plano.
+    async fn search_github_code(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let tok = std::env::var("AION_GITHUB_TOKEN").unwrap_or_default();
+        if tok.trim().is_empty() {
+            return Ok(Vec::new()); // sin token, GitHub code-search no es viable
+        }
+        let url = format!(
+            "https://api.github.com/search/code?q={}&per_page={limit}",
+            urlencode(query)
+        );
+        let json: serde_json::Value = self
+            .http
+            .get(&url)
+            .header("Accept", "application/vnd.github+json")
+            .header("Authorization", format!("Bearer {}", tok.trim()))
+            .send()
+            .await
+            .map_err(|e| AionError::Internal(format!("github code falló: {e}")))?
+            .json()
+            .await
+            .map_err(|e| AionError::Internal(format!("github code json inválido: {e}")))?;
+        let mut out = Vec::new();
+        if let Some(arr) = json["items"].as_array() {
+            for it in arr.iter().take(limit) {
+                let repo = it["repository"]["full_name"].as_str().unwrap_or("");
+                let path = it["path"].as_str().unwrap_or("");
+                let html = it["html_url"].as_str().unwrap_or("");
+                if repo.is_empty() || path.is_empty() || html.is_empty() {
+                    continue;
+                }
+                // El blob HTML es JS-pesado → apunta al RAW (texto plano legible):
+                // github.com/{repo}/blob/{ref}/{path} → raw.githubusercontent.com/{repo}/{ref}/{path}
+                let raw = html
+                    .replacen(
+                        "https://github.com/",
+                        "https://raw.githubusercontent.com/",
+                        1,
+                    )
+                    .replacen("/blob/", "/", 1);
+                out.push(SearchResult {
+                    title: format!("{repo}/{path}"),
+                    url: raw,
+                    snippet: format!("Código GitHub · {repo} · {path}"),
+                    source: "código".into(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// Búsqueda acotada a un DOMINIO vía DDG (`site:`), para fuentes que bloquean su API
     /// directa (Reddit, YouTube). Reusa el parser de DDG; `label` marca la familia.
     async fn search_site(
@@ -586,9 +639,10 @@ impl WebClient {
                 self.search_hackernews(query, per),
                 self.search_stackexchange(query, per),
                 self.search_github(query, per),
+                self.search_github_code(query, per),
             )
         };
-        let ((ddg, rd, yt), (lite, cr, ax, ep, ol, oa, hn, se, gh)) =
+        let ((ddg, rd, yt), (lite, cr, ax, ep, ol, oa, hn, se, gh, ghc)) =
             tokio::join!(html_ddg, others);
         let mut out: Vec<SearchResult> = Vec::new();
         let mut seen_url: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -607,6 +661,7 @@ impl WebClient {
             ep.unwrap_or_default(),
             ol.unwrap_or_default(),
             gh.unwrap_or_default(),
+            ghc.unwrap_or_default(),
             rd.unwrap_or_default(),
             oa.unwrap_or_default(),
             yt.unwrap_or_default(),
@@ -636,6 +691,7 @@ impl WebClient {
                         | "europepmc.org"
                         | "www.ncbi.nlm.nih.gov"
                         | "openalex.org"
+                        | "raw.githubusercontent.com"
                 );
                 let c = host_count.entry(host).or_insert(0);
                 if !exempt && *c >= 3 {
