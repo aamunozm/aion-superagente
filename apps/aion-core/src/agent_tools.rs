@@ -1649,6 +1649,48 @@ impl Tool for SearchTool {
     }
 }
 
+// ── 0c) Buscar en GitHub: repos + código (API; el código requiere token) ────
+
+/// Búsqueda en GitHub vía API: repositorios y, con token, ficheros de código.
+pub struct GithubSearchTool {
+    web: Arc<WebClient>,
+}
+
+impl GithubSearchTool {
+    pub fn new(web: Arc<WebClient>) -> Self {
+        Self { web }
+    }
+}
+
+#[async_trait]
+impl Tool for GithubSearchTool {
+    fn name(&self) -> &str {
+        "github_search"
+    }
+    fn description(&self) -> &str {
+        "Busca en GitHub usando su API: repositorios populares (por estrellas) y, si hay un token \
+         configurado en Ajustes \u{2192} APIs, tambi\u{e9}n DENTRO del c\u{f3}digo de los repos. \
+         \u{da}sala cuando el usuario pida buscar repos, proyectos, librer\u{ed}as o c\u{f3}digo en \
+         GitHub. Entrada: t\u{e9}rminos de b\u{fa}squeda. Devuelve t\u{ed}tulo, URL y datos; luego \
+         puedes leer una URL con web_fetch."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let results = self.web.github(input.trim(), 8).await;
+        if results.is_empty() {
+            return Err(
+                "GitHub no devolvi\u{f3} resultados; reformula la consulta o revisa el token en \
+                 Ajustes \u{2192} APIs"
+                    .into(),
+            );
+        }
+        Ok(results
+            .iter()
+            .map(|r| format!("\u{2022} {} \u{2014} {}\n  {}", r.title, r.url, r.snippet))
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+}
+
 // ── 0b) Clima en tiempo real (Open-Meteo, sin API key) ──────────────────────
 
 /// Temperatura y clima ACTUALES de un lugar. Es la herramienta correcta para
