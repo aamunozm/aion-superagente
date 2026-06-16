@@ -394,6 +394,39 @@ impl WebClient {
         Ok(out)
     }
 
+    /// **Open Library** (Internet Archive), SIN key: metadatos de libros (título, autor, año).
+    /// Aporta diversidad tipo LIBRO/primaria; la página /works suele tener descripción legible.
+    async fn search_openlibrary(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let url = format!(
+            "https://openlibrary.org/search.json?q={}&limit={limit}\
+             &fields=key,title,author_name,first_publish_year",
+            urlencode(query)
+        );
+        let json = self.fetch_json(&url).await?;
+        let mut out = Vec::new();
+        if let Some(arr) = json["docs"].as_array() {
+            for d in arr.iter().take(limit) {
+                let title = d["title"].as_str().unwrap_or("").to_string();
+                let key = d["key"].as_str().unwrap_or("");
+                if title.is_empty() || key.is_empty() {
+                    continue;
+                }
+                let author = d["author_name"][0].as_str().unwrap_or("");
+                let year = d["first_publish_year"]
+                    .as_i64()
+                    .map(|y| y.to_string())
+                    .unwrap_or_default();
+                out.push(SearchResult {
+                    title,
+                    url: format!("https://openlibrary.org{key}"),
+                    snippet: format!("Libro · {author} · {year}"),
+                    source: "libro".into(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// **Hacker News** (Algolia) — discusiones de profesionales tech (foros).
     async fn search_hackernews(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let url = format!(
@@ -539,13 +572,15 @@ impl WebClient {
                 self.search_crossref(query, per),
                 self.search_arxiv(query, per),
                 self.search_europepmc(query, per),
+                self.search_openlibrary(query, per),
                 self.search_openalex(query, per),
                 self.search_hackernews(query, per),
                 self.search_stackexchange(query, per),
                 self.search_github(query, per),
             )
         };
-        let ((ddg, rd, yt), (lite, cr, ax, ep, oa, hn, se, gh)) = tokio::join!(html_ddg, others);
+        let ((ddg, rd, yt), (lite, cr, ax, ep, ol, oa, hn, se, gh)) =
+            tokio::join!(html_ddg, others);
         let mut out: Vec<SearchResult> = Vec::new();
         let mut seen_url: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut host_count: std::collections::HashMap<String, usize> =
@@ -561,6 +596,7 @@ impl WebClient {
             ax.unwrap_or_default(),
             se.unwrap_or_default(),
             ep.unwrap_or_default(),
+            ol.unwrap_or_default(),
             gh.unwrap_or_default(),
             rd.unwrap_or_default(),
             oa.unwrap_or_default(),
@@ -880,6 +916,25 @@ impl WebClient {
             text.push_str(" …[truncado]");
         }
         Ok(text)
+    }
+
+    /// **Lectura desde Wayback (Internet Archive), SIN key**: rescata páginas que fallan en
+    /// directo (paywall, 403/404, retiradas, anti-bot) leyendo su copia archivada más reciente.
+    /// Coherente con el modo local-first/privado (no requiere cuenta). Error si no hay snapshot.
+    pub async fn fetch_archived(&self, url: &str, max_chars: usize) -> Result<String> {
+        let api = format!(
+            "https://archive.org/wayback/available?url={}",
+            urlencode(url)
+        );
+        let json = self.fetch_json(&api).await?;
+        let snap = json["archived_snapshots"]["closest"]["url"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| AionError::Internal("sin snapshot en Wayback".into()))?
+            .to_string();
+        // El snapshot es HTML normal (con la barra de Wayback, que to_text descarta como chrome);
+        // reusa el extractor estándar de lectura.
+        self.fetch_readable(&snap, max_chars).await
     }
 
     /// Cuerpo CRUDO (sin pasar por el extractor de texto): para APIs JSON. Mantiene
