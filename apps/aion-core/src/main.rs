@@ -1974,6 +1974,9 @@ async fn resolve_once(engine: &OllamaEngine, p: &crate::pending::Pending) -> (bo
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(CalculatorTool));
     tools.register(Arc::new(crate::agent_tools::SearchTool::new(web.clone())));
+    tools.register(Arc::new(crate::agent_tools::GithubSearchTool::new(
+        web.clone(),
+    )));
     tools.register(Arc::new(crate::agent_tools::WeatherTool::new(web.clone())));
     tools.register(Arc::new(crate::agent_tools::PlaceLookupTool::new(
         web.clone(),

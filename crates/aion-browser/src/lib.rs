@@ -591,6 +591,19 @@ impl WebClient {
         Ok(out)
     }
 
+    /// **Búsqueda en GitHub para el AGENTE**: repositorios (por estrellas) + ficheros de CÓDIGO
+    /// (estos solo si hay `AION_GITHUB_TOKEN`). Combina ambas. Pública para que la herramienta
+    /// `github_search` del agente la use cuando el usuario pida "buscar en GitHub".
+    pub async fn github(&self, query: &str, limit: usize) -> Vec<SearchResult> {
+        let (repos, code) = tokio::join!(
+            self.search_github(query, limit),
+            self.search_github_code(query, limit),
+        );
+        let mut out = repos.unwrap_or_default();
+        out.extend(code.unwrap_or_default());
+        out
+    }
+
     /// Búsqueda acotada a un DOMINIO vía DDG (`site:`), para fuentes que bloquean su API
     /// directa (Reddit, YouTube). Reusa el parser de DDG; `label` marca la familia.
     async fn search_site(
