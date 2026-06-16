@@ -465,10 +465,19 @@ impl WebClient {
             "https://api.github.com/search/repositories?q={}&sort=stars&order=desc&per_page={limit}",
             urlencode(query)
         );
-        let json: serde_json::Value = self
+        // Token opcional (Ajustes → APIs): sin él, la búsqueda de repos rate-limita (10/min) y
+        // a veces vuelve vacía; con él sube el límite y habilita más. Se lee del entorno (lo publica
+        // apikeys::init_env), igual que AION_PROXY → sin acoplar este crate a la config de aion-core.
+        let mut req = self
             .http
             .get(&url)
-            .header("Accept", "application/vnd.github+json")
+            .header("Accept", "application/vnd.github+json");
+        if let Ok(tok) = std::env::var("AION_GITHUB_TOKEN") {
+            if !tok.trim().is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", tok.trim()));
+            }
+        }
+        let json: serde_json::Value = req
             .send()
             .await
             .map_err(|e| AionError::Internal(format!("github falló: {e}")))?

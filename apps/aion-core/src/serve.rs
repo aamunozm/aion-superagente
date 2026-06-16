@@ -107,6 +107,9 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     // usuarios del Mac. Una sola pasada al arrancar, antes de servir. No rompe clientes.
     crate::harden_data_dir();
 
+    // API keys opcionales (gratis) que el usuario añadió en Ajustes → entorno (GitHub, …).
+    crate::apikeys::init_env();
+
     let state = AppState {
         convos: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
@@ -595,6 +598,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/claude-code/stats", get(claude_code_stats))
         // Bootstrap del token local: la UI lo pide una vez al arrancar (GET, Origin local).
         .route("/api/auth/token", get(api_auth_token))
+        .route("/api/apikeys", get(apikeys_list).post(apikeys_set))
         // Subidas grandes: documentos/PDF/Office pueden pesar (un PPTX ~20 MB). El
         // límite por defecto de axum (2 MB) cortaría la conexión; lo subimos a 64 MB.
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
@@ -746,6 +750,39 @@ fn api_token() -> &'static str {
 /// Bootstrap del token para la UI. GET (no muta) → exento de la exigencia de token;
 /// queda protegido por `local_guard` (Origin/Host local) y por CORS (solo orígenes
 /// locales pueden LEER la respuesta).
+/// Lista los proveedores de API soportados y si cada uno tiene clave guardada. NUNCA devuelve la
+/// clave en sí (solo un flag `set`). GET seguro → protegido por local_guard (Origin/Host local).
+async fn apikeys_list() -> Json<serde_json::Value> {
+    let keys = crate::apikeys::PROVIDERS
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "provider": p.id,
+                "label": p.label,
+                "help": p.help,
+                "set": !crate::apikeys::get(p.id).is_empty(),
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(serde_json::json!({ "keys": keys }))
+}
+
+#[derive(Deserialize)]
+struct ApiKeyBody {
+    provider: String,
+    #[serde(default)]
+    key: String,
+}
+
+/// Fija (o borra, con `key` vacía) la clave de un proveedor. Mutación → exige token local + Origin.
+async fn apikeys_set(Json(b): Json<ApiKeyBody>) -> Json<serde_json::Value> {
+    if crate::apikeys::set(&b.provider, &b.key) {
+        Json(serde_json::json!({ "ok": true }))
+    } else {
+        Json(serde_json::json!({ "error": format!("proveedor no soportado: {}", b.provider) }))
+    }
+}
+
 async fn api_auth_token() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "token": api_token() }))
 }
