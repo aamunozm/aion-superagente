@@ -647,8 +647,11 @@ impl WebClient {
             .await
             .map_err(|e| AionError::Internal(format!("cuerpo inválido: {e}")))?;
         let mut text = html::to_text(&body);
-        if text.len() > self.max_chars {
-            text.truncate(self.max_chars);
+        // Truncar por CARACTERES, no por bytes: `String::truncate(n)` ENTRA EN PÁNICO si el byte
+        // n cae en mitad de un carácter UTF-8 (acentos, emojis…), y el texto web está lleno de
+        // ellos → web_fetch crasheaba en buena parte de las páginas. take(n) sobre chars es seguro.
+        if text.chars().count() > self.max_chars {
+            text = text.chars().take(self.max_chars).collect();
             text.push_str(" …[truncado]");
         }
         Ok(text)
