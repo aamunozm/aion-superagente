@@ -395,16 +395,28 @@ impl WebClient {
     /// por familia. Fail-soft: una fuente caída/lenta no vacía el resultado.
     pub async fn search_deep(&self, query: &str, limit: usize) -> Vec<SearchResult> {
         let per = 6usize;
-        let (ddg, lite, oa, hn, se, gh, rd, yt) = tokio::join!(
-            self.search_ddg(query, per * 2),
-            self.search_ddg_lite(query, per * 2),
-            self.search_openalex(query, per),
-            self.search_hackernews(query, per),
-            self.search_stackexchange(query, per),
-            self.search_github(query, per),
-            self.search_site(query, "reddit.com", "foro", per),
-            self.search_site(query, "youtube.com", "vídeo", per),
-        );
+        // Las 4 APIs independientes (cada una en su propio host) + DDG-LITE (lite.duckduckgo.com)
+        // van EN PARALELO sin problema. PERO la familia DDG-HTML —búsqueda web + site:reddit +
+        // site:youtube— golpea el MISMO host (html.duckduckgo.com); lanzarlas a la vez dispara el
+        // anomaly-block de DDG (la misma fragilidad por la que el caller ya ESCALONA los ángulos)
+        // y, cuando bloquea, perdemos web+foro+vídeo de golpe. Por eso ese trío va EN SERIE, a la
+        // vez que el resto. La búsqueda no es el cuello de botella (lo es la LECTURA posterior).
+        let html_ddg = async {
+            let ddg = self.search_ddg(query, per * 2).await;
+            let rd = self.search_site(query, "reddit.com", "foro", per).await;
+            let yt = self.search_site(query, "youtube.com", "vídeo", per).await;
+            (ddg, rd, yt)
+        };
+        let others = async {
+            tokio::join!(
+                self.search_ddg_lite(query, per * 2),
+                self.search_openalex(query, per),
+                self.search_hackernews(query, per),
+                self.search_stackexchange(query, per),
+                self.search_github(query, per),
+            )
+        };
+        let ((ddg, rd, yt), (lite, oa, hn, se, gh)) = tokio::join!(html_ddg, others);
         let mut out: Vec<SearchResult> = Vec::new();
         let mut seen_url: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut host_count: std::collections::HashMap<String, usize> =
