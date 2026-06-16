@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
+import Markdown from "@/components/Markdown";
 import { useT } from "@/lib/i18n";
 import {
   agentStream,
@@ -525,7 +526,7 @@ export default function ChatPage() {
                 cualquier otra respuesta suya (solo que sin burbuja de usuario). */}
             {t.reach ? (
               <div className="msg max-w-[85%] self-start">
-                <p className="whitespace-pre-wrap">{t.answer}</p>
+                <Markdown>{t.answer}</Markdown>
               </div>
             ) : (
             <>
@@ -560,7 +561,7 @@ export default function ChatPage() {
 
             {t.answer && (
               <div className="msg max-w-[85%] self-start">
-                <p className="whitespace-pre-wrap">{t.answer}</p>
+                <Markdown>{t.answer}</Markdown>
                 {t.meta && (
                   <p className="text-[11px] mt-1.5" style={{ color: "var(--text-3)" }}>
                     {t.meta}
