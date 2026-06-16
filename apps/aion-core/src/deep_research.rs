@@ -123,20 +123,23 @@ where
         "action",
         &format!("Leyendo {to_read} fuentes y extrayendo sus afirmaciones clave…"),
     );
-    let mut notes: Vec<Note> = Vec::new();
-    for batch in sources[..to_read].chunks(READ_CONCURRENCY) {
-        // idx provisional 0: se renumera de forma estable tras reunir todas las notas.
-        let futs = batch
-            .iter()
-            .map(|sr| read_source(engine, web, sr, topic, 0));
-        for n in futures_util::future::join_all(futs)
-            .await
-            .into_iter()
-            .flatten()
-        {
-            notes.push(n);
+    // CONCURRENCIA FLUIDA con SEMÁFORO en vez de lotes con barrera: se lanzan todas las lecturas,
+    // pero cada una espera un permiso (máx READ_CONCURRENCY en vuelo). En cuanto una termina, libera
+    // el permiso y entra la siguiente — sin la barrera de `chunks` + join_all, donde un PDF lento
+    // (timeout 20s) bloqueaba a los otros del lote. idx provisional 0: se renumera estable después.
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(READ_CONCURRENCY));
+    let futs = sources[..to_read].iter().map(|sr| {
+        let sem = sem.clone();
+        async move {
+            let _permit = sem.acquire().await.ok()?;
+            read_source(engine, web, sr, topic, 0).await
         }
-    }
+    });
+    let mut notes: Vec<Note> = futures_util::future::join_all(futs)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
     // RENUMERA [1..N] estable y único: la asignación por lote (`notes.len() + j + 1`) solo
     // contaba los ÉXITOS, así que dos lotes podían repetir el mismo índice → citas [n]
     // duplicadas/incoherentes en el informe (claim citando una fuente y la bibliografía otra).

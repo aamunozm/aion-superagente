@@ -838,7 +838,9 @@ fn parse_ddg_results(html: &str, limit: usize) -> Vec<SearchResult> {
             .and_then(|s| s.split("</a>").next())
             .map(strip_html_tags)
             .unwrap_or_default();
-        if !url.is_empty() && url.starts_with("http") {
+        // Excluye enlaces internos de DuckDuckGo (anuncios, ajustes, redirecciones de tracking):
+        // no son resultados reales y desperdiciarían un hueco de lectura. Coherente con DDG Lite.
+        if !url.is_empty() && url.starts_with("http") && !url.contains("duckduckgo.com") {
             out.push(SearchResult {
                 title: title.trim().to_string(),
                 url,
@@ -864,9 +866,9 @@ fn strip_html_tags(s: &str) -> String {
             _ => {}
         }
     }
-    // Decodifica las entidades HTML mas comunes en titulos/snippets de DDG y Wikipedia. Antes solo
-    // se cubrian &amp; &#x27; &quot;, asi que un literal «&#39;» (apostrofo decimal) o «&lt;» se
-    // colaba en las notas que lee el LLM y en la bibliografia del informe. &amp; se procesa AL
+    // Decodifica las entidades HTML más comunes en títulos/snippets de DDG y Wikipedia. Antes solo
+    // se cubrían &amp; &#x27; &quot;, así que un literal «&#39;» (apóstrofo decimal) o «&lt;» se
+    // colaba en las notas que lee el LLM y en la bibliografía del informe. &amp; se procesa AL
     // FINAL para no re-expandir un «&amp;lt;» en «<».
     out.replace("&#39;", "'")
         .replace("&#x27;", "'")
@@ -1073,9 +1075,9 @@ mod tests {
 
     #[test]
     fn decodes_common_html_entities_in_text() {
-        // Titulos y snippets de DDG/Wikipedia llegan con entidades HTML. Si no se decodifican,
+        // Títulos y snippets de DDG/Wikipedia llegan con entidades HTML. Si no se decodifican,
         // el texto literal «&#39;» / «&lt;» se cuela en las notas que lee el LLM y en la
-        // bibliografia del informe. Antes solo se decodificaban &amp; &#x27; &quot;.
+        // bibliografía del informe. Antes solo se decodificaban &amp; &#x27; &quot;.
         let s = strip_html_tags("Rust&#39;s &quot;safety&quot; &amp; speed &lt;3&nbsp;ftw");
         assert_eq!(s, "Rust's \"safety\" & speed <3\u{a0}ftw");
     }

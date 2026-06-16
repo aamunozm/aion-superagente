@@ -57,7 +57,7 @@ fn write(jobs: &[Job]) {
 
 /// Encola un trabajo (el archivo ya está en staging). Devuelve su id.
 pub fn enqueue(id: &str, domain: &str, source: &str, path: &str) {
-    let _g = QLOCK.lock().unwrap();
+    let _g = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut jobs = read();
     jobs.push(Job {
         id: id.to_string(),
@@ -74,7 +74,7 @@ pub fn enqueue(id: &str, domain: &str, source: &str, path: &str) {
 /// Toma el siguiente trabajo pendiente y lo marca «processing». (Reintenta también
 /// los que quedaron «processing» por un reinicio.)
 pub fn take_next() -> Option<Job> {
-    let _g = QLOCK.lock().unwrap();
+    let _g = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut jobs = read();
     let pos = jobs
         .iter()
@@ -101,7 +101,7 @@ pub fn fail(id: &str, error: &str) {
 }
 
 fn update(id: &str, f: impl Fn(&mut Job)) {
-    let _g = QLOCK.lock().unwrap();
+    let _g = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut jobs = read();
     if let Some(j) = jobs.iter_mut().find(|j| j.id == id) {
         f(j);
@@ -111,7 +111,7 @@ fn update(id: &str, f: impl Fn(&mut Job)) {
 
 /// Resumen para la UI: conteos por estado + trabajos recientes.
 pub fn snapshot() -> serde_json::Value {
-    let _g = QLOCK.lock().unwrap();
+    let _g = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     let jobs = read();
     let count = |s: &str| jobs.iter().filter(|j| j.status == s).count();
     let current = jobs
@@ -152,19 +152,19 @@ fn write_cache(map: &std::collections::HashMap<String, String>) {
 }
 
 pub fn cached_sha(domain: &str, source: &str) -> Option<String> {
-    let _g = QLOCK.lock().unwrap();
+    let _g = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     read_cache().get(&format!("{domain}::{source}")).cloned()
 }
 
 pub fn set_cached_sha(domain: &str, source: &str, sha: &str) {
-    let _g = QLOCK.lock().unwrap();
+    let _g = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut map = read_cache();
     map.insert(format!("{domain}::{source}"), sha.to_string());
     write_cache(&map);
 }
 
 pub fn clear_cached_sha(domain: &str, source: &str) {
-    let _g = QLOCK.lock().unwrap();
+    let _g = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut map = read_cache();
     if map.remove(&format!("{domain}::{source}")).is_some() {
         write_cache(&map);
@@ -182,7 +182,7 @@ pub fn sha256_file(path: &std::path::Path) -> Option<String> {
 
 /// Limpia de la cola los trabajos terminados (done/error) y devuelve cuántos.
 pub fn clear_finished() -> usize {
-    let _g = QLOCK.lock().unwrap();
+    let _g = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut jobs = read();
     let before = jobs.len();
     jobs.retain(|j| j.status == "pending" || j.status == "processing");

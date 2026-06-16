@@ -63,7 +63,7 @@ impl WasmSkillHost {
 
     /// Ejecuta una skill numérica `run(i64)->i64` en el sandbox.
     fn run_numeric(&self, name: &str, input: i64) -> Result<i64> {
-        let skills = self.skills.lock().unwrap();
+        let skills = self.skills.lock().unwrap_or_else(|e| e.into_inner());
         let skill = skills
             .get(name)
             .ok_or_else(|| AionError::Skill(format!("skill desconocida: {name}")))?;

@@ -66,7 +66,7 @@ fn save(s: &mut InnerState) {
 /// Cambia el foco atencional y lo anuncia en el tablón global (ignición GWT).
 pub fn set_focus(source: &str, focus: &str) {
     let announced = {
-        let _g = rmw_guard().lock().unwrap();
+        let _g = rmw_guard().lock().unwrap_or_else(|e| e.into_inner());
         let mut s = load();
         let f = focus.trim();
         if f.is_empty() || s.focus == f {
@@ -84,7 +84,7 @@ pub fn set_focus(source: &str, focus: &str) {
 }
 
 pub fn set_curiosity(c: &str) {
-    let _g = rmw_guard().lock().unwrap();
+    let _g = rmw_guard().lock().unwrap_or_else(|e| e.into_inner());
     let mut s = load();
     let c = c.trim();
     if c.is_empty() {
@@ -97,7 +97,7 @@ pub fn set_curiosity(c: &str) {
 /// Registra el resultado de una tarea: actualiza certeza y la ventana de resultados
 /// de la que se deriva el ánimo operativo.
 pub fn record_result(success: bool, steps: usize) {
-    let _g = rmw_guard().lock().unwrap();
+    let _g = rmw_guard().lock().unwrap_or_else(|e| e.into_inner());
     let mut s = load();
     s.recent_outcomes.push(success);
     let len = s.recent_outcomes.len();

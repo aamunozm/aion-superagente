@@ -48,7 +48,7 @@ struct AppState {
 impl AppState {
     /// Devuelve (creando si hace falta) el hilo de una conversación por id.
     fn thread(&self, id: &str) -> Thread {
-        let mut map = self.convos.lock().unwrap();
+        let mut map = self.convos.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(id.to_string())
             .or_insert_with(|| Arc::new(std::sync::Mutex::new(Vec::new())))
             .clone()
@@ -1293,10 +1293,10 @@ async fn chat(
     // final del turno, una vez ya enviada la respuesta, para que comprima de cara al
     // PRÓXIMO turno. Así esta respuesta arranca antes y nunca paga el coste del resumen.
     {
-        let mut c = convo.lock().unwrap();
+        let mut c = convo.lock().unwrap_or_else(|e| e.into_inner());
         c.push(Message::user(&prompt));
     }
-    let history: Vec<Message> = convo.lock().unwrap().clone();
+    let history: Vec<Message> = convo.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
     tokio::spawn(async move {
         let mut messages = vec![Message::system(self_ctx)];
@@ -1320,7 +1320,7 @@ async fn chat(
                             serde_json::json!({ "kind": "thinking", "text": text })
                         }
                         StreamChunk::Answer { text } => {
-                            acc.lock().unwrap().push_str(text);
+                            acc.lock().unwrap_or_else(|e| e.into_inner()).push_str(text);
                             serde_json::json!({ "kind": "answer", "text": text })
                         }
                         StreamChunk::Done { tokens, tokens_per_sec } => {
@@ -1340,7 +1340,7 @@ async fn chat(
             return;
         }
         // Añade la respuesta al hilo de conversación (contexto infinito).
-        let answer = answer_acc.lock().unwrap().clone();
+        let answer = answer_acc.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if !answer.trim().is_empty() {
             // GWT: el chat también entra a la corriente de conciencia. PRIVACIDAD: el
             // prompt de Ariel NUNCA se publica; sí un resumen de la PROPIA respuesta de
@@ -1351,7 +1351,10 @@ async fn chat(
                 "pensamiento",
                 &format!("le respondí a Ariel: {resumen}"),
             ));
-            convo.lock().unwrap().push(Message::assistant(&answer));
+            convo
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(Message::assistant(&answer));
             // FASE 3 — compresión NO bloqueante: ya enviada la respuesta, comprime el hilo
             // (si superó el umbral) de cara al PRÓXIMO turno. Va DESPUÉS del push de la
             // respuesta y en su propia tarea → ni bloquea este turno ni compite con el push.
@@ -1808,7 +1811,10 @@ async fn agent(
                             .collect();
                         if !name.is_empty() {
                             last_tool = name.clone();
-                            tools_fwd.lock().unwrap().insert(name);
+                            tools_fwd
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(name);
                         }
                         crate::workspace::publish(crate::workspace::StreamEvent::now(
                             "agente",
@@ -1977,7 +1983,7 @@ async fn agent(
                 // 🧠 BUCLE METACOGNITIVO en background (cero latencia añadida): lección
                 // de los fallos + micro-reflexión + índice de integración de la tarea.
                 let trace = crate::consciousness::TaskTrace {
-                    distinct_tools: tools_seen.lock().unwrap().len(),
+                    distinct_tools: tools_seen.lock().unwrap_or_else(|e| e.into_inner()).len(),
                     steps: run.steps,
                     grounding_hits,
                     cross_mode_hits,
@@ -2146,7 +2152,10 @@ async fn crew(
                             .collect();
                         if !name.is_empty() {
                             last_tool = name.clone();
-                            coactive_fwd.lock().unwrap().insert(format!("tool:{name}"));
+                            coactive_fwd
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(format!("tool:{name}"));
                         }
                         crate::workspace::publish(crate::workspace::StreamEvent::now(
                             "crew",
@@ -2218,7 +2227,7 @@ async fn crew(
                 // Micro-reflexión + índice también para el trabajo en equipo, contando
                 // los agentes y herramientas COACTIVADOS (su integración real).
                 let trace = crate::consciousness::TaskTrace {
-                    distinct_tools: coactive.lock().unwrap().len(),
+                    distinct_tools: coactive.lock().unwrap_or_else(|e| e.into_inner()).len(),
                     steps: run.steps,
                     grounding_hits,
                     cross_mode_hits,
@@ -2582,7 +2591,7 @@ static LAST_AGENT_OUTCOME: std::sync::Mutex<Option<(String, Vec<String>, i64)>> 
 /// Anota el desenlace de la última tarea del agente para poder corregirlo si el
 /// siguiente mensaje del usuario lo desmiente.
 fn remember_agent_outcome(task: &str, grounding_ids: &[String], task_ok: bool) {
-    *LAST_AGENT_OUTCOME.lock().unwrap() = if task_ok {
+    *LAST_AGENT_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = if task_ok {
         Some((
             task.to_string(),
             grounding_ids.to_vec(),
@@ -2640,7 +2649,11 @@ fn maybe_apply_corrective_feedback(user_msg: &str) {
     if !is_corrective(user_msg) {
         return;
     }
-    let Some((task, ids, at)) = LAST_AGENT_OUTCOME.lock().unwrap().take() else {
+    let Some((task, ids, at)) = LAST_AGENT_OUTCOME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    else {
         return;
     };
     if chrono::Utc::now().timestamp() - at > 600 {
@@ -2700,7 +2713,7 @@ async fn compress_if_needed(engine: &dyn LlmEngine, convo: &Arc<std::sync::Mutex
     const KEEP_RECENT: usize = 6; // turnos recientes que se conservan intactos
 
     let to_compress: Vec<Message> = {
-        let c = convo.lock().unwrap();
+        let c = convo.lock().unwrap_or_else(|e| e.into_inner());
         if c.len() <= MAX_MSGS {
             return;
         }
@@ -2741,7 +2754,7 @@ async fn compress_if_needed(engine: &dyn LlmEngine, convo: &Arc<std::sync::Mutex
 
     // Reescribe el hilo: [resumen] + turnos recientes. Persiste el resumen en memoria.
     {
-        let mut c = convo.lock().unwrap();
+        let mut c = convo.lock().unwrap_or_else(|e| e.into_inner());
         let recent: Vec<Message> = c.iter().rev().take(KEEP_RECENT).rev().cloned().collect();
         let mut newc = vec![Message::system(format!(
             "Resumen de la conversación hasta ahora: {summary}"
@@ -2770,8 +2783,8 @@ async fn chat_reset(
     let id = body
         .and_then(|b| b.0.convo_id)
         .unwrap_or_else(|| "default".into());
-    if let Some(t) = st.convos.lock().unwrap().get(&id) {
-        t.lock().unwrap().clear();
+    if let Some(t) = st.convos.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
+        t.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
     Json(serde_json::json!({ "ok": true }))
 }
@@ -4192,7 +4205,10 @@ fn pending_confirms() -> &'static Pending {
 async fn request_confirmation(tx: &tokio::sync::mpsc::Sender<Event>, desc: String) -> bool {
     let id = uuid::Uuid::new_v4().to_string();
     let (otx, orx) = tokio::sync::oneshot::channel();
-    pending_confirms().lock().unwrap().insert(id.clone(), otx);
+    pending_confirms()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id.clone(), otx);
     let _ = tx
         .send(
             Event::default()
@@ -4202,7 +4218,10 @@ async fn request_confirmation(tx: &tokio::sync::mpsc::Sender<Event>, desc: Strin
     match tokio::time::timeout(std::time::Duration::from_secs(300), orx).await {
         Ok(Ok(approved)) => approved,
         _ => {
-            pending_confirms().lock().unwrap().remove(&id);
+            pending_confirms()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
             false // timeout o canal caído → no ejecutar (seguro por defecto)
         }
     }
@@ -4216,7 +4235,11 @@ struct ConfirmDecision {
 
 /// El usuario aprueba o rechaza una acción sensible pendiente.
 async fn confirm_decision(Json(b): Json<ConfirmDecision>) -> Json<serde_json::Value> {
-    if let Some(tx) = pending_confirms().lock().unwrap().remove(&b.id) {
+    if let Some(tx) = pending_confirms()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&b.id)
+    {
         let _ = tx.send(b.approved);
         Json(serde_json::json!({ "ok": true }))
     } else {
@@ -4243,7 +4266,10 @@ async fn request_user_answer(
 ) -> Option<String> {
     let id = uuid::Uuid::new_v4().to_string();
     let (otx, orx) = tokio::sync::oneshot::channel();
-    pending_asks().lock().unwrap().insert(id.clone(), otx);
+    pending_asks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id.clone(), otx);
     let _ = tx
         .send(
             Event::default()
@@ -4253,7 +4279,10 @@ async fn request_user_answer(
     match tokio::time::timeout(std::time::Duration::from_secs(600), orx).await {
         Ok(Ok(answer)) => Some(answer),
         _ => {
-            pending_asks().lock().unwrap().remove(&id);
+            pending_asks()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
             None
         }
     }
@@ -4267,7 +4296,11 @@ struct AskAnswer {
 
 /// El usuario responde a una pregunta del agente.
 async fn ask_answer(Json(b): Json<AskAnswer>) -> Json<serde_json::Value> {
-    if let Some(tx) = pending_asks().lock().unwrap().remove(&b.id) {
+    if let Some(tx) = pending_asks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&b.id)
+    {
         let _ = tx.send(b.text);
         Json(serde_json::json!({ "ok": true }))
     } else {
@@ -4545,7 +4578,11 @@ fn greet_cache() -> &'static std::sync::Mutex<Option<(i64, String)>> {
 /// su memoria/actividad). Cacheado 20 min para no gastar el LLM en cada recarga.
 async fn greeting() -> Json<serde_json::Value> {
     mark_activity();
-    if let Some((ts, txt)) = greet_cache().lock().unwrap().as_ref() {
+    if let Some((ts, txt)) = greet_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
         if now_secs() - ts < 20 * 60 {
             return Json(serde_json::json!({ "text": txt }));
         }
@@ -4586,7 +4623,7 @@ async fn greeting() -> Json<serde_json::Value> {
         text = String::new();
     }
     if !text.is_empty() {
-        *greet_cache().lock().unwrap() = Some((now_secs(), text.clone()));
+        *greet_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some((now_secs(), text.clone()));
         // El saludo también es parte de la conversación: queda en la Bandeja YA
         // LEÍDO (no se re-entrega a la UI) para que RE-ENTRE en su contexto —
         // AION recuerda qué te preguntó al abrir y no vuelve a repetirlo.
