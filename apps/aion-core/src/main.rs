@@ -2388,11 +2388,20 @@ async fn intention_arbiter(engine: &OllamaEngine) -> Option<(String, bool, Strin
             true,
             format!("me propuse y planifiqué: {}", target.want),
         )),
-        None => Some((
-            "intención".into(),
-            false,
-            "no pude planificar mi intención".into(),
-        )),
+        None => {
+            // Backoff: cuenta el fallo de materialización y, pasado el tope, abandona la
+            // intención para no reelegirla cada tick (sin esto: martilleo del LLM local).
+            let abandoned = crate::intentions::note_fail(&target.id);
+            let detail = if abandoned {
+                format!(
+                    "solté una intención que no logré planificar: {}",
+                    target.want
+                )
+            } else {
+                "no pude planificar mi intención; lo reintentaré".into()
+            };
+            Some(("intención".into(), false, detail))
+        }
     }
 }
 

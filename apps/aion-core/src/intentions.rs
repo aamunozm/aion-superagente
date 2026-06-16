@@ -23,6 +23,9 @@ static QLOCK: Mutex<()> = Mutex::new(());
 const MAX_INTENTIONS: usize = 30;
 /// Tras tantas re-activaciones sin cumplirse, la intención se abandona (no es vida, es bucle).
 const MAX_REVISITS: u8 = 3;
+/// Tras tantos fallos al materializar (el LLM no logra descomponer el deseo en pasos),
+/// se abandona en vez de reintentar cada tick para siempre (anti-spam del LLM).
+const MAX_FAILS: u8 = 3;
 /// Vida media del peso (días) por falta de avance: una intención no tocada decae y cede
 /// el turno a otras más frescas. No la mata —el abandono es por `revisits`/edad extrema—,
 /// solo la hace menos urgente en el arbitraje.
@@ -78,6 +81,11 @@ pub struct Intention {
     /// Veces re-activada: acota la reanimación para no perseguir lo mismo sin fin.
     #[serde(default)]
     pub revisits: u8,
+    /// Veces que su materialización en un plan FALLÓ (el LLM no logró descomponerla).
+    /// Sin esto, una intención imposible de planificar se reelegía cada tick para siempre
+    /// → martilleo infinito del LLM local. Pasado el tope, se abandona con honestidad.
+    #[serde(default)]
+    pub fails: u8,
 }
 
 impl Intention {
@@ -165,6 +173,7 @@ pub fn push(want: &str, why: &str, drive: Drive, weight: f32) -> Option<String> 
         plan_id: None,
         last_touch: now,
         revisits: 0,
+        fails: 0,
     });
     save(&items);
     Some(id)
@@ -195,6 +204,16 @@ pub fn activate(id: &str, plan_id: &str) -> bool {
     let _g = QLOCK.lock().unwrap();
     let mut items = all();
     let now = now_secs();
+    // INVARIANTE «una sola Active»: degrada cualquier otra Active a Open antes de promover
+    // esta. Hoy el arbitraje ya evita llamar aquí con otra activa, pero garantizarlo en el
+    // punto de mutación lo hace robusto ante futuros llamadores que se salten ese guard.
+    for i in items.iter_mut() {
+        if i.status == Status::Active && i.id != id {
+            i.status = Status::Open;
+            i.plan_id = None;
+            i.last_touch = now;
+        }
+    }
     let mut activated = false;
     for i in items.iter_mut() {
         if i.id == id {
@@ -212,6 +231,29 @@ pub fn activate(id: &str, plan_id: &str) -> bool {
     }
     save(&items);
     activated
+}
+
+/// Registra que la materialización de una intención FALLÓ (el LLM no la descompuso en un
+/// plan válido). Incrementa `fails` y, pasado `MAX_FAILS`, la abandona para no reintentarla
+/// cada tick. Devuelve `true` si la abandonó. Sin esto, una intención imposible de planificar
+/// se reelegía indefinidamente → martilleo del LLM local.
+pub fn note_fail(id: &str) -> bool {
+    let _g = QLOCK.lock().unwrap();
+    let mut items = all();
+    let now = now_secs();
+    let mut abandoned = false;
+    for i in items.iter_mut() {
+        if i.id == id && i.status == Status::Open {
+            i.fails = i.fails.saturating_add(1);
+            i.last_touch = now;
+            if i.fails >= MAX_FAILS {
+                i.status = Status::Abandoned;
+                abandoned = true;
+            }
+        }
+    }
+    save(&items);
+    abandoned
 }
 
 /// Cambia el estado de una intención (p. ej. a `Fulfilled` al completar su plan, o de
@@ -280,6 +322,7 @@ mod tests {
             plan_id: None,
             last_touch: now,
             revisits: 0,
+            fails: 0,
         };
         // Recién tocada: peso casi pleno.
         assert!(fresh.effective_weight(now) > 0.99);
