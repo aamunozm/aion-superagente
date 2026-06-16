@@ -44,6 +44,8 @@ mod prompt_store;
 mod prompts;
 mod provider;
 mod reflection;
+mod research_memory;
+mod self_model;
 mod sensors;
 mod serve;
 mod skill_store;
