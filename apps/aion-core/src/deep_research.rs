@@ -257,12 +257,21 @@ async fn read_source(
             .unwrap_or_default();
         if fetched.chars().count() >= 80 {
             fetched
-        } else if sr.snippet.chars().count() >= 120 {
-            // No se pudo leer la página (PDF de pago, muro, JS): usa el abstract/snippet como
-            // RESPALDO para que la fuente (sobre todo papers académicos) contribuya igualmente.
-            sr.snippet.clone()
         } else {
-            return None; // ni página ni abstract útiles
+            // La página falló en directo (paywall, 403/404, retirada): intenta la COPIA ARCHIVADA
+            // en Wayback (gratis, sin key) antes de rendirse → rescata fuentes valiosas bloqueadas.
+            let archived = web
+                .fetch_archived(&sr.url, 12_000)
+                .await
+                .unwrap_or_default();
+            if archived.chars().count() >= 80 {
+                archived
+            } else if sr.snippet.chars().count() >= 120 {
+                // Ni directo ni archivo: usa el abstract/snippet como RESPALDO (sobre todo papers).
+                sr.snippet.clone()
+            } else {
+                return None; // ni página ni archivo ni abstract útiles
+            }
         }
     };
     let req = GenerateRequest {
