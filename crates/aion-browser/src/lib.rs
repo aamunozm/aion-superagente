@@ -612,10 +612,7 @@ impl WebClient {
             .await
             .map_err(|e| AionError::Internal(format!("cuerpo inválido: {e}")))?;
         let mut text = html::to_text(&body);
-        if text.len() > self.max_chars {
-            text.truncate(self.max_chars);
-            text.push_str(" …[truncado]");
-        }
+        cap_chars(&mut text, self.max_chars, " …[truncado]");
         Ok(text)
     }
 
@@ -685,6 +682,20 @@ impl WebClient {
         resp.text()
             .await
             .map_err(|e| AionError::Internal(format!("cuerpo inválido: {e}")))
+    }
+}
+
+/// Recorta `text` a `max` CARACTERES (no bytes) y, si recortó, añade `suffix`.
+///
+/// Por qué no `String::truncate`: este opera con índices de BYTES y PANICA si el corte
+/// cae en mitad de un carácter UTF-8 multibyte (á, é, ñ, è, emojis…). Como AION navega
+/// contenido en español/italiano —lleno de acentos— `text.len()`/`truncate()` reventaba
+/// el fetch web en cuanto la página superaba el tope. Contar/cortar por `chars()` es
+/// O(n) pero seguro y consistente con `fetch_readable`.
+pub(crate) fn cap_chars(text: &mut String, max: usize, suffix: &str) {
+    if text.chars().count() > max {
+        *text = text.chars().take(max).collect();
+        text.push_str(suffix);
     }
 }
 
@@ -921,6 +932,23 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cap_chars_no_panic_on_multibyte_boundary() {
+        // Antes `truncate(n)` por BYTES panicaba si n caía en medio de un carácter UTF-8.
+        // "é" ocupa 2 bytes: cortar a 3 CARACTERES debe dar "éé…" sin reventar.
+        let mut s = "ééééé".to_string(); // 5 chars, 10 bytes
+        cap_chars(&mut s, 3, "…");
+        assert_eq!(s, "ééé…");
+        // Bajo el tope: no toca nada.
+        let mut t = "café".to_string();
+        cap_chars(&mut t, 10, "…");
+        assert_eq!(t, "café");
+        // Emoji (4 bytes) en el borde: tampoco panica.
+        let mut e = "ab🎉cd".to_string();
+        cap_chars(&mut e, 3, "X");
+        assert_eq!(e, "ab🎉X");
+    }
 
     #[test]
     fn parses_ddg_direct_href_format() {

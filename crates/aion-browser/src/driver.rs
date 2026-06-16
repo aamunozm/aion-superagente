@@ -170,10 +170,9 @@ async fn page_view(page: &Page) -> Result<PageView> {
         .and_then(|r| r.into_value::<String>().ok())
         .unwrap_or_default();
     let mut text = text;
-    if text.len() > MAX_TEXT {
-        text.truncate(MAX_TEXT);
-        text.push_str("\n…(texto truncado)");
-    }
+    // Recorte por CARACTERES (no bytes): `truncate` panica si corta un carácter UTF-8
+    // multibyte —innerText real trae acentos/emojis a diario—. Ver `cap_chars`.
+    crate::cap_chars(&mut text, MAX_TEXT, "\n…(texto truncado)");
     Ok(PageView { title, url, text })
 }
 
