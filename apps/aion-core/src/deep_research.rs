@@ -111,6 +111,12 @@ where
         &format!("Reuní {} fuentes diversas ({by_fam}).", sources.len()),
     );
 
+    // REBALANCEO POR FAMILIA antes de cortar a READ_CAP: las fuentes se reunieron ángulo a ángulo,
+    // así que los primeros READ_CAP venían sesgados a los primeros ángulos y a la familia más
+    // prolífica (web), dejando sin LEER (y por tanto sin CITAR) académico/código/vídeo de ángulos
+    // tardíos. Round-robin estable por familia → el corte a 18 queda diverso de verdad.
+    let sources = interleave_by_family(sources);
+
     // 3) LEER y destilar cada fuente en paralelo (agentes lectores), por lotes acotados.
     let to_read = sources.len().min(READ_CAP);
     emit(
@@ -322,6 +328,26 @@ fn family_breakdown(sources: &[SearchResult]) -> String {
         .join(" · ")
 }
 
+/// Reordena las fuentes en ROUND-ROBIN por familia ("web", "académico", "foro", "código",
+/// "vídeo"…), estable dentro de cada familia. Sirve para que un corte posterior (READ_CAP) tome
+/// fuentes DIVERSAS en vez de agotar la familia más prolífica primero. No pierde ni duplica fuentes.
+fn interleave_by_family(sources: Vec<SearchResult>) -> Vec<SearchResult> {
+    use std::collections::{BTreeMap, VecDeque};
+    let mut by_family: BTreeMap<String, VecDeque<SearchResult>> = BTreeMap::new();
+    for s in sources {
+        by_family.entry(s.source.clone()).or_default().push_back(s);
+    }
+    let mut out = Vec::new();
+    while by_family.values().any(|q| !q.is_empty()) {
+        for q in by_family.values_mut() {
+            if let Some(s) = q.pop_front() {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
 /// **¿Es una petición de INVESTIGACIÓN PROFUNDA?** (no una búsqueda rápida). Conservador: solo
 /// dispara el pipeline pesado ante señales claras de "a fondo / investigación / informe / foros",
 /// para no convertir un simple «busca X» en 10 minutos de trabajo.
@@ -372,6 +398,35 @@ mod tests {
             "haz un informe sobre el mercado de agentes"
         ));
         assert!(is_deep_research("investiga en foros qué opinan de esto"));
+    }
+
+    #[test]
+    fn interleaves_sources_by_family_for_balanced_reading() {
+        let mk = |fam: &str, n: usize| SearchResult {
+            title: format!("{fam}{n}"),
+            url: format!("https://{fam}{n}.example"),
+            snippet: String::new(),
+            source: fam.into(),
+        };
+        // Reunidas sesgadas: 5 "web" seguidas y solo 1 de cada familia minoritaria al final
+        // (lo que pasa al concatenar ángulos). Con corte directo a 3 se leerían 3 "web".
+        let sources = vec![
+            mk("web", 1),
+            mk("web", 2),
+            mk("web", 3),
+            mk("web", 4),
+            mk("web", 5),
+            mk("académico", 1),
+            mk("código", 1),
+        ];
+        let out = interleave_by_family(sources);
+        // Las 3 primeras (lo que un READ_CAP pequeño leería) cubren las 3 familias, no 3 "web".
+        let top3: Vec<&str> = out.iter().take(3).map(|s| s.source.as_str()).collect();
+        assert!(top3.contains(&"web"));
+        assert!(top3.contains(&"académico"));
+        assert!(top3.contains(&"código"));
+        // Ni se pierden ni se duplican fuentes.
+        assert_eq!(out.len(), 7);
     }
 
     #[test]
