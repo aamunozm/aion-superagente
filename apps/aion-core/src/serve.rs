@@ -1919,7 +1919,7 @@ async fn agent(
                     .send(Event::default().data(
                         serde_json::json!({
                             "kind": "answer",
-                            "text": "Perdona, me quedé atascado intentando resolver eso y se me agotó el tiempo. Lo retomo por mi cuenta y vuelvo con la respuesta.",
+                            "text": "Perdona, esto me llevó más tiempo del que tenía y no lo terminé a tiempo. Lo dejé apuntado y lo retomo por mi cuenta en segundo plano; te aviso en la Bandeja cuando lo tenga. Si prefieres, reformúlamelo más concreto y lo intento ahora mismo.",
                             "steps": 0
                         })
                         .to_string(),
