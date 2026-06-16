@@ -1420,7 +1420,9 @@ async fn advance_plan_once(engine: &OllamaEngine) -> (bool, String) {
     let (Some(s), Some(e)) = (raw.find('{'), raw.rfind('}')) else {
         return (false, "el plan no vino en JSON".into());
     };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw[s..=e]) else {
+    // `.get()` (no slice directo): si `}` viniera ANTES de `{` (prosa con llaves), el rango sería
+    // invertido (s>e) y `&raw[s..=e]` PANICARÍA. get devuelve None → fallback sin pánico.
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(raw.get(s..=e).unwrap_or("")) else {
         return (false, "JSON de plan inválido".into());
     };
     let goal = json
@@ -1522,7 +1524,8 @@ async fn replan_remaining(
         .ok()?;
     let raw = m.content.trim();
     let (s, e) = (raw.find('{')?, raw.rfind('}')?);
-    let json: serde_json::Value = serde_json::from_str(&raw[s..=e]).ok()?;
+    // `.get()` evita el pánico si el rango quedara invertido (`}` antes de `{`): None → None.
+    let json: serde_json::Value = serde_json::from_str(raw.get(s..=e)?).ok()?;
     let steps: Vec<String> = json
         .get("steps")?
         .as_array()?
@@ -1671,7 +1674,9 @@ async fn independent_verify(
     let (Some(s), Some(e)) = (raw.find('['), raw.rfind(']')) else {
         return false;
     };
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw[s..=e]) else {
+    // `.get()` (no slice directo): si `]` viniera antes de `[`, el rango invertido (s>e) haría
+    // PANICAR a `&raw[s..=e]`. None → fallback sin pánico.
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw.get(s..=e).unwrap_or("")) else {
         return false;
     };
     let Some(arr) = parsed.as_array() else {
