@@ -1579,7 +1579,7 @@ async fn agent(
                 );
             };
             // Exhaustiva (acordado con Ariel): reunir ~28 fuentes diversas, leer hasta READ_CAP.
-            let report = crate::deep_research::run(&*engine, &web, &body.task, 28, emit).await;
+            let report = crate::deep_research::run(&*engine, &web, &body.task, 36, emit).await;
             crate::workspace::publish(crate::workspace::StreamEvent::now(
                 "agente",
                 "pensamiento",
