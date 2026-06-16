@@ -1,10 +1,23 @@
 //! Extracción ligera de texto legible desde HTML (sin dependencias pesadas).
 
-/// Convierte HTML en texto plano: elimina script/style, quita etiquetas,
+/// Convierte HTML en texto plano: elimina bloques que NO son contenido legible, quita etiquetas,
 /// decodifica entidades comunes y colapsa espacios.
+///
+/// Además de `script`/`style`, descarta el "chrome" de la página —menús (`nav`), cabeceras
+/// (`header`), pies (`footer`), barras laterales (`aside`), formularios y `svg`/`noscript`/
+/// `template`—. Sin esto, el texto extraído empezaba con decenas de enlaces de menú y, como el
+/// lector de investigación solo manda los primeros miles de caracteres al LLM, el contenido real
+/// del artículo se quedaba fuera (el LLM resumía el menú, no la noticia/paper).
 pub fn to_text(html: &str) -> String {
-    let without_blocks = remove_block(&remove_block(html, "script"), "style");
-    let stripped = strip_tags(&without_blocks);
+    const DROP: &[&str] = &[
+        "script", "style", "noscript", "template", "svg", "nav", "header", "footer", "aside",
+        "form",
+    ];
+    let mut cleaned = html.to_string();
+    for tag in DROP {
+        cleaned = remove_block(&cleaned, tag);
+    }
+    let stripped = strip_tags(&cleaned);
     let decoded = decode_entities(&stripped);
     collapse_ws(&decoded)
 }
@@ -74,5 +87,17 @@ mod tests {
         assert!(text.contains("Mundo real"));
         assert!(!text.contains("alert"));
         assert!(!text.contains("color:red"));
+    }
+
+    #[test]
+    fn drops_page_chrome_keeps_article() {
+        // El menú/cabecera/pie no deben colarse antes del contenido real (era lo que hacía que el
+        // LLM resumiera el menú en vez del artículo).
+        let html = "<body><nav><a>Inicio</a><a>Economía</a><a>Empresas</a></nav>            <header>Mi Diario</header><article><h1>Titular real</h1>            <p>Cuerpo del artículo con datos.</p></article>            <footer>Copyright 2026 · Aviso legal</footer></body>";
+        let text = to_text(html);
+        assert!(text.contains("Titular real"));
+        assert!(text.contains("Cuerpo del artículo con datos."));
+        assert!(!text.contains("Economía"), "el menú no debe aparecer");
+        assert!(!text.contains("Copyright"), "el pie no debe aparecer");
     }
 }

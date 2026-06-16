@@ -25,7 +25,7 @@ struct Note {
 
 /// Cuántas fuentes LEER a fondo (extraer afirmaciones). Leer decenas de páginas con el LLM es el
 /// cuello de botella; este tope acota el tiempo. El resto de lo reunido se cita igualmente.
-const READ_CAP: usize = 18;
+const READ_CAP: usize = 24;
 /// Lectores concurrentes (acota carga al modelo/red; el resto espera por lotes).
 const READ_CONCURRENCY: usize = 5;
 
@@ -191,7 +191,7 @@ async fn decompose(engine: &dyn LlmEngine, topic: &str) -> Vec<String> {
         ],
         think: false,
         temperature: Some(0.4),
-        max_tokens: Some(220),
+        max_tokens: Some(320),
     };
     let raw = match engine.generate(req).await {
         Ok(m) => m.content,
@@ -210,11 +210,19 @@ async fn decompose(engine: &dyn LlmEngine, topic: &str) -> Vec<String> {
                         || c == ' '
                         || c.is_ascii_digit()
                 })
+                // El LLM casi siempre DEVUELVE cada consulta ENTRECOMILLADA ("..." o «...»). Esas
+                // comillas se mandan al buscador como FRASE EXACTA (%22…%22) y vacían TODAS las
+                // fuentes → 0 resultados (era la causa raíz de que la investigación saliera vacía).
+                // Las quitamos en ambos extremos; sin esto, la búsqueda profunda no encuentra nada.
+                .trim_matches(|c: char| {
+                    matches!(c, '"' | '\'' | '«' | '»' | '`' | '\u{201c}' | '\u{201d}')
+                        || c.is_whitespace()
+                })
                 .trim()
                 .to_string()
         })
         .filter(|l| l.chars().count() >= 8)
-        .take(6)
+        .take(8)
         .collect();
     if angles.is_empty() {
         angles.push(topic.to_string());
@@ -310,7 +318,7 @@ async fn synthesize(engine: &dyn LlmEngine, topic: &str, notes: &[Note]) -> Stri
         ],
         think: false,
         temperature: Some(0.5),
-        max_tokens: Some(1900),
+        max_tokens: Some(3200),
     };
     match engine.generate(req).await {
         Ok(m) => m.content.trim().to_string(),
@@ -365,6 +373,7 @@ pub fn is_deep_research(task: &str) -> bool {
         "investiga en profundidad",
         "a fondo en internet",
         "deep research",
+        "deep search",
         "investigación completa",
         "investigacion completa",
         "haz un informe",
@@ -374,6 +383,22 @@ pub fn is_deep_research(task: &str) -> bool {
         "ricerca approfondita",
     ];
     if STRONG.iter().any(|k| t.contains(k)) {
+        return true;
+    }
+    // REGLA COMBINATORIA (fix): una señal de PROFUNDIDAD + una de BÚSQUEDA/INVESTIGACIÓN dispara el
+    // pipeline pesado. Antes solo se reconocían frases fijas con "investiga…", así que la forma más
+    // natural —«haz una BÚSQUEDA profunda de X», «busca a fondo Y», «búsqueda exhaustiva de Z»—
+    // caía al camino rápido (una sola web_search, sin lectura cruzada) y rendía un informe pobre.
+    let profundidad = t.contains("profund") || t.contains("exhaustiv") || t.contains("a fondo");
+    let buscar = t.contains("investiga")
+        || t.contains("busca")
+        || t.contains("buscar")
+        || t.contains("búsqueda")
+        || t.contains("busqueda")
+        || t.contains("research")
+        || t.contains("informe")
+        || t.contains("reporte");
+    if profundidad && buscar {
         return true;
     }
     // "investiga(r)/investigación" + señal de amplitud (foros, varias fuentes, internet+foros).
@@ -401,6 +426,17 @@ mod tests {
             "haz un informe sobre el mercado de agentes"
         ));
         assert!(is_deep_research("investiga en foros qué opinan de esto"));
+        // Forma natural «BÚSQUEDA profunda» (la que fallaba): debe disparar el pipeline.
+        assert!(is_deep_research(
+            "hace una busqueda profunda de filosofia para agentes ai 2026"
+        ));
+        assert!(is_deep_research(
+            "haz una búsqueda profunda de filosofía para agentes de IA"
+        ));
+        assert!(is_deep_research(
+            "busca a fondo sobre arquitecturas de transformers"
+        ));
+        assert!(is_deep_research("búsqueda exhaustiva de papers sobre RAG"));
     }
 
     #[test]
@@ -438,5 +474,53 @@ mod tests {
         assert!(!is_deep_research("busca en internet el precio del bitcoin"));
         assert!(!is_deep_research("¿qué temperatura hace en Milán?"));
         assert!(!is_deep_research("cuántos habitantes tiene Tokio"));
+        // "búsqueda" sin señal de profundidad = búsqueda rápida, NO el pipeline pesado.
+        assert!(!is_deep_research(
+            "haz una búsqueda rápida de noticias de hoy"
+        ));
+        assert!(!is_deep_research("busca el horario del tren a Roma"));
+    }
+
+    /// E2E REAL (ignorado por defecto: necesita Ollama + red). Corre el pipeline COMPLETO con la
+    /// consulta exacta que antes caía al camino rápido y comprueba que produce un informe amplio
+    /// y multi-fuente. Ejecutar: `cargo test -p aion-core e2e_deep_research_real_report -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "e2e: requiere Ollama corriendo y acceso a internet"]
+    async fn e2e_deep_research_real_report() {
+        let cfg = crate::provider::load();
+        // Mismo motor que usa la app (build_engine): externo si está configurado, si no Ollama.
+        let engine: Box<dyn aion_kernel::traits::LlmEngine> =
+            if cfg.kind == "external" && !cfg.api_key.is_empty() && !cfg.base_url.is_empty() {
+                Box::new(aion_llm::OpenAiEngine::new(
+                    &cfg.base_url,
+                    &cfg.api_key,
+                    &cfg.model,
+                ))
+            } else {
+                Box::new(aion_llm::OllamaEngine::new(
+                    aion_llm::OllamaEngine::base_url_from_env(),
+                    &cfg.model,
+                ))
+            };
+        let web = aion_browser::WebClient::default();
+        let q = "hace una busqueda profunda de filosofia para agentes ai 2026";
+        assert!(
+            is_deep_research(q),
+            "el detector debe enrutar esto al pipeline profundo"
+        );
+        let report = run(&*engine, &web, q, 36, |k, t| println!("[{k}] {t}")).await;
+        println!(
+            "\n===== INFORME ({} chars) =====\n{}",
+            report.chars().count(),
+            report
+        );
+        assert!(
+            report.chars().count() > 1500,
+            "informe demasiado corto para ser 'profundo'"
+        );
+        assert!(
+            report.contains("##"),
+            "el informe debe traer secciones markdown"
+        );
     }
 }
