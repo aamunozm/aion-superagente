@@ -242,10 +242,13 @@ async fn read_source(
     // UI) y leerlo malgasta una lectura del LLM. Su snippet del buscador (título + resumen) es más
     // útil y gratis → se usa directamente. Para el resto: lectura PROFUNDA (HTML/PDF, 12k chars).
     let text = if is_low_yield_host(&sr.url) {
-        if sr.snippet.chars().count() >= 40 {
-            sr.snippet.clone()
-        } else {
-            return None;
+        // JS/muro (Reddit, YouTube, redes): el HTML estático rinde basura. Intenta RENDER headless
+        // propio (Chromium); si no hay Chrome, da timeout o sigue siendo pobre, cae al snippet del
+        // buscador. Así estas fuentes pasan de "basura/descartadas" a contenido real cuando se puede.
+        match web.fetch_rendered(&sr.url, 12_000).await {
+            Ok(t) if t.chars().count() >= 200 => t,
+            _ if sr.snippet.chars().count() >= 40 => sr.snippet.clone(),
+            _ => return None,
         }
     } else {
         let fetched = web

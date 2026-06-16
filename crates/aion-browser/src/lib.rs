@@ -862,6 +862,26 @@ impl WebClient {
         Ok(text)
     }
 
+    /// **Lectura RENDERIZADA** con el navegador headless propio (Chromium vía CDP): para páginas
+    /// JS/SPA o con muro de verificación que el fetch estático no puede leer (Reddit, YouTube…).
+    /// Devuelve el texto VISIBLE (innerText) tras renderizar. Más cara (~1-3 s + memoria) y
+    /// SERIALIZADA por el navegador singleton, por eso el caller la reserva para hosts de bajo
+    /// rendimiento estático. Con TIMEOUT para no colgar el pipeline. Requiere Chrome instalado (o
+    /// `AION_CHROME`); si no, error → el caller cae al snippet. Mantiene el guard anti-SSRF.
+    pub async fn fetch_rendered(&self, url: &str, max_chars: usize) -> Result<String> {
+        guard_url(url)?;
+        let driver = ChromiumoxideDriver;
+        let view = tokio::time::timeout(Duration::from_secs(20), driver.open(url))
+            .await
+            .map_err(|_| AionError::Internal("render headless: timeout".into()))??;
+        let mut text = view.text;
+        if text.chars().count() > max_chars {
+            text = text.chars().take(max_chars).collect();
+            text.push_str(" …[truncado]");
+        }
+        Ok(text)
+    }
+
     /// Cuerpo CRUDO (sin pasar por el extractor de texto): para APIs JSON. Mantiene
     /// el guard anti-SSRF y el proxy (`AION_PROXY`) como el resto del cliente.
     pub async fn fetch_raw(&self, url: &str) -> Result<String> {
