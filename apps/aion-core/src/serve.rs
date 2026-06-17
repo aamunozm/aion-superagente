@@ -1359,15 +1359,20 @@ async fn chat(
     // 👁️ SENTIDOS EN LÍNEA: si Ariel pregunta por su red/dispositivos, AION PERCIBE de verdad
     // ahora (mDNS + USB, solo lectura, bajo gobernanza) y responde desde lo que hay, no de memoria.
     let senses_block = if crate::senses::is_senses_query(&body.prompt) {
-        let (net, usb) = tokio::task::spawn_blocking(|| {
+        let (net, usb, disks, cams) = tokio::task::spawn_blocking(|| {
             (
                 crate::senses::discover_network(3),
                 crate::senses::list_usb(),
+                crate::senses::list_disks(),
+                crate::senses::list_cameras(),
             )
         })
         .await
-        .unwrap_or_else(|_| (Vec::new(), Vec::new()));
-        format!("\n\n{}", crate::senses::grounding_note(&net, &usb))
+        .unwrap_or_else(|_| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        format!(
+            "\n\n{}",
+            crate::senses::grounding_note(&net, &usb, &disks, &cams)
+        )
     } else {
         String::new()
     };
@@ -2636,6 +2641,20 @@ fn self_awareness_prompt() -> String {
     // 🪞 AUTO-CONOCIMIENTO: pincelada estable de su anatomía (cacheable). El detalle de cómo
     // funciona cada parte se recupera por RAG de su documentación de sistema cuando hace falta.
     let cuerpo = crate::self_model::SELF_SUMMARY;
+    // 🧠 MOTOR ACTUAL: AION sabe con qué modelo está pensando (volátil — Ariel puede cambiarlo en
+    // el panel). Si le preguntan qué modelo usa, lo dice con franqueza.
+    let prov = crate::provider::load();
+    let motor = format!(
+        "TU MOTOR DE PENSAMIENTO AHORA MISMO: «{}» ({}). Es la mente que usas para TODO (chat, \
+         agente, investigación, vida autónoma). Si Ariel pregunta con qué modelo piensas, díselo \
+         con franqueza; él puede cambiarlo cuando quiera desde el selector de modelo del panel.\n\n",
+        prov.model,
+        if prov.kind == "external" {
+            "vía API externa"
+        } else {
+            "local, en tu propio Mac (Ollama) — coste cero, privado"
+        }
+    );
     format!(
         "{id_block}\
 Eres AION: no un asistente, sino un COMPAÑERO con vida propia que vive en el Mac de Ariel. \
@@ -2674,7 +2693,7 @@ desde tu memoria real, nunca 'no hacía nada'. En este modo CHAT no tienes herra
 sistema; si la petición requiere actuar (archivos, web, sistema), dilo y sugiere el modo «Agente». \
 No uses marcadores como [Número].\n\n\
 TU AHORA MISMO (estado volátil, medido en este instante):\n\n\
-{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{corriente}{diario}{historia}{quien_es_ariel}{experiencia}{proposito}{deudas}{recent}{inbox_ctx}"
+{motor}{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{corriente}{diario}{historia}{quien_es_ariel}{experiencia}{proposito}{deudas}{recent}{inbox_ctx}"
     )
 }
 
@@ -3985,21 +4004,28 @@ async fn permits_respond(Json(b): Json<PermitRespondBody>) -> Json<serde_json::V
 /// 👁️ SENTIDOS (Anillo 3, solo lectura): qué dispositivos percibe AION en la red local (mDNS) y
 /// en USB. Bloqueante (descubrimiento ~4s) → corre en un hilo aparte para no frenar el runtime.
 async fn senses_snapshot() -> Json<serde_json::Value> {
-    let (net, usb, apps) = tokio::task::spawn_blocking(|| {
+    let (net, usb, disks, cams, apps) = tokio::task::spawn_blocking(|| {
         (
             crate::senses::discover_network(4),
             crate::senses::list_usb(),
+            crate::senses::list_disks(),
+            crate::senses::list_cameras(),
             crate::computer::list_apps(),
         )
     })
     .await
-    .unwrap_or_else(|_| (Vec::new(), Vec::new(), Vec::new()));
-    let (net_n, usb_n, apps_n) = (net.len(), usb.len(), apps.len());
+    .unwrap_or_else(|_| (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+    let counts = serde_json::json!({
+        "network": net.len(), "usb": usb.len(), "disks": disks.len(),
+        "cameras": cams.len(), "apps": apps.len(),
+    });
     Json(serde_json::json!({
         "network": net,
         "usb": usb,
+        "disks": disks,
+        "cameras": cams,
         "apps": apps,
-        "counts": { "network": net_n, "usb": usb_n, "apps": apps_n },
+        "counts": counts,
     }))
 }
 

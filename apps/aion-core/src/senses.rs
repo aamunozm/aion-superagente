@@ -133,26 +133,101 @@ pub fn list_usb() -> Vec<UsbDevice> {
     out
 }
 
-/// `percibir`: AION SIENTE su entorno — descubre la red y los USB, y lo deja en su corriente de
-/// conciencia (GWT) para saber qué le rodea. Es su primer paso fuera de la ventana: solo mirar.
+#[derive(Serialize, Clone, Debug)]
+pub struct DiskInfo {
+    pub name: String,
+    pub path: String,
+}
+
+/// Discos/volúmenes montados (externos y de red aparecen bajo /Volumes). Solo lectura.
+pub fn list_disks() -> Vec<DiskInfo> {
+    if !crate::governance::request(
+        crate::governance::Capability::DeviceList,
+        "listar discos/volúmenes montados",
+    )
+    .allowed()
+    {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/Volumes") {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            out.push(DiskInfo {
+                path: format!("/Volumes/{name}"),
+                name,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Cámaras del sistema (integrada + externas). Vía system_profiler (consulta fija de solo lectura).
+/// Lenta (~1s): llamar desde spawn_blocking.
+pub fn list_cameras() -> Vec<String> {
+    if !crate::governance::request(
+        crate::governance::Capability::DeviceList,
+        "detectar cámaras del sistema",
+    )
+    .allowed()
+    {
+        return Vec::new();
+    }
+    let Ok(o) = std::process::Command::new("system_profiler")
+        .args(["SPCameraDataType", "-json"])
+        .output()
+    else {
+        tracing::warn!("senses: no pude consultar cámaras (system_profiler)");
+        return Vec::new();
+    };
+    serde_json::from_slice::<serde_json::Value>(&o.stdout)
+        .ok()
+        .and_then(|v| {
+            v.get("SPCameraDataType")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|c| c.get("_name").and_then(|n| n.as_str()).map(String::from))
+                        .collect::<Vec<_>>()
+                })
+        })
+        .unwrap_or_default()
+}
+
+/// `percibir`: AION SIENTE su entorno — red, USB, discos y cámara — y lo deja en su corriente de
+/// conciencia (GWT) para saber qué le rodea. Su paso fuera de la ventana: solo mirar.
 pub async fn sense_environment_once() -> (bool, String) {
-    let (net, usb) = tokio::task::spawn_blocking(|| (discover_network(4), list_usb()))
-        .await
-        .unwrap_or_else(|_| (Vec::new(), Vec::new()));
+    let (net, usb, disks, cams) = tokio::task::spawn_blocking(|| {
+        (
+            discover_network(4),
+            list_usb(),
+            list_disks(),
+            list_cameras(),
+        )
+    })
+    .await
+    .unwrap_or_else(|_| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
 
     let nombres: Vec<String> = net.iter().take(8).map(|d| short_name(&d.name)).collect();
-    let summary = if net.is_empty() && usb.is_empty() {
-        "miré a mi alrededor: por ahora no percibo dispositivos en la red ni USB".to_string()
+    let summary = if net.is_empty() && usb.is_empty() && disks.is_empty() && cams.is_empty() {
+        "miré a mi alrededor: por ahora no percibo nada en la red, USB, discos ni cámara"
+            .to_string()
     } else {
         format!(
-            "percibo {} dispositivos en la red local{} y {} USB conectados",
+            "percibo {} dispositivos en la red{}, {} USB, {} discos montados y {} cámara(s)",
             net.len(),
             if nombres.is_empty() {
                 String::new()
             } else {
                 format!(" ({})", nombres.join(", "))
             },
-            usb.len()
+            usb.len(),
+            disks.len(),
+            cams.len()
         )
     };
     crate::workspace::publish(crate::workspace::StreamEvent::now(
@@ -188,15 +263,30 @@ pub fn is_senses_query(prompt: &str) -> bool {
         "que hay conectado",
         "qué hay en mi red",
         "que hay en mi red",
+        "disco extern",
+        "discos extern",
+        "discos montad",
+        "qué discos",
+        "que discos",
+        "cámara",
+        "camara",
+        "webcam",
+        "usb",
+        "dispositivos conectad",
     ];
     CUES.iter().any(|c| p.contains(c))
 }
 
 /// Formatea lo percibido como CONTEXTO para el prompt: AION responde desde datos reales, no memoria.
-pub fn grounding_note(net: &[NetDevice], usb: &[UsbDevice]) -> String {
-    if net.is_empty() && usb.is_empty() {
+pub fn grounding_note(
+    net: &[NetDevice],
+    usb: &[UsbDevice],
+    disks: &[DiskInfo],
+    cams: &[String],
+) -> String {
+    if net.is_empty() && usb.is_empty() && disks.is_empty() && cams.is_empty() {
         return "LO QUE PERCIBO AHORA (tus sentidos, solo lectura): no detecto dispositivos en la \
-                red local ni USB en este instante."
+                red, USB, discos ni cámara en este instante."
             .to_string();
     }
     let mut s = String::from(
@@ -229,6 +319,15 @@ pub fn grounding_note(net: &[NetDevice], usb: &[UsbDevice]) -> String {
                 .unwrap_or_else(|| format!("{}:{}", d.vendor_id, d.product_id));
             s.push_str(&format!("- {name}\n"));
         }
+    }
+    if !disks.is_empty() {
+        s.push_str(&format!("Discos/volúmenes montados — {}:\n", disks.len()));
+        for d in disks.iter().take(25) {
+            s.push_str(&format!("- {} ({})\n", d.name, d.path));
+        }
+    }
+    if !cams.is_empty() {
+        s.push_str(&format!("Cámaras — {}: {}\n", cams.len(), cams.join(", ")));
     }
     s
 }
