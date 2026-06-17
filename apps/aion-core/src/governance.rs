@@ -25,6 +25,10 @@ use std::sync::{Mutex, OnceLock};
 pub enum Capability {
     /// Investigar en la web (solo lectura). Anillo 1.
     Research,
+    /// Investigación PROFUNDA autónoma (pipeline multi-fuente, ~5 min y decenas de llamadas LLM).
+    /// Capacidad propia con tope bajo: una deep research no debe gastar el mismo cupo que una
+    /// búsqueda ligera (revisión 2026-06). Anillo 1.
+    DeepResearch,
     /// Descubrir dispositivos/servicios en la red local (solo lectura). Anillo 3.
     NetworkDiscover,
     /// Leer sensores del host (batería, térmica, etc.). Bajo riesgo.
@@ -45,6 +49,7 @@ impl Capability {
     pub fn as_str(self) -> &'static str {
         match self {
             Capability::Research => "research",
+            Capability::DeepResearch => "research.deep",
             Capability::NetworkDiscover => "network.discover",
             Capability::SensorRead => "sensor.read",
             Capability::NetworkConnect => "network.connect",
@@ -91,9 +96,10 @@ fn base_policy(cap: Capability) -> Decision {
         return Decision::Deny;
     }
     match cap {
-        Capability::Research | Capability::NetworkDiscover | Capability::SensorRead => {
-            Decision::Allow
-        }
+        Capability::Research
+        | Capability::DeepResearch
+        | Capability::NetworkDiscover
+        | Capability::SensorRead => Decision::Allow,
         Capability::NetworkConnect
         | Capability::Computer
         | Capability::Bluetooth
@@ -106,10 +112,11 @@ fn base_policy(cap: Capability) -> Decision {
 /// Evita que un bucle autónomo se desboque. La investigación autónoma se acota fuerte.
 fn rate_limit(cap: Capability) -> (usize, i64) {
     match cap {
-        Capability::Research => (6, 3600),         // 6/hora
+        Capability::Research => (6, 3600), // 6/hora (búsqueda ligera)
+        Capability::DeepResearch => (2, 86_400), // 2/día (pesada: ~5 min, decenas de LLM)
         Capability::NetworkDiscover => (12, 3600), // 12/hora
-        Capability::SensorRead => (240, 3600),     // sensores: frecuente, barato
-        _ => (30, 3600),                           // sensibles: tope de cortesía (igual piden HITL)
+        Capability::SensorRead => (240, 3600), // sensores: frecuente, barato
+        _ => (30, 3600),                   // sensibles: tope de cortesía (igual piden HITL)
     }
 }
 

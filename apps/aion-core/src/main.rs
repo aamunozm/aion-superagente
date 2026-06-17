@@ -2482,7 +2482,7 @@ async fn research_once(engine: &OllamaEngine) -> (bool, String) {
 async fn deep_dive_once(engine: &OllamaEngine) -> (bool, String) {
     use aion_browser::WebClient;
     if !crate::governance::request(
-        crate::governance::Capability::Research,
+        crate::governance::Capability::DeepResearch,
         "investigar A FONDO por mi cuenta (deep research multi-fuente)",
     )
     .allowed()
