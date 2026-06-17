@@ -750,7 +750,9 @@ async fn local_guard(
 /// —inherente al modelo local-first— pero cierra el vector navegador-a-navegador.
 fn api_token() -> &'static str {
     static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    TOKEN.get_or_init(crate::claude_code::generate_token)
+    // ESTABLE entre reinicios (persistido en disco): un token efímero rompía el registro
+    // MCP en ~/.claude.json en cada arranque/OTA. Ver claude_code::persisted_token.
+    TOKEN.get_or_init(crate::claude_code::persisted_token)
 }
 
 /// Bootstrap del token para la UI. GET (no muta) → exento de la exigencia de token;
@@ -2041,6 +2043,21 @@ async fn agent(
                 ctx.push_str(&format!("- {n}: {d}\n"));
             }
         }
+        // UBICACIÓN: si el usuario fijó su sitio en «Conciencia de entorno», el agente lo
+        // SABE — así no le pregunta la ciudad para el clima y usa su posición PRECISA (no
+        // la IP, que detrás de un proxy/VPN apunta al nodo de salida).
+        let loc_cfg = crate::sensors::load();
+        if loc_cfg.enabled && (loc_cfg.lat.is_some() || !loc_cfg.place.is_empty()) {
+            let donde = if loc_cfg.place.is_empty() {
+                "tu ubicación precisa (ya configurada)".to_string()
+            } else {
+                loc_cfg.place.clone()
+            };
+            ctx.push_str(&format!(
+                "\nUBICACIÓN DEL USUARIO: {donde}. Para el clima, llama a 'weather' SIN entrada \
+                 (usará esa ubicación precisa); NO le preguntes la ciudad.\n"
+            ));
+        }
         // HUMAN-IN-THE-LOOP: confirmación del usuario antes de acciones sensibles
         // (login, compra/pago). El callback emite un evento «confirm» por SSE y espera
         // tu decisión (endpoint /api/confirm).
@@ -3285,11 +3302,13 @@ async fn learn_from_failures(engine: &dyn LlmEngine, task: &str, failures: &[Str
     let list = failures.join("\n- ");
     let req = GenerateRequest {
         messages: vec![Message::user(format!(
-            "Durante una tarea me fallaron acciones.\nTarea: {task}\nFallos:\n- {list}\n\n\
+            "Durante una tarea hubo problemas (acciones fallidas o un resultado pobre).\n\
+             Tarea: {task}\nProblemas:\n- {list}\n\n\
              Extrae UNA lección breve y DURADERA (1-2 frases) que me ayude a hacerlo mejor la \
-             próxima vez ante una tarea parecida: qué herramienta usar, qué permiso del sistema \
-             hace falta y cómo pedirlo al usuario, o qué evitar. Si no hay lección general útil, \
-             responde solo 'NINGUNA'. No incluyas datos efímeros (números, fechas, estados)."
+             próxima vez ante una tarea parecida: qué herramienta usar, qué verificar antes de \
+             afirmar un dato, qué permiso del sistema hace falta y cómo pedirlo al usuario, o qué \
+             evitar. Si no hay lección general útil, responde solo 'NINGUNA'. No incluyas datos \
+             efímeros (números, fechas, estados)."
         ))],
         think: false,
         temperature: Some(0.2),
@@ -3343,7 +3362,23 @@ async fn reflect_after_task(
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     }
     let engine = active_engine();
-    if !failures.is_empty() && learn_from_failures(&*engine, &task, &failures).await {
+    // APRENDER DEL RESULTADO, no solo de errores de herramienta. El caso clásico (y el del
+    // clima) es una tarea SIN fallo de herramienta pero con MAL resultado: respondió de
+    // memoria o no usó la herramienta adecuada. Un humano aprende de eso —"la próxima,
+    // verifico antes de afirmar"—, así que AION también debe destilar la lección durable.
+    let learn_inputs: Vec<String> = if !failures.is_empty() {
+        failures.clone()
+    } else if !task_ok {
+        vec![
+            "La tarea no se completó con una respuesta fundamentada: o no usaste la \
+             herramienta adecuada, o respondiste de memoria en vez de comprobarlo con una \
+             herramienta."
+                .to_string(),
+        ]
+    } else {
+        Vec::new()
+    };
+    if !learn_inputs.is_empty() && learn_from_failures(&*engine, &task, &learn_inputs).await {
         trace.memory_written = true;
     }
     // El RESULTADO REAL entra en el prompt: sin esto, el LLM solo ve "0 acciones

@@ -107,6 +107,12 @@ fn note_from(cfg: &SensorConfig) -> String {
     let mut b = String::new();
     if !cfg.place.is_empty() {
         b.push_str(&format!("DÓNDE ESTÁS: {}.", cfg.place));
+    } else if cfg.lat.is_some() && cfg.lon.is_some() {
+        // Solo coordenadas (sin etiqueta de ciudad): aun así AION SABE que tiene tu
+        // ubicación precisa — no debe pedirte la ciudad para el clima.
+        b.push_str(
+            "DÓNDE ESTÁS: tu ubicación precisa está configurada (úsala para el clima; no pidas la ciudad).",
+        );
     }
     if let Some((_, w)) = weather_cache()
         .lock()

@@ -766,6 +766,13 @@ impl WebClient {
         Ok(format!("{r} [ubicación estimada por la IP del equipo]"))
     }
 
+    /// **Clima en coordenadas EXACTAS** (las que el usuario fijó en «Conciencia de
+    /// entorno»). Más preciso que `weather_auto` —que estima por IP— y CORRECTO detrás
+    /// de un proxy/VPN, donde la IP apunta al nodo de salida y no a ti.
+    pub async fn weather_at(&self, lat: f64, lon: f64, label: &str) -> Result<String> {
+        self.forecast_at(lat, lon, label).await
+    }
+
     /// Ubicación aproximada del equipo por su IP pública → (lat, lon, etiqueta
     /// «Ciudad (País)»). Precisión a nivel de ciudad. Dos proveedores HTTPS sin API
     /// key: ipwho.is (principal) e ipinfo.io (respaldo) — ipapi.co quedó descartado

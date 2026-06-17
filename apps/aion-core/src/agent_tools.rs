@@ -1722,12 +1722,37 @@ impl Tool for WeatherTool {
         let place = input
             .trim()
             .trim_matches(|c| c == '«' || c == '»' || c == '"');
-        if place.is_empty() {
-            // AUTONOMÍA: sin ciudad, AION se ubica solo (IP pública) y consulta ahí
-            // — no hace falta preguntarle al usuario dónde está.
-            return self.web.weather_auto().await.map_err(|e| e.to_string());
+        if !place.is_empty() {
+            // El usuario nombró un lugar explícito: tiene prioridad sobre todo.
+            return self.web.weather(place).await.map_err(|e| e.to_string());
         }
-        self.web.weather(place).await.map_err(|e| e.to_string())
+        // Sin lugar: usa la POSICIÓN PRECISA que el usuario fijó en «Conciencia de
+        // entorno» (lat/lon exactas) ANTES que la IP —que detrás de un proxy/VPN apunta
+        // al nodo de salida, no a él—. Orden: coords precisas → ciudad guardada → IP.
+        let cfg = crate::sensors::load();
+        if cfg.enabled {
+            if let (Some(lat), Some(lon)) = (cfg.lat, cfg.lon) {
+                let label = if cfg.place.is_empty() {
+                    "tu ubicación"
+                } else {
+                    cfg.place.as_str()
+                };
+                return self
+                    .web
+                    .weather_at(lat, lon, label)
+                    .await
+                    .map_err(|e| e.to_string());
+            }
+            if !cfg.place.is_empty() {
+                return self
+                    .web
+                    .weather(&cfg.place)
+                    .await
+                    .map_err(|e| e.to_string());
+            }
+        }
+        // Último recurso: sin ubicación configurada, AION se estima por IP pública.
+        self.web.weather_auto().await.map_err(|e| e.to_string())
     }
 }
 

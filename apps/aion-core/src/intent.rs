@@ -53,6 +53,12 @@ const CHAT_PROTOS: &[&str] = &[
 /// Prototipos de TAREA: pedir un dato del mundo exterior o ejecutar/leer/crear algo concreto.
 const TASK_PROTOS: &[&str] = &[
     "¿qué temperatura hace ahora en Milán?",
+    // PRONÓSTICO (futuro), no solo el dato actual: «¿cómo va a estar el clima hoy?» se
+    // parecía poco al prototipo en presente y caía en la zona ambigua → a veces charla
+    // (pedía la ciudad). Estos prototipos en futuro lo anclan a TAREA (usa weather).
+    "¿cómo va a estar el clima hoy?",
+    "¿qué tiempo hará hoy y esta tarde?",
+    "dime el pronóstico del tiempo para hoy",
     "busca en internet el precio actual del bitcoin",
     "abre esta página web y dime qué dice: https://ejemplo.com",
     "crea un documento de texto con el resumen de esto",
