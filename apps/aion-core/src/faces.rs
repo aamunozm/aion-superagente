@@ -182,7 +182,8 @@ fn probe_path() -> PathBuf {
 
 /// **Escanea con la cámara y reconoce.** Bajo demanda y con permiso (gobernanza Camera). Ejecuta el
 /// helper Swift (captura + Apple Vision detecta + faceprint), y para cada cara decide quién es
-/// (`observe`). Devuelve a quién reconoce. BLOQUEANTE (~4s): llamar desde spawn_blocking.
+/// (`observe`). Devuelve a quién reconoce. BLOQUEANTE: ~4-8s normalmente, pero hasta ~45s la PRIMERA
+/// vez (espera a que Ariel acepte el diálogo de permiso de cámara). Llamar desde spawn_blocking.
 pub fn scan() -> serde_json::Value {
     // `scan` SOLO se llama cuando Ariel lo pide explícitamente (chat "¿quién soy?" o el botón del
     // panel): su petición ES la autorización humana (mismo criterio que abrir una app por orden
@@ -198,8 +199,12 @@ pub fn scan() -> serde_json::Value {
     };
     note_user_action(Capability::Camera, "reconocer con la cámara", true);
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let diag = parsed
+        .get("diag")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     if let Some(err) = parsed.get("error").and_then(|e| e.as_str()) {
-        return serde_json::json!({ "error": err, "recognized": [] });
+        return serde_json::json!({ "error": err, "recognized": [], "diag": diag });
     }
     let mut recognized = Vec::new();
     if let Some(faces) = parsed.get("faces").and_then(|f| f.as_array()) {
@@ -234,7 +239,7 @@ pub fn scan() -> serde_json::Value {
             );
         }
     }
-    serde_json::json!({ "error": serde_json::Value::Null, "recognized": recognized })
+    serde_json::json!({ "error": serde_json::Value::Null, "recognized": recognized, "diag": diag })
 }
 
 /// Crop 112×112 RGB (base64, salida del helper Swift) → faceprint ArcFace (512 dim, L2).
