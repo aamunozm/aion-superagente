@@ -184,20 +184,19 @@ fn probe_path() -> PathBuf {
 /// helper Swift (captura + Apple Vision detecta + faceprint), y para cada cara decide quién es
 /// (`observe`). Devuelve a quién reconoce. BLOQUEANTE (~4s): llamar desde spawn_blocking.
 pub fn scan() -> serde_json::Value {
-    if !crate::governance::request(
-        crate::governance::Capability::Camera,
-        "encender la cámara para reconocer quién está delante",
-    )
-    .allowed()
-    {
-        return serde_json::json!({ "error": "permiso de cámara no concedido (gobernanza)", "recognized": [] });
-    }
+    // `scan` SOLO se llama cuando Ariel lo pide explícitamente (chat "¿quién soy?" o el botón del
+    // panel): su petición ES la autorización humana (mismo criterio que abrir una app por orden
+    // directa). El gate REAL de privacidad es el permiso de cámara de macOS (TCC), que el SO pide
+    // la primera vez y Ariel concede conscientemente. Lo auditamos como acción autorizada por él.
+    use crate::governance::{note_user_action, Capability};
     let out = match std::process::Command::new(probe_path()).output() {
         Ok(o) => o,
         Err(_) => {
-            return serde_json::json!({ "error": "no encuentro el helper de cámara (face-probe)", "recognized": [] })
+            note_user_action(Capability::Camera, "reconocer con la cámara", false);
+            return serde_json::json!({ "error": "no encuentro el helper de cámara (face-probe)", "recognized": [] });
         }
     };
+    note_user_action(Capability::Camera, "reconocer con la cámara", true);
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
     if let Some(err) = parsed.get("error").and_then(|e| e.as_str()) {
         return serde_json::json!({ "error": err, "recognized": [] });
@@ -205,23 +204,55 @@ pub fn scan() -> serde_json::Value {
     let mut recognized = Vec::new();
     if let Some(faces) = parsed.get("faces").and_then(|f| f.as_array()) {
         for f in faces {
-            let emb: Vec<f32> = f
-                .get("embedding")
-                .and_then(|e| e.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_f64().map(|v| v as f32))
-                        .collect()
-                })
-                .unwrap_or_default();
+            // Faceprint POTENTE: crop 112×112 → ArcFace (512 dim). Si no hay modelo, cae al
+            // descriptor genérico de Vision (menos discriminativo, pero algo es algo).
+            let (emb, engine) = match f
+                .get("crop112")
+                .and_then(|c| c.as_str())
+                .and_then(arcface_from_crop)
+            {
+                Some(e) => (e, "arcface"),
+                None => {
+                    let v: Vec<f32> = f
+                        .get("embedding")
+                        .and_then(|e| e.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_f64().map(|v| v as f32))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (v, "vision")
+                }
+            };
             if emb.is_empty() {
                 continue;
             }
             let (id, label, known) = observe(&emb);
-            recognized.push(serde_json::json!({ "id": id, "label": label, "known": known }));
+            recognized.push(
+                serde_json::json!({ "id": id, "label": label, "known": known, "engine": engine }),
+            );
         }
     }
     serde_json::json!({ "error": serde_json::Value::Null, "recognized": recognized })
+}
+
+/// Crop 112×112 RGB (base64, salida del helper Swift) → faceprint ArcFace (512 dim, L2).
+/// Preprocesa a NCHW normalizado a [-1,1] como espera InsightFace: `(px - 127.5) / 128`.
+fn arcface_from_crop(b64: &str) -> Option<Vec<f32>> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    const PLANE: usize = 112 * 112;
+    if bytes.len() != PLANE * 3 {
+        return None;
+    }
+    let mut nchw = vec![0f32; 3 * PLANE];
+    for px in 0..PLANE {
+        for c in 0..3 {
+            nchw[c * PLANE + px] = (bytes[px * 3 + c] as f32 - 127.5) / 128.0;
+        }
+    }
+    crate::arcface::embed(nchw)
 }
 
 /// ¿Ariel pregunta por reconocimiento facial / quién está delante?
