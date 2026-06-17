@@ -1444,6 +1444,21 @@ async fn chat(
     } else {
         String::new()
     };
+    // 🧰 INVENTARIO: si Ariel pregunta qué tiene instalado / qué puede usar AION, responde desde el
+    // inventario REAL del Mac (todas las apps instaladas + herramientas CLI), no de memoria.
+    let inventory_block = if crate::computer::is_inventory_query(&body.prompt) {
+        let (apps, tools) = tokio::task::spawn_blocking(|| {
+            (
+                crate::computer::installed_apps(),
+                crate::computer::installed_tools(),
+            )
+        })
+        .await
+        .unwrap_or_default();
+        format!("\n\n{}", crate::computer::inventory_note(&apps, &tools))
+    } else {
+        String::new()
+    };
     // Módulos coactivados en ESTE turno (memoria, biblioteca, proyecto): el chat
     // también integra — medirlo evita que el índice Φ ignore el modo principal.
     let chat_modules = usize::from(mem_hits > 0)
@@ -1451,7 +1466,7 @@ async fn chat(
         + usize::from(!proj_block.is_empty())
         + usize::from(!epi_block.is_empty());
     let self_ctx = format!(
-        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}{}{}{}",
         self_awareness_prompt(),
         lang_directive(&body.lang),
         crate::prompts::persona(&mode),
@@ -1466,6 +1481,7 @@ async fn chat(
         computer_block,
         action_note,
         face_block,
+        inventory_block,
     );
 
     // ACTO CONSCIENTE + MEMORIA DE HECHOS: si comprendimos EN LÍNEA (turno-pregunta), los
@@ -4149,9 +4165,18 @@ async fn senses_snapshot() -> Json<serde_json::Value> {
     })
     .await
     .unwrap_or_else(|_| (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+    let (installed, tools) = tokio::task::spawn_blocking(|| {
+        (
+            crate::computer::installed_apps(),
+            crate::computer::installed_tools(),
+        )
+    })
+    .await
+    .unwrap_or_default();
     let counts = serde_json::json!({
         "network": net.len(), "usb": usb.len(), "disks": disks.len(),
-        "cameras": cams.len(), "apps": apps.len(),
+        "cameras": cams.len(), "apps_open": apps.len(),
+        "apps_installed": installed.len(), "cli_tools": tools.len(),
     });
     Json(serde_json::json!({
         "network": net,
@@ -4159,6 +4184,8 @@ async fn senses_snapshot() -> Json<serde_json::Value> {
         "disks": disks,
         "cameras": cams,
         "apps": apps,
+        "installed_apps": installed,
+        "cli_tools": tools,
         "counts": counts,
     }))
 }
