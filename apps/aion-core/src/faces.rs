@@ -251,6 +251,50 @@ pub fn scan() -> serde_json::Value {
     serde_json::json!({ "error": serde_json::Value::Null, "recognized": recognized, "diag": diag })
 }
 
+/// Respuesta DIRECTA y 100% verídica (sin LLM) para mostrarle a Ariel tras un escaneo. La genera
+/// el código desde el resultado real del escáner — así reconocer significa reconocer de verdad, y
+/// es imposible que el modelo finja o adorne.
+pub fn recognize_reply(scan: &serde_json::Value) -> String {
+    if let Some(err) = scan.get("error").and_then(|e| e.as_str()) {
+        return format!("Encendí la cámara pero no pude reconocer: {err}.");
+    }
+    let rec = scan
+        .get("recognized")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if rec.is_empty() {
+        return "Encendí la cámara, pero ahora mismo no detecté ninguna cara delante.".into();
+    }
+    let mut known: Vec<String> = Vec::new();
+    let mut unknown = 0u32;
+    for r in &rec {
+        let label = r.get("label").and_then(|l| l.as_str()).unwrap_or("?");
+        if r.get("known").and_then(|k| k.as_bool()).unwrap_or(false) {
+            known.push(label.to_string());
+        } else {
+            unknown += 1;
+        }
+    }
+    let mut s = String::new();
+    if !known.is_empty() {
+        s.push_str(&format!(
+            "Te miré con la cámara y reconozco a {}.",
+            known.join(", ")
+        ));
+    }
+    if unknown > 0 {
+        if !s.is_empty() {
+            s.push(' ');
+        }
+        s.push_str(&format!(
+            "Veo {unknown} cara{} que aún no tengo registrada — si me dices quién es, la recuerdo.",
+            if unknown == 1 { "" } else { "s" }
+        ));
+    }
+    s
+}
+
 /// Markdown de la PRIMERA foto de cara del escaneo (data-URI JPEG), para mostrarla en el chat.
 /// `None` si no hay foto. Efímera: la imagen no se guarda en disco, solo se muestra.
 pub fn photo_markdown(scan: &serde_json::Value) -> Option<String> {
