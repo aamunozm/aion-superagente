@@ -1921,6 +1921,7 @@ async fn agent(
         // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
+        tools.register(Arc::new(crate::agent_tools::ShellTool::new()));
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
         tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
         tools.register(Arc::new(crate::agent_tools::GraphSearchTool::new()));
@@ -2095,6 +2096,17 @@ async fn agent(
              - No digas que GUARDASTE algo en memoria, que FORJASTE una skill o que HICISTE una acción \
              si no llamaste a la herramienta correspondiente en esta tarea. Afirmar una acción que no \
              ejecutaste es inaceptable.\n",
+        );
+        // 💪 SÉ RESOLUTIVO: el complemento de la regla anterior. Honesto NO es rendirse a la primera.
+        ctx.push_str(
+            "\n\nSÉ RESOLUTIVO — no te rindas al primer obstáculo:\n\
+             - Tienes herramientas REALES, incluida la TERMINAL del Mac (tool 'shell', diagnóstico de \
+             solo lectura: arp, nmap, system_profiler, scutil, dig, ps, df, lsof, ioreg…). Para una \
+             tarea, ENCADENA tus recursos: razona qué te falta y consíguelo con la tool adecuada.\n\
+             - Si una herramienta falla o no basta, REINTENTA o prueba OTRA vía: otro comando, otra \
+             tool, o investiga en la web CÓMO se hace y luego hazlo. Agota tus opciones reales.\n\
+             - Solo di 'no pude' DESPUÉS de intentarlo de verdad, y explica QUÉ intentaste y por qué \
+             falló. Ser resolutivo NO es inventar: persigue el dato con herramientas, nunca lo fabriques.\n",
         );
         // HUMAN-IN-THE-LOOP: confirmación del usuario antes de acciones sensibles
         // (login, compra/pago). El callback emite un evento «confirm» por SSE y espera
@@ -2297,6 +2309,7 @@ async fn crew(
         // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
+        tools.register(Arc::new(crate::agent_tools::ShellTool::new()));
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
         tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
         tools.register(Arc::new(crate::agent_tools::GraphSearchTool::new()));
