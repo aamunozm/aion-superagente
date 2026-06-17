@@ -10,6 +10,7 @@
 import AVFoundation
 import Vision
 import CoreImage
+import CoreGraphics
 import Foundation
 
 func emit(_ obj: [String: Any]) {
@@ -18,6 +19,31 @@ func emit(_ obj: [String: Any]) {
         print(s)
     }
     fflush(stdout)
+}
+
+// Redimensiona una cara a 112×112 y devuelve sus bytes RGB (37632) en base64.
+// Es lo que come ArcFace (faceprint potente); el lado Rust lo normaliza a [-1,1] NCHW.
+func crop112(_ img: CGImage) -> String? {
+    let n = 112
+    let space = CGColorSpaceCreateDeviceRGB()
+    guard let ctx = CGContext(
+        data: nil, width: n, height: n, bitsPerComponent: 8, bytesPerRow: n * 4,
+        space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return nil }
+    ctx.interpolationQuality = .high
+    ctx.draw(img, in: CGRect(x: 0, y: 0, width: n, height: n))
+    guard let px = ctx.data else { return nil }
+    let p = px.bindMemory(to: UInt8.self, capacity: n * n * 4)
+    var rgb = Data(count: n * n * 3)
+    rgb.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
+        let out = raw.bindMemory(to: UInt8.self)
+        for i in 0..<(n * n) {
+            out[i * 3 + 0] = p[i * 4 + 0]
+            out[i * 3 + 1] = p[i * 4 + 1]
+            out[i * 3 + 2] = p[i * 4 + 2]
+        }
+    }
+    return rgb.base64EncodedString()
 }
 
 final class Grabber: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -85,7 +111,9 @@ for obs in (faceReq.results ?? []) {
             for i in 0..<min(fp.elementCount, p.count) { emb[i] = p[i] }
         }
     }
-    faces.append(["embedding": emb, "bbox": [Double(rx), Double(ry), Double(rw), Double(rh)]])
+    var face: [String: Any] = ["embedding": emb, "bbox": [Double(rx), Double(ry), Double(rw), Double(rh)]]
+    if let c = crop112(faceCG) { face["crop112"] = c }
+    faces.append(face)
 }
 emit(["faces": faces, "error": NSNull()])
 exit(0)
