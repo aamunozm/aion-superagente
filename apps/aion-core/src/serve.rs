@@ -1423,6 +1423,14 @@ async fn chat(
         let r = tokio::task::spawn_blocking(crate::faces::scan)
             .await
             .unwrap_or_default();
+        // 📷 Muestra la FOTO capturada en el chat: la emitimos como un chunk `answer` ANTES del
+        // texto del LLM (el cliente concatena los chunks answer → la foto sale arriba). No se
+        // acumula en el historial: es efímera, solo para que Ariel la VEA.
+        if let Some(md) = crate::faces::photo_markdown(&r) {
+            let _ = tx.try_send(Event::default().data(
+                serde_json::json!({ "kind": "answer", "text": format!("{md}\n\n") }).to_string(),
+            ));
+        }
         format!("\n\n{}", crate::faces::recognize_note(&r))
     } else {
         String::new()
@@ -1971,6 +1979,15 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
+        // 📷 Reconocimiento facial REAL como herramienta del agente (mata el teatro: antes el LLM
+        // inventaba un comando de cámara). La foto capturada se guarda en este buffer y se antepone
+        // al Final Answer para mostrarla en el chat. NO se registra en la `crew` autónoma: la cámara
+        // solo se enciende por petición EXPLÍCITA de Ariel, jamás en la vida autónoma.
+        let face_photo: crate::agent_tools::FacePhoto =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        tools.register(Arc::new(crate::agent_tools::FaceScanTool::new(Some(
+            face_photo.clone(),
+        ))));
 
         let bus = EventBus::default();
 
@@ -2123,6 +2140,16 @@ async fn agent(
              - Solo di 'no pude' DESPUÉS de intentarlo de verdad, y explica QUÉ intentaste y por qué \
              falló. Ser resolutivo NO es inventar: persigue el dato con herramientas, nunca lo fabriques.\n",
         );
+        // 📷 CÁMARA / CARAS: el agente tiene una herramienta REAL de reconocimiento. La directiva
+        // cierra la puerta al teatro (inventar un comando de cámara y narrar una captura ficticia).
+        ctx.push_str(
+            "\n\nCÁMARA Y CARAS: para reconocer a alguien o responder «quién es / quién soy / \
+             mírame», usa SIEMPRE la herramienta 'reconocer_cara' (enciende la cámara de verdad y \
+             usa ArcFace). JAMÁS simules una captura, ni inventes un comando de terminal para la \
+             cámara, ni afirmes a quién ves sin haber llamado a esa herramienta en esta tarea. Si la \
+             herramienta dice que la persona no está registrada, di con franqueza que no la \
+             reconoces — no adivines un nombre.\n",
+        );
         // HUMAN-IN-THE-LOOP: confirmación del usuario antes de acciones sensibles
         // (login, compra/pago). El callback emite un evento «confirm» por SSE y espera
         // tu decisión (endpoint /api/confirm).
@@ -2258,7 +2285,14 @@ async fn agent(
                     task_ok,
                     trace,
                 ));
-                serde_json::json!({ "kind": "answer", "text": run.answer, "steps": run.steps })
+                // 📷 Si el agente usó la cámara, antepone la FOTO capturada (markdown data-URI) al
+                // texto, para que Ariel la VEA junto a la respuesta. Efímera: no se persiste.
+                let photo = face_photo.lock().unwrap_or_else(|e| e.into_inner()).take();
+                let text = match photo {
+                    Some(md) => format!("{md}\n\n{}", run.answer),
+                    None => run.answer,
+                };
+                serde_json::json!({ "kind": "answer", "text": text, "steps": run.steps })
             }
             Err(e) => {
                 crate::awareness::record_outcome(false);

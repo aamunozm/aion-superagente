@@ -234,12 +234,30 @@ pub fn scan() -> serde_json::Value {
                 continue;
             }
             let (id, label, known) = observe(&emb);
-            recognized.push(
-                serde_json::json!({ "id": id, "label": label, "known": known, "engine": engine }),
-            );
+            let mut obj =
+                serde_json::json!({ "id": id, "label": label, "known": known, "engine": engine });
+            // Foto efímera de la cara (para MOSTRAR en el chat): NO se persiste en faces.jsonl,
+            // solo viaja en esta respuesta. Datos biométricos → fuera de disco y de logs.
+            if let Some(j) = f.get("face_jpeg").and_then(|x| x.as_str()) {
+                obj["face_jpeg"] = serde_json::Value::String(j.to_string());
+            }
+            recognized.push(obj);
         }
     }
     serde_json::json!({ "error": serde_json::Value::Null, "recognized": recognized, "diag": diag })
+}
+
+/// Markdown de la PRIMERA foto de cara del escaneo (data-URI JPEG), para mostrarla en el chat.
+/// `None` si no hay foto. Efímera: la imagen no se guarda en disco, solo se muestra.
+pub fn photo_markdown(scan: &serde_json::Value) -> Option<String> {
+    let rec = scan.get("recognized").and_then(|r| r.as_array())?;
+    for r in rec {
+        if let Some(j) = r.get("face_jpeg").and_then(|x| x.as_str()) {
+            let label = r.get("label").and_then(|l| l.as_str()).unwrap_or("cara");
+            return Some(format!("![{label}](data:image/jpeg;base64,{j})"));
+        }
+    }
+    None
 }
 
 /// Crop 112×112 RGB (base64, salida del helper Swift) → faceprint ArcFace (512 dim, L2).
@@ -302,17 +320,29 @@ pub fn recognize_note(scan: &serde_json::Value) -> String {
         return "Encendiste la cámara pero NO detectaste ninguna cara ahora mismo. Dilo con franqueza."
             .into();
     }
-    let mut s = String::from("LO QUE RECONOCES AHORA POR LA CÁMARA (real, responde desde esto):\n");
+    let mut s = String::from(
+        "LO QUE RECONOCES AHORA POR LA CÁMARA (datos REALES de tu visión — responde SOLO desde \
+         esto, no inventes identidades):\n",
+    );
     for r in &rec {
         let label = r.get("label").and_then(|l| l.as_str()).unwrap_or("?");
         let known = r.get("known").and_then(|k| k.as_bool()).unwrap_or(false);
         if known {
-            s.push_str(&format!("- Reconozco a {label}.\n"));
+            s.push_str(&format!(
+                "- Es {label}: una persona que TIENES registrada y reconoces con seguridad. Salúdala por su nombre.\n"
+            ));
         } else {
             s.push_str(&format!(
-                "- Veo a alguien que aún no tengo nombrado ({label}). Si Ariel me dice quién es, lo recuerdo.\n"
+                "- Hay una persona que NO tienes registrada ({label}): no sabes su nombre y NO es ninguno de tus conocidos. Dilo con claridad («no te reconozco, no eres alguien que tenga registrado»). Si te dicen quién es, la recuerdas.\n"
             ));
         }
+    }
+    if rec.iter().any(|r| r.get("face_jpeg").is_some()) {
+        s.push_str(
+            "\nLa FOTO que acabas de capturar se está mostrando en el chat (no la describas como \
+             si no la vieras). Comenta con naturalidad y di quién es por su NOMBRE si lo reconoces, \
+             o que no lo conoces si es nuevo.\n",
+        );
     }
     s
 }

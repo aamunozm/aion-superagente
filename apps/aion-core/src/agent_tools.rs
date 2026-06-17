@@ -2252,6 +2252,55 @@ impl Tool for SkillInvokeTool {
     }
 }
 
+// ── Reconocimiento facial: la herramienta REAL del agente (no más teatro) ─────────
+//
+// Antes, en modo Agente, no existía una herramienta de cámara: cuando Ariel pedía «haz un
+// reconocimiento facial», el LLM rellenaba el hueco INVENTANDO un comando (`face-probe capture`)
+// y narrando una captura que nunca ocurría. Esto lo arregla de raíz: el agente llama a una tool
+// que EJECUTA `faces::scan` de verdad (cámara → ArcFace → identidad) y responde desde el resultado.
+
+/// Buffer efímero para pasar la FOTO capturada (markdown con data-URI) del tool al handler SSE,
+/// que la antepone al Final Answer para mostrarla en el chat. La imagen NO se persiste.
+pub type FacePhoto = Arc<std::sync::Mutex<Option<String>>>;
+
+/// Reconocimiento facial bajo demanda: enciende la cámara del Mac y reconoce quién está delante.
+pub struct FaceScanTool {
+    photo: Option<FacePhoto>,
+}
+
+impl FaceScanTool {
+    pub fn new(photo: Option<FacePhoto>) -> Self {
+        Self { photo }
+    }
+}
+
+#[async_trait]
+impl Tool for FaceScanTool {
+    fn name(&self) -> &str {
+        "reconocer_cara"
+    }
+    fn description(&self) -> &str {
+        "Enciende la CÁMARA del Mac y reconoce de verdad quién está delante (motor ArcFace local). \
+         Úsala SIEMPRE que te pidan reconocer una cara, saber quién es alguien, «¿quién soy?», \
+         «mírame» o usar la cámara — NUNCA finjas ni inventes un comando. Devuelve el nombre si la \
+         persona está registrada, o «Persona N» si es nueva (entonces no la conoces). La 1ª vez \
+         macOS pide permiso de cámara. Sin entrada."
+    }
+    async fn run(&self, _input: &str) -> Result<String, String> {
+        // Ejecuta el escaneo REAL en hilo bloqueante (cámara ~4-8s; hasta ~45s la 1ª vez por el
+        // permiso de macOS). La petición del usuario ES la autorización (igual que faces::scan).
+        let r = tokio::task::spawn_blocking(crate::faces::scan)
+            .await
+            .map_err(|e| e.to_string())?;
+        // Guarda la foto (si hay) para que el handler la muestre en el chat.
+        if let Some(slot) = &self.photo {
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = crate::faces::photo_markdown(&r);
+        }
+        // Devuelve al agente el texto REAL del reconocimiento (nombre/conocido/desconocido).
+        Ok(crate::faces::recognize_note(&r))
+    }
+}
+
 #[cfg(test)]
 mod shell_safety_tests {
     use super::shell_is_safe;
