@@ -797,21 +797,32 @@ fn sanitize(text: &str) -> String {
         }
     }
     // 3) Colapsar repetición degenerada: ningún token se repite >3 veces seguidas.
-    let mut out: Vec<&str> = Vec::new();
-    let mut run = 0usize;
-    let mut last = "";
-    for tok in s.split_whitespace() {
-        if tok == last {
-            run += 1;
-        } else {
-            run = 1;
-            last = tok;
-        }
-        if run <= 3 {
-            out.push(tok);
-        }
-    }
-    out.join(" ").trim().to_string()
+    // PRESERVA LOS SALTOS DE LÍNEA: el anti-repetición opera POR LÍNEAS y se reensambla con
+    // '\n'. Antes hacía `split_whitespace().join(" ")`, que aplastaba TODO el whitespace
+    // —incluidos los '\n'— y dejaba el Markdown de bloque (títulos, listas, '---') pegado en
+    // una sola línea → se renderizaba crudo en la UI. La negrita (inline) sobrevivía; los
+    // títulos no. Por líneas mantenemos el formato y seguimos matando la repetición del modelo.
+    let cleaned: Vec<String> = s
+        .lines()
+        .map(|line| {
+            let mut out: Vec<&str> = Vec::new();
+            let mut run = 0usize;
+            let mut last = "";
+            for tok in line.split_whitespace() {
+                if tok == last {
+                    run += 1;
+                } else {
+                    run = 1;
+                    last = tok;
+                }
+                if run <= 3 {
+                    out.push(tok);
+                }
+            }
+            out.join(" ")
+        })
+        .collect();
+    cleaned.join("\n").trim().to_string()
 }
 
 #[cfg(test)]
