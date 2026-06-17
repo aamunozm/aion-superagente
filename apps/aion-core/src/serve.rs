@@ -1354,6 +1354,21 @@ async fn chat(
             format!("\n\n{note}")
         }
     };
+    // 👁️ SENTIDOS EN LÍNEA: si Ariel pregunta por su red/dispositivos, AION PERCIBE de verdad
+    // ahora (mDNS + USB, solo lectura, bajo gobernanza) y responde desde lo que hay, no de memoria.
+    let senses_block = if crate::senses::is_senses_query(&body.prompt) {
+        let (net, usb) = tokio::task::spawn_blocking(|| {
+            (
+                crate::senses::discover_network(3),
+                crate::senses::list_usb(),
+            )
+        })
+        .await
+        .unwrap_or_else(|_| (Vec::new(), Vec::new()));
+        format!("\n\n{}", crate::senses::grounding_note(&net, &usb))
+    } else {
+        String::new()
+    };
     // Módulos coactivados en ESTE turno (memoria, biblioteca, proyecto): el chat
     // también integra — medirlo evita que el índice Φ ignore el modo principal.
     let chat_modules = usize::from(mem_hits > 0)
@@ -1361,7 +1376,7 @@ async fn chat(
         + usize::from(!proj_block.is_empty())
         + usize::from(!epi_block.is_empty());
     let self_ctx = format!(
-        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}",
+        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}",
         self_awareness_prompt(),
         lang_directive(&body.lang),
         crate::prompts::persona(&mode),
@@ -1372,6 +1387,7 @@ async fn chat(
         proj_block,
         lib_block,
         comp_block,
+        senses_block,
     );
 
     // ACTO CONSCIENTE + MEMORIA DE HECHOS: si comprendimos EN LÍNEA (turno-pregunta), los

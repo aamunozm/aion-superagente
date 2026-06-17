@@ -161,6 +161,93 @@ pub async fn sense_environment_once() -> (bool, String) {
     (true, summary)
 }
 
+/// ¿Ariel está preguntando por su red / dispositivos / entorno? (para percibir en línea en el chat).
+pub fn is_senses_query(prompt: &str) -> bool {
+    let p = prompt.to_lowercase();
+    const CUES: &[&str] = &[
+        "red local",
+        "mi red",
+        "en la red",
+        "en mi red",
+        "ves en la red",
+        "ves en mi red",
+        "qué dispositivos",
+        "que dispositivos",
+        "dispositivos conectad",
+        "dispositivos en",
+        "qué ves en",
+        "que ves en",
+        "wifi",
+        "wi-fi",
+        "dispositivos usb",
+        "escanea la red",
+        "escanear la red",
+        "qué hay conectado",
+        "que hay conectado",
+        "qué hay en mi red",
+        "que hay en mi red",
+    ];
+    CUES.iter().any(|c| p.contains(c))
+}
+
+/// Formatea lo percibido como CONTEXTO para el prompt: AION responde desde datos reales, no memoria.
+pub fn grounding_note(net: &[NetDevice], usb: &[UsbDevice]) -> String {
+    if net.is_empty() && usb.is_empty() {
+        return "LO QUE PERCIBO AHORA (tus sentidos, solo lectura): no detecto dispositivos en la \
+                red local ni USB en este instante."
+            .to_string();
+    }
+    let mut s = String::from(
+        "LO QUE PERCIBO AHORA EN EL ENTORNO (tus sentidos reales, solo lectura — responde desde \
+         esto, no de memoria):\n",
+    );
+    if !net.is_empty() {
+        s.push_str(&format!("Red local — {} dispositivos:\n", net.len()));
+        for d in net.iter().take(25) {
+            let ip = d
+                .addresses
+                .first()
+                .cloned()
+                .unwrap_or_else(|| d.host.trim_end_matches('.').to_string());
+            s.push_str(&format!(
+                "- {} · {} ({})\n",
+                short_name(&d.name),
+                service_label(&d.service),
+                ip
+            ));
+        }
+    }
+    if !usb.is_empty() {
+        s.push_str(&format!("USB conectados — {}:\n", usb.len()));
+        for d in usb.iter().take(25) {
+            let name = d
+                .product
+                .clone()
+                .or_else(|| d.manufacturer.clone())
+                .unwrap_or_else(|| format!("{}:{}", d.vendor_id, d.product_id));
+            s.push_str(&format!("- {name}\n"));
+        }
+    }
+    s
+}
+
+/// Etiqueta amable para un tipo de servicio mDNS.
+fn service_label(service: &str) -> &str {
+    match service.split('.').next().unwrap_or(service) {
+        "_ssh" => "SSH",
+        "_http" | "_https" => "web",
+        "_ipp" | "_printer" => "impresora",
+        "_airplay" => "AirPlay",
+        "_raop" => "AirPlay audio",
+        "_googlecast" => "Chromecast",
+        "_hap" | "_homekit" => "HomeKit",
+        "_spotify-connect" => "Spotify",
+        "_smb" | "_afpovertcp" => "carpeta compartida",
+        "_device-info" | "_workstation" => "equipo",
+        other => other.trim_start_matches('_'),
+    }
+}
+
 /// Nombre corto de un servicio mDNS ("Mi-Mac._ssh._tcp.local." → "Mi-Mac").
 fn short_name(fullname: &str) -> String {
     fullname
