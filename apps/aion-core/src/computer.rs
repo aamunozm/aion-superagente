@@ -66,6 +66,140 @@ pub fn list_apps() -> Vec<AppInfo> {
     Vec::new()
 }
 
+// ── INVENTARIO: TODO lo que hay en el Mac (apps instaladas + herramientas CLI) ──
+// AION debe conocer su caja de herramientas completa, no solo lo que está abierto, y enterarse
+// cuando Ariel instala algo nuevo que pueda usar. Solo lectura.
+
+/// Todas las aplicaciones .app instaladas (nombres), de las carpetas estándar de macOS.
+pub fn installed_apps() -> Vec<String> {
+    let mut names = Vec::new();
+    let mut dirs = vec![
+        "/Applications".to_string(),
+        "/Applications/Utilities".to_string(),
+        "/System/Applications".to_string(),
+        "/System/Applications/Utilities".to_string(),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(format!("{home}/Applications"));
+    }
+    for dir in dirs {
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().to_string();
+                if let Some(stem) = n.strip_suffix(".app") {
+                    names.push(stem.to_string());
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Herramientas de línea de comandos que Ariel ha instalado (Homebrew / local) y que AION puede usar
+/// con el terminal. Se centra en los bins de usuario (lo "extra"), no en los del sistema.
+pub fn installed_tools() -> Vec<String> {
+    let mut tools = Vec::new();
+    for dir in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().to_string();
+                if !n.starts_with('.') {
+                    tools.push(n);
+                }
+            }
+        }
+    }
+    tools.sort();
+    tools.dedup();
+    tools
+}
+
+/// **Detecta lo que Ariel ha INSTALADO desde la última vez** (apps o herramientas nuevas), comparando
+/// con una instantánea guardada. Primera vez: guarda y no reporta nada. Devuelve las novedades.
+pub fn detect_new_installs() -> Vec<String> {
+    let snap_path = crate::app_data_dir().join("inventory_snapshot.json");
+    let current: std::collections::BTreeSet<String> = installed_apps()
+        .into_iter()
+        .map(|a| format!("app:{a}"))
+        .chain(installed_tools().into_iter().map(|t| format!("tool:{t}")))
+        .collect();
+
+    let previous: std::collections::BTreeSet<String> = std::fs::read_to_string(&snap_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    // Guarda el estado actual (siempre).
+    if let Ok(s) = serde_json::to_string(&current) {
+        crate::write_atomic(&snap_path, &s);
+    }
+    // Primera vez (sin instantánea previa): no reportar todo como "nuevo".
+    if previous.is_empty() {
+        return Vec::new();
+    }
+    current
+        .difference(&previous)
+        .map(|s| {
+            let (kind, name) = s.split_once(':').unwrap_or(("", s.as_str()));
+            match kind {
+                "app" => format!("app «{name}»"),
+                "tool" => format!("herramienta «{name}»"),
+                _ => name.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// ¿Ariel pregunta por lo que tiene INSTALADO / qué puede usar AION?
+pub fn is_inventory_query(prompt: &str) -> bool {
+    let p = prompt.to_lowercase();
+    const CUES: &[&str] = &[
+        "apps instaladas",
+        "aplicaciones instaladas",
+        "qué tengo instalado",
+        "que tengo instalado",
+        "qué hay instalado",
+        "que hay instalado",
+        "qué programas tengo",
+        "que programas tengo",
+        "qué herramientas",
+        "que herramientas",
+        "qué puedes usar",
+        "que puedes usar",
+        "qué puedes ocupar",
+        "que puedes ocupar",
+        "todas las aplicaciones",
+        "todas las apps",
+        "qué tienes a tu disposición",
+        "que tienes a tu disposicion",
+    ];
+    CUES.iter().any(|c| p.contains(c))
+}
+
+/// Contexto para el prompt: el inventario real (apps + herramientas), acotado.
+pub fn inventory_note(apps: &[String], tools: &[String]) -> String {
+    let app_list = apps.iter().take(60).cloned().collect::<Vec<_>>().join(", ");
+    let tool_list = tools
+        .iter()
+        .take(60)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "LO QUE HAY INSTALADO EN EL MAC (real, responde desde esto):\n\
+         Aplicaciones ({}): {}{}.\n\
+         Herramientas de terminal que puedes usar ({}): {}{}.",
+        apps.len(),
+        app_list,
+        if apps.len() > 60 { ", …" } else { "" },
+        tools.len(),
+        tool_list,
+        if tools.len() > 60 { ", …" } else { "" },
+    )
+}
+
 // ── ACTUACIÓN (Anillo 2): abrir/enfocar una app ──────────────────────────────
 // Reversible y de bajo riesgo. Cuando Ariel lo PIDE por el chat, su orden directa ES el
 // human-in-the-loop (no hace falta volver a preguntar); queda auditado. Si fuera AION por su

@@ -235,6 +235,28 @@ pub async fn sense_environment_once() -> (bool, String) {
         "percepcion",
         &summary,
     ));
+
+    // 🧰 ¿Ariel instaló algo nuevo que AION pueda usar? Si sí, lo NOTA (corriente + memoria) para
+    // estar siempre al día de su caja de herramientas.
+    let nuevos = crate::computer::detect_new_installs();
+    if !nuevos.is_empty() {
+        let aviso = format!(
+            "Ariel instaló algo nuevo que puedo usar: {}",
+            nuevos.join(", ")
+        );
+        crate::workspace::publish(crate::workspace::StreamEvent::now(
+            "vida",
+            "pensamiento",
+            &aviso,
+        ));
+        if let Ok(mem) = crate::shared_memory() {
+            let _ = mem
+                .store_with_origin(&format!("[entorno] {aviso}"), "entorno", 0.6)
+                .await;
+        }
+        return (true, format!("{summary}. {aviso}"));
+    }
+
     (true, summary)
 }
 
