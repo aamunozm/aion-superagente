@@ -533,6 +533,8 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/senses", get(senses_snapshot))
         .route("/api/permits", get(permits_list))
         .route("/api/permits/respond", post(permits_respond))
+        .route("/api/faces", get(faces_list))
+        .route("/api/faces/name", post(faces_name))
         .route("/api/memory/remember", post(memory_remember))
         .route("/api/memory/forget", post(memory_forget))
         .route("/api/memory/sleep", post(memory_sleep))
@@ -3982,6 +3984,22 @@ async fn memory_stats() -> Json<serde_json::Value> {
 /// 🖐️ PERMISOS HITL: lo que AION ha pedido hacer por su cuenta y espera tu OK (o ya está resuelto).
 async fn permits_list() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "permits": crate::permits::list() }))
+}
+
+/// 🙂 PERSONAS reconocidas (sin biometría: solo nombre/etiqueta y contadores).
+async fn faces_list() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "people": crate::faces::list() }))
+}
+
+#[derive(Deserialize)]
+struct FaceNameBody {
+    id: String,
+    name: String,
+}
+
+/// Ariel le pone nombre a una persona detectada ("Persona N" → "Mamá", etc.).
+async fn faces_name(Json(b): Json<FaceNameBody>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "ok": crate::faces::name_person(&b.id, &b.name) }))
 }
 
 #[derive(Deserialize)]

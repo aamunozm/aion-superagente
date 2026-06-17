@@ -41,6 +41,8 @@ pub enum Capability {
     NetworkConnect,
     /// Controlar el computador y sus apps (Accessibility/teclado/ratón). Anillo 2, sensible.
     Computer,
+    /// Encender la CÁMARA (reconocimiento facial). Sensible: biometría → siempre con permiso.
+    Camera,
     /// Bluetooth/BLE. Anillo 3, sensible.
     Bluetooth,
     /// USB. Anillo 3, sensible.
@@ -60,6 +62,7 @@ impl Capability {
             Capability::ComputerRead => "computer.read",
             Capability::NetworkConnect => "network.connect",
             Capability::Computer => "computer",
+            Capability::Camera => "camera",
             Capability::Bluetooth => "bluetooth",
             Capability::Usb => "usb",
             Capability::Shell => "shell",
@@ -110,6 +113,7 @@ fn base_policy(cap: Capability) -> Decision {
         | Capability::ComputerRead => Decision::Allow,
         Capability::NetworkConnect
         | Capability::Computer
+        | Capability::Camera
         | Capability::Bluetooth
         | Capability::Usb
         | Capability::Shell => Decision::AskAriel,

@@ -21,6 +21,7 @@ mod deep_research;
 mod empathy;
 mod episodic;
 mod evals;
+mod faces;
 mod governance;
 mod graph;
 mod identity;
