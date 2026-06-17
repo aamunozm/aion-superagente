@@ -40,6 +40,7 @@ mod metacog;
 mod metacog_eval;
 mod ollama_runtime;
 mod onboarding;
+mod oui;
 mod pending;
 mod permits;
 mod personality;
