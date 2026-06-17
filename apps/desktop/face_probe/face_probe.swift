@@ -49,16 +49,45 @@ func crop112(_ img: CGImage) -> String? {
 final class Grabber: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     let sem = DispatchSemaphore(value: 0)
     var image: CGImage?
+    var seen = 0
     private var done = false
+    // Descartamos los primeros frames: una webcam recién encendida entrega frames de WARM-UP
+    // (negros/oscuros, autoexposición sin asentar) donde Vision no detecta ninguna cara.
+    private let warmup = 8
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         if done { return }
+        seen += 1
+        if seen < warmup { return }
         guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let ci = CIImage(cvPixelBuffer: pb)
         if let cg = CIContext().createCGImage(ci, from: ci.extent) {
             image = cg; done = true; sem.signal()
         }
     }
+}
+
+// 0) Permiso de cámara (TCC). SIN `requestAccess` explícito, el primer uso NO muestra el diálogo
+//    de macOS de forma fiable y la sesión expira sin frame. Pedimos acceso y esperamos el veredicto;
+//    el diálogo se atribuye a AION (NSCameraUsageDescription embebido). Si ya está denegado, macOS no
+//    vuelve a preguntar → hay que activarlo a mano en Ajustes.
+switch AVCaptureDevice.authorizationStatus(for: .video) {
+case .authorized:
+    break
+case .notDetermined:
+    let psem = DispatchSemaphore(value: 0)
+    var granted = false
+    AVCaptureDevice.requestAccess(for: .video) { ok in granted = ok; psem.signal() }
+    _ = psem.wait(timeout: .now() + 45)  // espera a que Ariel acepte el diálogo
+    if !granted {
+        emit(["faces": [], "error": "permiso de cámara no concedido (acéptalo en el diálogo, o en Ajustes del Sistema → Privacidad y seguridad → Cámara → AION)"])
+        exit(0)
+    }
+case .denied, .restricted:
+    emit(["faces": [], "error": "permiso de cámara DENEGADO. Actívalo en Ajustes del Sistema → Privacidad y seguridad → Cámara → AION, y reintenta."])
+    exit(0)
+@unknown default:
+    break
 }
 
 // 1) Capturar un frame.
@@ -69,6 +98,7 @@ guard let device = AVCaptureDevice.default(for: .video),
       session.canAddInput(input) else {
     emit(["faces": [], "error": "sin cámara o sin acceso"]); exit(0)
 }
+let camName = device.localizedName
 session.addInput(input)
 let out = AVCaptureVideoDataOutput()
 out.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
@@ -77,10 +107,11 @@ out.setSampleBufferDelegate(grab, queue: DispatchQueue(label: "aion.face.cap"))
 guard session.canAddOutput(out) else { emit(["faces": [], "error": "sin salida"]); exit(0) }
 session.addOutput(out)
 session.startRunning()
-let got = grab.sem.wait(timeout: .now() + 4)
+let got = grab.sem.wait(timeout: .now() + 8)  // margen para el warm-up del sensor
 session.stopRunning()
 guard got == .success, let cg = grab.image else {
-    emit(["faces": [], "error": "no llegó frame (¿permiso de cámara denegado?)"]); exit(0)
+    emit(["faces": [], "error": "no llegó frame de la cámara",
+          "diag": ["camera": camName, "frames": grab.seen]]); exit(0)
 }
 
 // 2) Detectar rostros y, por cada uno, generar el faceprint.
@@ -115,5 +146,7 @@ for obs in (faceReq.results ?? []) {
     if let c = crop112(faceCG) { face["crop112"] = c }
     faces.append(face)
 }
-emit(["faces": faces, "error": NSNull()])
+emit(["faces": faces, "error": NSNull(),
+      "diag": ["camera": camName, "frames": grab.seen,
+               "frame": ["w": cg.width, "h": cg.height]]])
 exit(0)
