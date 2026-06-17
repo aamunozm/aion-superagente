@@ -531,6 +531,8 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/crew", post(crew))
         .route("/api/memory", get(memory_stats))
         .route("/api/senses", get(senses_snapshot))
+        .route("/api/permits", get(permits_list))
+        .route("/api/permits/respond", post(permits_respond))
         .route("/api/memory/remember", post(memory_remember))
         .route("/api/memory/forget", post(memory_forget))
         .route("/api/memory/sleep", post(memory_sleep))
@@ -3956,6 +3958,28 @@ async fn memory_stats() -> Json<serde_json::Value> {
         Ok(m) => Json(serde_json::json!({ "count": m.len(), "path": memory_path() })),
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
+}
+
+/// 🖐️ PERMISOS HITL: lo que AION ha pedido hacer por su cuenta y espera tu OK (o ya está resuelto).
+async fn permits_list() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "permits": crate::permits::list() }))
+}
+
+#[derive(Deserialize)]
+struct PermitRespondBody {
+    id: String,
+    approve: bool,
+}
+
+/// Ariel aprueba o deniega un permiso. Al APROBAR, AION lo ejecuta al instante (no espera al tick).
+async fn permits_respond(Json(b): Json<PermitRespondBody>) -> Json<serde_json::Value> {
+    let changed = crate::permits::respond(&b.id, b.approve);
+    if changed && b.approve {
+        tokio::spawn(async {
+            crate::permits::execute_approved().await;
+        });
+    }
+    Json(serde_json::json!({ "ok": changed }))
 }
 
 /// 👁️ SENTIDOS (Anillo 3, solo lectura): qué dispositivos percibe AION en la red local (mDNS) y

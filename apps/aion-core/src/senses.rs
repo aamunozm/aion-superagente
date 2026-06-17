@@ -61,6 +61,7 @@ pub fn discover_network(window_secs: u64) -> Vec<NetDevice> {
         return Vec::new();
     }
     let Ok(daemon) = mdns_sd::ServiceDaemon::new() else {
+        tracing::warn!("senses: no pude iniciar el daemon mDNS (descubrimiento de red omitido)");
         return Vec::new();
     };
     let receivers: Vec<_> = SERVICE_TYPES
@@ -116,6 +117,7 @@ pub fn list_usb() -> Vec<UsbDevice> {
         return Vec::new();
     }
     let Ok(iter) = nusb::list_devices().wait() else {
+        tracing::warn!("senses: no pude enumerar USB (nusb falló)");
         return Vec::new();
     };
     let mut out: Vec<UsbDevice> = iter
@@ -267,5 +269,21 @@ mod tests {
     fn short_name_recorta_el_instance() {
         assert_eq!(short_name("Mi-Mac._ssh._tcp.local."), "Mi-Mac");
         assert_eq!(short_name("simple"), "simple");
+    }
+
+    #[test]
+    fn is_senses_query_detecta_red_y_no_otras() {
+        assert!(is_senses_query("¿qué ves en mi red local?"));
+        assert!(is_senses_query("escanea la red por favor"));
+        assert!(is_senses_query("¿qué dispositivos hay?"));
+        assert!(!is_senses_query("cuéntame un chiste"));
+        assert!(!is_senses_query("¿cómo estás hoy?"));
+    }
+
+    #[test]
+    fn service_label_traduce_los_comunes() {
+        assert_eq!(service_label("_ssh._tcp.local."), "SSH");
+        assert_eq!(service_label("_airplay._tcp.local."), "AirPlay");
+        assert_eq!(service_label("_googlecast._tcp.local."), "Chromecast");
     }
 }

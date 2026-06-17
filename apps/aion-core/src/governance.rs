@@ -175,6 +175,35 @@ pub fn request(cap: Capability, action: &str) -> Decision {
     decision
 }
 
+/// **Puerta para acciones AUTÓNOMAS sensibles con HITL diferido.** Como `request`, pero cuando la
+/// política es AskAriel, en vez de solo avisar, ENCOLA un permiso pendiente (`permits`) que Ariel
+/// podrá aprobar y entonces AION ejecutará. `kind`+`payload` permiten re-ejecutar la acción luego.
+/// Devuelve el veredicto: Allow → ejecuta ya; AskAriel → queda pendiente de tu OK; Deny → bloqueado.
+pub fn request_permit(cap: Capability, kind: &str, payload: &str, action: &str) -> Decision {
+    let decision = base_policy(cap);
+    match decision {
+        Decision::Allow => {
+            if !within_rate(cap) {
+                audit(cap, "deny:circuit-breaker", action);
+                return Decision::Deny;
+            }
+            audit(cap, "allow", action);
+        }
+        Decision::Deny => audit(cap, "deny", action),
+        Decision::AskAriel => {
+            audit(cap, "ask:permit", action);
+            let id = crate::permits::request(cap.as_str(), kind, payload, action);
+            if let Ok(ibx) = crate::inbox::Inbox::open(crate::inbox_path()) {
+                let _ = ibx.push(
+                    "permiso",
+                    &format!("¿Me autorizas a {action}? Apruébalo y lo hago. (permiso {id})"),
+                );
+            }
+        }
+    }
+    decision
+}
+
 /// Registra una acción AUTORIZADA por orden directa de Ariel (no autónoma → su petición ES el
 /// human-in-the-loop, no se vuelve a preguntar). Deja traza en la auditoría como toda acción.
 pub fn note_user_action(cap: Capability, action: &str, ok: bool) {
