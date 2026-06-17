@@ -65,6 +65,57 @@ func jpegBase64(_ cg: CGImage, maxDim: Int = 260) -> String? {
     return data.base64EncodedString()
 }
 
+// Transformación de SIMILITUD (escala + rotación + traslación) que mapea src→dst por mínimos
+// cuadrados (Procrustes 2D, forma cerrada). Es lo que alinea la cara a la plantilla de ArcFace.
+func similarityTransform(_ src: [CGPoint], _ dst: [CGPoint]) -> CGAffineTransform? {
+    let n = CGFloat(src.count)
+    guard src.count >= 2, src.count == dst.count else { return nil }
+    var msx: CGFloat = 0, msy: CGFloat = 0, mdx: CGFloat = 0, mdy: CGFloat = 0
+    for i in 0..<src.count { msx += src[i].x; msy += src[i].y; mdx += dst[i].x; mdy += dst[i].y }
+    msx /= n; msy /= n; mdx /= n; mdy /= n
+    var sxx: CGFloat = 0, a: CGFloat = 0, b: CGFloat = 0
+    for i in 0..<src.count {
+        let sx = src[i].x - msx, sy = src[i].y - msy
+        let dx = dst[i].x - mdx, dy = dst[i].y - mdy
+        sxx += sx * sx + sy * sy
+        a += sx * dx + sy * dy
+        b += sx * dy - sy * dx
+    }
+    guard sxx > 1e-6 else { return nil }
+    let c = a / sxx, s = b / sxx // c = escala·cosθ, s = escala·sinθ
+    let tx = mdx - (c * msx - s * msy)
+    let ty = mdy - (s * msx + c * msy)
+    return CGAffineTransform(a: c, b: s, c: -s, d: c, tx: tx, ty: ty)
+}
+
+// Aplica la transformación al frame y produce la cara alineada 112×112. Devuelve los bytes RGB
+// (base64, lo que come ArcFace vía crop112) y un JPEG del recorte alineado (para verificación).
+func alignedFace(_ cg: CGImage, _ W: CGFloat, _ H: CGFloat, _ t: CGAffineTransform)
+    -> (rgb: String, jpeg: String?)?
+{
+    let n = 112
+    let space = CGColorSpaceCreateDeviceRGB()
+    guard let ctx = CGContext(data: nil, width: n, height: n, bitsPerComponent: 8,
+                              bytesPerRow: n * 4, space: space,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    ctx.interpolationQuality = .high
+    ctx.concatenate(t) // coords de imagen (origen abajo-izq) → lienzo 112 (origen abajo-izq)
+    ctx.draw(cg, in: CGRect(x: 0, y: 0, width: W, height: H))
+    guard let px = ctx.data else { return nil }
+    let p = px.bindMemory(to: UInt8.self, capacity: n * n * 4)
+    var rgb = Data(count: n * n * 3)
+    rgb.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
+        let out = raw.bindMemory(to: UInt8.self)
+        for i in 0..<(n * n) {
+            out[i * 3 + 0] = p[i * 4 + 0]
+            out[i * 3 + 1] = p[i * 4 + 1]
+            out[i * 3 + 2] = p[i * 4 + 2]
+        }
+    }
+    let jpeg = ctx.makeImage().flatMap { jpegBase64($0, maxDim: 112) }
+    return (rgb.base64EncodedString(), jpeg)
+}
+
 final class Grabber: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     let sem = DispatchSemaphore(value: 0)
     var image: CGImage?
@@ -133,38 +184,90 @@ guard got == .success, let cg = grab.image else {
           "diag": ["camera": camName, "frames": grab.seen]]); exit(0)
 }
 
-// 2) Detectar rostros y, por cada uno, generar el faceprint.
+// 2) Detectar rostros + LANDMARKS, ALINEAR cada cara a la plantilla de ArcFace, y generar faceprint.
 let W = CGFloat(cg.width), H = CGFloat(cg.height)
 let handler = VNImageRequestHandler(cgImage: cg, options: [:])
-let faceReq = VNDetectFaceRectanglesRequest()
+let faceReq = VNDetectFaceLandmarksRequest()
 try? handler.perform([faceReq])
 
+// Puntos canónicos de InsightFace/ArcFace en 112×112 (origen ARRIBA-izq), convertidos a sistema
+// ABAJO-izquierda (el nativo de Vision y CGContext): y' = 112 − y. Orden: ojo-izq-imagen,
+// ojo-der-imagen, nariz, comisura-izq, comisura-der.
+let dstBL: [CGPoint] = [
+    CGPoint(x: 38.2946, y: 112 - 51.6963),
+    CGPoint(x: 73.5318, y: 112 - 51.5014),
+    CGPoint(x: 56.0252, y: 112 - 71.7366),
+    CGPoint(x: 41.5493, y: 112 - 92.3655),
+    CGPoint(x: 70.7299, y: 112 - 92.2041),
+]
+
 var faces: [[String: Any]] = []
+var alignedPreview: String? = nil
 for obs in (faceReq.results ?? []) {
     let bb = obs.boundingBox  // normalizado, origen abajo-izquierda
     let rx = bb.origin.x * W
     let ry = (1 - bb.origin.y - bb.height) * H
     let rw = bb.width * W
     let rh = bb.height * H
-    let rect = CGRect(x: rx, y: ry, width: rw, height: rh).integral
-    guard rw > 20, rh > 20, let faceCG = cg.cropping(to: rect) else { continue }
+    guard rw > 20, rh > 20,
+          let faceCG = cg.cropping(to: CGRect(x: rx, y: ry, width: rw, height: rh).integral)
+    else { continue }
 
+    // Featureprint genérico de Vision (fallback si faltara el modelo ArcFace) — se mantiene.
+    var emb = [Float]()
     let fpHandler = VNImageRequestHandler(cgImage: faceCG, options: [:])
     let fpReq = VNGenerateImageFeaturePrintRequest()
     try? fpHandler.perform([fpReq])
-    guard let fp = fpReq.results?.first as? VNFeaturePrintObservation else { continue }
-
-    var emb = [Float](repeating: 0, count: fp.elementCount)
-    if fp.elementType == .float {
+    if let fp = fpReq.results?.first as? VNFeaturePrintObservation, fp.elementType == .float {
+        emb = [Float](repeating: 0, count: fp.elementCount)
         fp.data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             let p = raw.bindMemory(to: Float.self)
             for i in 0..<min(fp.elementCount, p.count) { emb[i] = p[i] }
         }
     }
     var face: [String: Any] = ["embedding": emb, "bbox": [Double(rx), Double(ry), Double(rw), Double(rh)]]
-    if let c = crop112(faceCG) { face["crop112"] = c }
-    // Foto para MOSTRAR en el chat: recorte de la cara con un margen (más natural que la caja
-    // justa), redimensionado y en JPEG. Acotado a la imagen para no salirse de los bordes.
+
+    // Punto normalizado de un landmark (relativo al bbox, origen abajo-izq) → píxel en sistema
+    // ABAJO-izquierda de la imagen.
+    func toPx(_ nx: CGFloat, _ ny: CGFloat) -> CGPoint {
+        CGPoint(x: (bb.origin.x + nx * bb.width) * W, y: (bb.origin.y + ny * bb.height) * H)
+    }
+    func mean(_ r: VNFaceLandmarkRegion2D?) -> CGPoint? {
+        guard let r = r, r.pointCount > 0 else { return nil }
+        var sx: CGFloat = 0, sy: CGFloat = 0
+        for p in r.normalizedPoints { sx += CGFloat(p.x); sy += CGFloat(p.y) }
+        return toPx(sx / CGFloat(r.pointCount), sy / CGFloat(r.pointCount))
+    }
+    func corners(_ r: VNFaceLandmarkRegion2D?) -> (CGPoint, CGPoint)? {
+        guard let r = r, r.pointCount >= 2 else { return nil }
+        let pts = r.normalizedPoints.map { toPx(CGFloat($0.x), CGFloat($0.y)) }
+        guard let lo = pts.min(by: { $0.x < $1.x }), let hi = pts.max(by: { $0.x < $1.x })
+        else { return nil }
+        return (lo, hi)
+    }
+
+    // crop112 ALINEADO por landmarks (lo que de verdad reconoce, robusto al ángulo).
+    var aligned = false
+    if let lm = obs.landmarks,
+       let eyeA = mean(lm.leftEye), let eyeB = mean(lm.rightEye),
+       let nose = mean(lm.nose), let mouth = corners(lm.outerLips ?? lm.innerLips) {
+        // Mapeo por POSICIÓN en la imagen (no por nombre anatómico) → evita el lío izq/der.
+        let eyeL = eyeA.x <= eyeB.x ? eyeA : eyeB
+        let eyeR = eyeA.x <= eyeB.x ? eyeB : eyeA
+        let src = [eyeL, eyeR, nose, mouth.0, mouth.1]
+        if let t = similarityTransform(src, dstBL), let af = alignedFace(cg, W, H, t) {
+            face["crop112"] = af.rgb
+            if alignedPreview == nil { alignedPreview = af.jpeg }
+            aligned = true
+        }
+    }
+    if !aligned {
+        // Cara muy ladeada/parcial sin landmarks fiables: recorte simple, mejor que nada.
+        if let c = crop112(faceCG) { face["crop112"] = c }
+    }
+    face["aligned"] = aligned
+
+    // Foto para MOSTRAR en el chat: recorte de la cara con un margen, en JPEG.
     let mx = rw * 0.35, my = rh * 0.35
     let photoRect = CGRect(x: rx - mx, y: ry - my, width: rw + 2 * mx, height: rh + 2 * my)
         .integral
@@ -173,7 +276,8 @@ for obs in (faceReq.results ?? []) {
     if let j = jpegBase64(photoCG) { face["face_jpeg"] = j }
     faces.append(face)
 }
-emit(["faces": faces, "error": NSNull(),
-      "diag": ["camera": camName, "frames": grab.seen,
-               "frame": ["w": cg.width, "h": cg.height]]])
+var diag: [String: Any] = ["camera": camName, "frames": grab.seen,
+                           "frame": ["w": cg.width, "h": cg.height]]
+if let ap = alignedPreview { diag["aligned_jpeg"] = ap }
+emit(["faces": faces, "error": NSNull(), "diag": diag])
 exit(0)

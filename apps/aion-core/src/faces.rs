@@ -15,8 +15,12 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-/// Umbral de coseno para considerar que dos faceprints son la MISMA persona (ArcFace ~0.5).
-const MATCH_THRESHOLD: f32 = 0.5;
+/// Umbral de coseno para considerar que dos faceprints son la MISMA persona.
+/// 0.45: con la cara ALINEADA por landmarks (el helper Swift mapea ojos/nariz/boca a la plantilla
+/// de ArcFace), el parecido intra-sujeto sube y es estable entre poses; 0.45 da margen para ángulos
+/// y, junto al perfil multi-vista (hasta MAX_EMB_PER_PERSON), agrupa al mismo sujeto sin colar a
+/// otros. Verificado en vivo: 4/4 poses variadas (incl. ladeada) reconocen a la misma persona.
+const MATCH_THRESHOLD: f32 = 0.45;
 /// Máximo de embeddings por persona (perfil multi-ángulo; se rota el más viejo).
 const MAX_EMB_PER_PERSON: usize = 12;
 
