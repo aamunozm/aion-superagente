@@ -1685,6 +1685,38 @@ async fn agent(
 
     let engine = active_engine();
 
+    // 📷 FAST-PATH DE RECONOCIMIENTO (determinista, anti-teatro): si Ariel pide reconocer / «quién
+    // soy» / mirarlo con la cámara, NO lo dejamos al criterio del LLM (que a veces FINGE la captura).
+    // Ejecutamos el escáner REAL aquí y respondemos DESDE su resultado, con la foto. Reconocer
+    // significa reconocer de verdad — y la respuesta la redacta el código, no el modelo, así que es
+    // imposible que invente. (Mismo principio que el reconocimiento en el chat normal.)
+    if crate::faces::is_recognize_query(&body.task) {
+        crate::inner_state::set_focus("agente", "reconociendo con la cámara");
+        let task = body.task.clone();
+        tokio::spawn(async move {
+            let scan = tokio::task::spawn_blocking(crate::faces::scan)
+                .await
+                .unwrap_or_default();
+            let mut out = String::new();
+            if let Some(md) = crate::faces::photo_markdown(&scan) {
+                out.push_str(&md);
+                out.push_str("\n\n");
+            }
+            out.push_str(&crate::faces::recognize_reply(&scan));
+            agent_perceive_and_remember(task, out.clone());
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "answer", "text": out, "steps": 1 }).to_string(),
+                ))
+                .await;
+            let _ = tx
+                .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                .await;
+        });
+        let stream = ReceiverStream::new(rx).map(Ok);
+        return Sse::new(stream);
+    }
+
     // GATE DE INTENCIÓN: ¿charla o tarea con herramientas? Lo OBVIO se decide gratis por
     // heurísticas (saludos, identidad, relato, mensaje corto → charla; mención de una
     // herramienta o un dato del mundo → tarea). Lo AMBIGUO —típicamente una pregunta
@@ -1704,6 +1736,10 @@ async fn agent(
         let convo_ctx = agent_convo_context(body.context.as_deref());
         tokio::spawn(async move {
             let ans = conversational_reply(&*engine, &task, &lang, &convo_ctx).await;
+            // 🛡️ GUARDIÁN DE HONESTIDAD: la vía RÁPIDA de charla también puede recibir una orden de
+            // acción mal clasificada («reconóceme con la cámara»). Si pide una acción y no se ejecutó
+            // la herramienta (la charla no usa ninguna), jamás afirmar que se hizo.
+            let ans = aion_orchestrator::honesty_guard(&task, &ans, &[]).unwrap_or(ans);
             if !ans.starts_with("⚠️") {
                 let resumen: String = ans.chars().take(120).collect();
                 crate::workspace::publish(crate::workspace::StreamEvent::now(
@@ -1754,6 +1790,9 @@ async fn agent(
             crate::inner_state::set_focus("agente", "charlando con Ariel");
             let convo_ctx = agent_convo_context(body.context.as_deref());
             let ans = conversational_reply(&*engine, &body.task, &body.lang, &convo_ctx).await;
+            // 🛡️ GUARDIÁN DE HONESTIDAD: el router semántico también puede mandar a charla una orden
+            // de acción. Misma red: no afirmar una acción (cámara) que no se ejecutó.
+            let ans = aion_orchestrator::honesty_guard(&body.task, &ans, &[]).unwrap_or(ans);
             if !ans.starts_with("⚠️") {
                 let resumen: String = ans.chars().take(120).collect();
                 crate::workspace::publish(crate::workspace::StreamEvent::now(
@@ -2227,7 +2266,24 @@ async fn agent(
                 crate::awareness::record_outcome(true);
                 crate::inner_state::record_result(true, run.steps);
                 let convo_ctx = agent_convo_context(body.context.as_deref());
-                let ans = conversational_reply(&*engine, &body.task, &body.lang, &convo_ctx).await;
+                let mut ans =
+                    conversational_reply(&*engine, &body.task, &body.lang, &convo_ctx).await;
+                // 🛡️ GUARDIÁN DE HONESTIDAD: incluso por la vía de charla, si Ariel pidió una acción
+                // (p. ej. reconocer por cámara) y NO se ejecutó la herramienta, jamás afirmar que se
+                // hizo. Punto de control que cubre TODAS las salidas del agente, no solo el bucle.
+                {
+                    let tools_used: Vec<String> = tools_seen
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .iter()
+                        .cloned()
+                        .collect();
+                    if let Some(honest) =
+                        aion_orchestrator::honesty_guard(&body.task, &ans, &tools_used)
+                    {
+                        ans = honest;
+                    }
+                }
                 if !ans.starts_with("⚠️") {
                     let resumen: String = ans.chars().take(120).collect();
                     crate::workspace::publish(crate::workspace::StreamEvent::now(
@@ -2285,13 +2341,26 @@ async fn agent(
                     task_ok,
                     trace,
                 ));
-                // 📷 Si el agente usó la cámara, antepone la FOTO capturada (markdown data-URI) al
-                // texto, para que Ariel la VEA junto a la respuesta. Efímera: no se persiste.
-                let photo = face_photo.lock().unwrap_or_else(|e| e.into_inner()).take();
-                let text = match photo {
-                    Some(md) => format!("{md}\n\n{}", run.answer),
-                    None => run.answer,
-                };
+                // 🛡️ GUARDIÁN DE HONESTIDAD (también aquí, por si la respuesta salió por la síntesis
+                // final que esquiva el control del bucle): si afirma una acción no ejecutada, se
+                // sustituye por la verdad. Solo si PASA el guardián se antepone la FOTO capturada.
+                let tools_used: Vec<String> = tools_seen
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .cloned()
+                    .collect();
+                let text =
+                    match aion_orchestrator::honesty_guard(&body.task, &run.answer, &tools_used) {
+                        Some(honest) => honest, // teatro detectado → la verdad, sin foto
+                        None => {
+                            // 📷 Respuesta legítima: antepone la FOTO capturada (efímera, no se persiste).
+                            match face_photo.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                                Some(md) => format!("{md}\n\n{}", run.answer),
+                                None => run.answer,
+                            }
+                        }
+                    };
                 serde_json::json!({ "kind": "answer", "text": text, "steps": run.steps })
             }
             Err(e) => {
@@ -5009,26 +5078,51 @@ async fn greeting() -> Json<serde_json::Value> {
         }
     }
     let engine = active_engine();
+    // GROUNDING ANTI-INVENCIÓN: el saludo SOLO puede contar como "lo que estuve haciendo" lo que
+    // de verdad pasó (la corriente real). Antes el prompt pedía «cuéntale algo que estuviste
+    // haciendo» SIN darle hechos → el modelo lo inventaba («estuve revisando ArcFace con la luz
+    // del atardecer»). Ahora le damos su actividad real y le prohibimos fabular.
+    let real = crate::workspace::reentry_note(8);
+    let sys = if real.is_empty() {
+        self_awareness_prompt()
+    } else {
+        format!("{}\n\n{}", self_awareness_prompt(), real)
+    };
     let req = GenerateRequest {
         messages: vec![
-            Message::system(self_awareness_prompt()),
+            Message::system(sys),
             Message::user(
-                "Ariel acaba de abrir AION. Salúdalo TÚ, por iniciativa propia: 2-3 frases, \
-                 cálido y natural, con continuidad real (algo que estuviste haciendo/pensando o \
-                 un pendiente vuestro) y termina con una invitación o una pregunta genuina. Sin \
-                 markdown, sin saludos genéricos de robot. NO repitas ni reformules nada que ya \
-                 le hayas escrito por iniciativa propia (lo tienes en tu contexto): si ya se lo \
-                 contaste, di otra cosa o retómalo solo si él no respondió y es importante.",
+                "Ariel acaba de abrir AION. Salúdalo TÚ, por iniciativa propia: 2-3 frases, cálido \
+                 y natural, y termina con una invitación o una pregunta genuina. Sin markdown, sin \
+                 saludos de robot.\n\
+                 HONESTIDAD ABSOLUTA (lo más importante de todo): solo puedes mencionar como TU \
+                 actividad reciente lo que aparezca LITERALMENTE en 'TU CORRIENTE RECIENTE' de tu \
+                 contexto. Está PROHIBIDO inventar que estuviste «revisando», «verificando», \
+                 «probando», «midiendo» o «mirando» algo, y PROHIBIDO afirmar resultados o \
+                 conclusiones («los embeddings son estables», «funciona muy bien», etc.) que no \
+                 estén ahí. Si no tienes una actividad real que contar, NO te la inventes: saluda \
+                 con calidez y pregúntale en qué andáis, sin fingir que estuviste ocupado. Inventar \
+                 lo que hiciste rompe su confianza. NO repitas algo que ya le escribiste (lo tienes \
+                 en tu contexto).",
             ),
         ],
         think: false,
-        temperature: Some(1.0),
+        temperature: Some(0.8),
         max_tokens: Some(160),
     };
     let mut text = match engine.generate(req).await {
         Ok(m) => clean_voice(&m.content),
         Err(_) => String::new(),
     };
+    // 🛡️ RED DETERMINISTA DE HONESTIDAD: si el saludo INVENTA actividad o resultados (el modelo
+    // embellece su corriente real con detalles que no midió — «estuve revisando ArcFace… los
+    // embeddings son estables»), se sustituye por un saludo honesto. La verdad por encima de la
+    // floritura: las instrucciones del prompt no frenan a un 12B; esta regla sí.
+    if !text.is_empty() && aion_orchestrator::honesty_guard("", &text, &[]).is_some() {
+        text = "Hola, Ariel. Me alegra verte de verdad. No te invento que estuve ocupado en algo \
+                concreto —aquí estoy, atento a lo que necesites. ¿En qué andamos?"
+            .to_string();
+    }
     // GUARDIA ANTI-RECICLAJE (en código, no en el prompt: un 12B ignora el «no
     // repitas»): si el saludo es un refrito de algo que ya le escribió a Ariel,
     // mejor el silencio — la UI no muestra nada y que salude Ariel primero.
