@@ -37,6 +37,8 @@ pub enum Capability {
     SensorRead,
     /// PERCIBIR el computador (qué apps están abiertas / en primer plano). Solo lectura. Anillo 2.
     ComputerRead,
+    /// Terminal del Mac en modo SOLO LECTURA (diagnóstico: arp, system_profiler…). Bajo riesgo.
+    ShellRead,
     /// Conectarse a un dispositivo de la red (SSH, API local, IoT). Anillo 3, sensible.
     NetworkConnect,
     /// Controlar el computador y sus apps (Accessibility/teclado/ratón). Anillo 2, sensible.
@@ -60,6 +62,7 @@ impl Capability {
             Capability::DeviceList => "device.list",
             Capability::SensorRead => "sensor.read",
             Capability::ComputerRead => "computer.read",
+            Capability::ShellRead => "shell.read",
             Capability::NetworkConnect => "network.connect",
             Capability::Computer => "computer",
             Capability::Camera => "camera",
@@ -110,7 +113,8 @@ fn base_policy(cap: Capability) -> Decision {
         | Capability::NetworkDiscover
         | Capability::DeviceList
         | Capability::SensorRead
-        | Capability::ComputerRead => Decision::Allow,
+        | Capability::ComputerRead
+        | Capability::ShellRead => Decision::Allow,
         Capability::NetworkConnect
         | Capability::Computer
         | Capability::Camera
@@ -130,6 +134,7 @@ fn rate_limit(cap: Capability) -> (usize, i64) {
         Capability::DeviceList => (60, 3600), // enumerar: barato, frecuente
         Capability::SensorRead => (240, 3600), // sensores: frecuente, barato
         Capability::ComputerRead => (120, 3600), // percibir apps: barato
+        Capability::ShellRead => (120, 3600), // terminal de diagnóstico: barato
         _ => (30, 3600),                   // sensibles: tope de cortesía (igual piden HITL)
     }
 }
