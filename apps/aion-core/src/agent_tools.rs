@@ -169,9 +169,10 @@ impl Tool for NetTool {
         "net_scan"
     }
     fn description(&self) -> &str {
-        "Escanea TU red local y devuelve los equipos conectados con su IP y MAC \
-         (cuántos hay y cuáles son). Úsala para «cuántos equipos hay en la red», \
-         «qué dispositivos están conectados», «sus IPs». No necesita entrada."
+        "Escanea TU red local y devuelve los equipos conectados con su IP, MAC y FABRICANTE \
+         (la marca ya viene resuelta de una base OUI local fiable; NO necesitas buscarla fuera). \
+         Úsala para «cuántos equipos hay», «qué dispositivos/marcas están conectados», «sus IPs». \
+         Lo que salga 'fabricante desconocido' es real: NO lo inventes. No necesita entrada."
     }
     async fn run(&self, _input: &str) -> Result<String, String> {
         let my_ip = local_ipv4()
@@ -282,7 +283,14 @@ impl Tool for NetTool {
                 } else {
                     format!(" — {host}")
                 };
-                format!("{ip} [{mac}]{h}{tag}")
+                // FABRICANTE resuelto de la base OUI local (fiable, offline). Si no está,
+                // "fabricante desconocido" con franqueza — NUNCA inventar.
+                let vendor = match crate::oui::vendor(mac) {
+                    Some(v) => format!(" · {v}"),
+                    None if mac == "—" => String::new(),
+                    None => " · fabricante desconocido".to_string(),
+                };
+                format!("{ip} [{mac}]{vendor}{h}{tag}")
             })
             .collect::<Vec<_>>()
             .join("\n");
