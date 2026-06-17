@@ -48,6 +48,7 @@ mod projects;
 mod prompt_store;
 mod prompts;
 mod provider;
+mod recipes;
 mod reflection;
 mod research_memory;
 mod self_model;
