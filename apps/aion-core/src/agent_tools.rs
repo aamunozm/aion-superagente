@@ -308,16 +308,52 @@ impl Tool for NetTool {
 // encadenamiento ni redirección ni verbos mutantes — para dar potencia SIN riesgo. Lo que MODIFICA
 // el sistema queda bloqueado aquí (irá detrás de HITL en una fase siguiente). Auditado.
 
-pub struct ShellTool;
+pub struct ShellTool {
+    /// HITL: callback para PEDIR confirmación a Ariel antes de un comando que MODIFICA el sistema.
+    /// None (p. ej. en el Equipo) → los comandos mutantes quedan bloqueados.
+    confirm: Option<aion_orchestrator::ConfirmFn>,
+}
 impl ShellTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(confirm: Option<aion_orchestrator::ConfirmFn>) -> Self {
+        Self { confirm }
     }
 }
-impl Default for ShellTool {
-    fn default() -> Self {
-        Self::new()
+
+/// Patrones CATASTRÓFICOS: ni con confirmación se ejecutan (defensa en profundidad).
+fn shell_is_catastrophic(cmd: &str) -> bool {
+    let norm = cmd
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if norm.contains("rm -rf ") || norm.contains("rm -fr ") {
+        let after = norm
+            .split("rm -")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().nth(1))
+            .unwrap_or("");
+        if after == "/" || after == "/*" {
+            return true;
+        }
+        for crit in [
+            "/system",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/library",
+            "/applications",
+        ] {
+            if after.starts_with(crit) {
+                return true;
+            }
+        }
     }
+    norm.contains("mkfs")
+        || norm.contains("dd of=/dev/")
+        || norm.contains(":(){")
+        || norm.contains("diskutil erasedisk")
+        || norm.contains("diskutil erasevolume")
+        || norm.contains("> /dev/disk")
 }
 
 /// Binarios de SOLO LECTURA permitidos (diagnóstico de red/sistema/archivos).
@@ -418,32 +454,62 @@ impl Tool for ShellTool {
         "shell"
     }
     fn description(&self) -> &str {
-        "Ejecuta un comando de DIAGNÓSTICO en la terminal del Mac (SOLO LECTURA: red, sistema, \
-         archivos). Úsala para investigar a fondo: arp, nmap, system_profiler, scutil, dig, ps, df, \
-         lsof, ioreg, sysctl… Entrada: el comando EXACTO, sin encadenar (nada de ; | > &). Los \
-         comandos que MODIFICAN el sistema están bloqueados aquí; si la tarea lo necesita, dilo."
+        "Ejecuta un comando en la terminal del Mac. Los de DIAGNÓSTICO (solo lectura: arp, nmap, \
+         system_profiler, scutil, dig, ps, df, lsof, ioreg, sysctl…) corren directos. Los que \
+         MODIFICAN el sistema (instalar con brew, mover/crear archivos, ajustes…) TAMBIÉN puedes \
+         ejecutarlos: AION le pide confirmación a Ariel antes y solo corre si él aprueba. Entrada: el \
+         comando EXACTO. Comandos catastróficos (borrar disco/sistema, fork bomb) están vetados."
     }
     async fn run(&self, input: &str) -> Result<String, String> {
         let cmd = input.trim();
-        if !shell_is_safe(cmd) {
+        if shell_is_safe(cmd) {
+            // SOLO LECTURA → directo (gobernanza ShellRead).
+            if !crate::governance::request(
+                crate::governance::Capability::ShellRead,
+                &format!("terminal (lectura): {cmd}"),
+            )
+            .allowed()
+            {
+                return Err("terminal en pausa (gobernanza/circuit breaker)".into());
+            }
+        } else if shell_is_catastrophic(cmd) {
+            // Ni con confirmación: destructivo.
             crate::governance::note_user_action(
                 crate::governance::Capability::Shell,
-                &format!("(bloqueado: no es solo-lectura) {cmd}"),
+                &format!("(VETADO, catastrófico) {cmd}"),
                 false,
             );
             return Err(
-                "Ese comando no es de solo lectura, o encadena/redirige. Aquí solo ejecuto \
-                        diagnóstico seguro; para algo que modifique el sistema, dímelo y lo vemos."
+                "Ese comando es destructivo (borra disco/sistema o es una fork bomb): NO lo \
+                        ejecuto ni con confirmación. Si de verdad lo necesitas, hazlo tú."
                     .into(),
             );
-        }
-        if !crate::governance::request(
-            crate::governance::Capability::ShellRead,
-            &format!("terminal (lectura): {cmd}"),
-        )
-        .allowed()
-        {
-            return Err("terminal en pausa (gobernanza/circuit breaker)".into());
+        } else if let Some(confirm) = &self.confirm {
+            // MUTANTE → human-in-the-loop: pide el OK a Ariel ANTES de ejecutar.
+            let ok = confirm(format!(
+                "AION quiere ejecutar en tu terminal un comando que MODIFICA el sistema:\n  {cmd}\n¿Lo autorizas?"
+            ))
+            .await;
+            if !ok {
+                crate::governance::note_user_action(
+                    crate::governance::Capability::Shell,
+                    &format!("(no autorizado) {cmd}"),
+                    false,
+                );
+                return Err("No lo autorizaste; no ejecuté ese comando.".into());
+            }
+            crate::governance::note_user_action(
+                crate::governance::Capability::Shell,
+                &format!("(autorizado por ti) {cmd}"),
+                true,
+            );
+        } else {
+            // Sin canal de confirmación (p. ej. Equipo) → bloqueado.
+            return Err(
+                "Ese comando modifica el sistema y aquí no puedo pedirte confirmación; en \
+                        este modo solo ejecuto diagnóstico de lectura."
+                    .into(),
+            );
         }
         let res = tokio::time::timeout(
             std::time::Duration::from_secs(20),
@@ -2183,6 +2249,19 @@ impl Tool for SkillInvokeTool {
 #[cfg(test)]
 mod shell_safety_tests {
     use super::shell_is_safe;
+    #[test]
+    fn catastroficos_vetados() {
+        use super::shell_is_catastrophic;
+        assert!(shell_is_catastrophic("rm -rf /"));
+        assert!(shell_is_catastrophic("rm -rf /System/Library"));
+        assert!(shell_is_catastrophic("sudo dd of=/dev/disk0 if=/dev/zero"));
+        assert!(shell_is_catastrophic(":(){ :|:& };:"));
+        assert!(shell_is_catastrophic("diskutil erasedisk JHFS+ x disk2"));
+        // NO catastrófico: borrar algo del usuario (irá por HITL, no veto)
+        assert!(!shell_is_catastrophic("rm -rf /Users/ariel/tmp/basura"));
+        assert!(!shell_is_catastrophic("brew install jq"));
+    }
+
     #[test]
     fn permite_lectura_bloquea_peligroso() {
         // lectura/diagnóstico → permitido
