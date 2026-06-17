@@ -21,6 +21,7 @@ mod deep_research;
 mod empathy;
 mod episodic;
 mod evals;
+mod faces;
 mod governance;
 mod graph;
 mod identity;
@@ -40,6 +41,7 @@ mod metacog_eval;
 mod ollama_runtime;
 mod onboarding;
 mod pending;
+mod permits;
 mod personality;
 mod plan;
 mod projects;
@@ -2213,6 +2215,10 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
         }
     }
 
+    // 0.5) 🖐️ PERMISOS APROBADOS: si Ariel aprobó algo que AION pidió hacer, lo EJECUTA ahora.
+    //      (También se ejecuta al instante desde el endpoint de aprobación; esto es el backstop.)
+    crate::permits::execute_approved().await;
+
     // 1) DEUDAS PRIMERO: lo que Ariel espera pesa más que lo que a AION le intriga.
     if let Some(p) = crate::pending::next_due() {
         inner_state::set_focus("vida", "resolviendo algo que le debo a Ariel");
@@ -2245,6 +2251,7 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
         "investigar",
         "investigar-profundo",
         "percibir",
+        "proponer-accion",
         "comprender",
         "proponer",
         "proyecto",
@@ -2269,6 +2276,7 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
             "investigar" => "investigando algo que me intriga",
             "investigar-profundo" => "investigando a fondo un tema que me importa",
             "percibir" => "mirando a mi alrededor: red y dispositivos",
+            "proponer-accion" => "pensando si ofrecerte hacer algo útil",
             "comprender" => "consolidando lo que sé",
             "proponer" => "pensando cómo mejorar",
             "proyecto" => "avanzando un proyecto de Ariel",
@@ -2282,6 +2290,7 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
         "investigar" => research_once(engine).await,
         "investigar-profundo" => deep_dive_once(engine).await,
         "percibir" => crate::senses::sense_environment_once().await,
+        "proponer-accion" => propose_action_once(engine).await,
         "comprender" => synthesize_once(engine).await,
         "proponer" => propose_improvement_once(engine).await,
         "proyecto" => work_project_once(engine).await,
@@ -2515,6 +2524,63 @@ async fn deep_dive_once(engine: &OllamaEngine) -> (bool, String) {
     (
         true,
         format!("investigué a fondo «{topic}» y lo guardé en mi memoria de estudios"),
+    )
+}
+
+/// `proponer-accion`: por iniciativa propia, AION valora si hay UNA app útil que ofrecer abrir para
+/// Ariel. Si la hay, NO la abre: pide permiso (queda pendiente de tu OK por la Bandeja, y al
+/// aprobarlo la ejecuta). Conservador: por defecto NO propone nada (el silencio es la regla).
+async fn propose_action_once(engine: &OllamaEngine) -> (bool, String) {
+    let apps = crate::computer::list_apps();
+    let abiertas: Vec<String> = apps.iter().map(|a| a.name.clone()).collect();
+    let prompt = format!(
+        "Apps abiertas ahora en el Mac de Ariel: {}.\n\nPiensa si hay UNA app concreta que te \
+         gustaría OFRECER abrirle a Ariel (algo útil dado lo que suele hacer). Si no hay un motivo \
+         claro, responde solo: NADA. Si sí, responde SOLO el nombre exacto de la app, nada más.",
+        if abiertas.is_empty() {
+            "(no percibo ninguna)".into()
+        } else {
+            abiertas.join(", ")
+        }
+    );
+    let name = match engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.6),
+            max_tokens: Some(16),
+        })
+        .await
+    {
+        Ok(m) => m.content.trim().trim_matches('"').to_string(),
+        Err(_) => return (true, "no propuse nada (no pude pensarlo)".into()),
+    };
+    if name.is_empty() || name.to_lowercase().contains("nada") {
+        return (
+            true,
+            "miré si ofrecer algo y, por ahora, nada que aporte".into(),
+        );
+    }
+    // Debe ser una app conocida y no estar ya abierta (si no, no aporta).
+    let Some(app) = crate::computer::match_open_command(&format!("abre {name}")) else {
+        return (
+            true,
+            format!("pensé en «{name}» pero no la reconocí como app"),
+        );
+    };
+    if abiertas.iter().any(|a| a.eq_ignore_ascii_case(&app)) {
+        return (true, format!("«{app}» ya está abierta; no propongo nada"));
+    }
+    // Pide permiso (HITL diferido): queda pendiente del OK de Ariel; al aprobar, se ejecuta.
+    crate::governance::request_permit(
+        crate::governance::Capability::Computer,
+        "open_app",
+        &app,
+        &format!("abrir «{app}» para ti"),
+    );
+    (
+        true,
+        format!("te propuse abrir «{app}» — espera tu OK en la Bandeja"),
     )
 }
 

@@ -193,3 +193,17 @@ pub fn grounding_note(apps: &[AppInfo]) -> String {
         nombres.join(", ")
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_apps_query_detecta_apps_y_no_otras() {
+        assert!(is_apps_query("¿qué apps tengo abiertas?"));
+        assert!(is_apps_query("¿qué aplicaciones abiertas hay ahora?"));
+        assert!(is_apps_query("¿qué tengo abierto?"));
+        assert!(!is_apps_query("¿qué tiempo hace hoy?"));
+        assert!(!is_apps_query("abre spotify"));
+    }
+}

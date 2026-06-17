@@ -41,6 +41,8 @@ pub enum Capability {
     NetworkConnect,
     /// Controlar el computador y sus apps (Accessibility/teclado/ratón). Anillo 2, sensible.
     Computer,
+    /// Encender la CÁMARA (reconocimiento facial). Sensible: biometría → siempre con permiso.
+    Camera,
     /// Bluetooth/BLE. Anillo 3, sensible.
     Bluetooth,
     /// USB. Anillo 3, sensible.
@@ -60,6 +62,7 @@ impl Capability {
             Capability::ComputerRead => "computer.read",
             Capability::NetworkConnect => "network.connect",
             Capability::Computer => "computer",
+            Capability::Camera => "camera",
             Capability::Bluetooth => "bluetooth",
             Capability::Usb => "usb",
             Capability::Shell => "shell",
@@ -110,6 +113,7 @@ fn base_policy(cap: Capability) -> Decision {
         | Capability::ComputerRead => Decision::Allow,
         Capability::NetworkConnect
         | Capability::Computer
+        | Capability::Camera
         | Capability::Bluetooth
         | Capability::Usb
         | Capability::Shell => Decision::AskAriel,
@@ -170,6 +174,35 @@ pub fn request(cap: Capability, action: &str) -> Decision {
                 "permiso",
                 &format!("¿Me autorizas a {action}? (capacidad: {})", cap.as_str()),
             );
+        }
+    }
+    decision
+}
+
+/// **Puerta para acciones AUTÓNOMAS sensibles con HITL diferido.** Como `request`, pero cuando la
+/// política es AskAriel, en vez de solo avisar, ENCOLA un permiso pendiente (`permits`) que Ariel
+/// podrá aprobar y entonces AION ejecutará. `kind`+`payload` permiten re-ejecutar la acción luego.
+/// Devuelve el veredicto: Allow → ejecuta ya; AskAriel → queda pendiente de tu OK; Deny → bloqueado.
+pub fn request_permit(cap: Capability, kind: &str, payload: &str, action: &str) -> Decision {
+    let decision = base_policy(cap);
+    match decision {
+        Decision::Allow => {
+            if !within_rate(cap) {
+                audit(cap, "deny:circuit-breaker", action);
+                return Decision::Deny;
+            }
+            audit(cap, "allow", action);
+        }
+        Decision::Deny => audit(cap, "deny", action),
+        Decision::AskAriel => {
+            audit(cap, "ask:permit", action);
+            let id = crate::permits::request(cap.as_str(), kind, payload, action);
+            if let Ok(ibx) = crate::inbox::Inbox::open(crate::inbox_path()) {
+                let _ = ibx.push(
+                    "permiso",
+                    &format!("¿Me autorizas a {action}? Apruébalo y lo hago. (permiso {id})"),
+                );
+            }
         }
     }
     decision
