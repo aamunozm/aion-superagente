@@ -1937,7 +1937,6 @@ async fn agent(
         // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
-        tools.register(Arc::new(crate::agent_tools::ShellTool::new()));
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
         tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
         tools.register(Arc::new(crate::agent_tools::GraphSearchTool::new()));
@@ -2132,6 +2131,10 @@ async fn agent(
             let tx = confirm_tx.clone();
             Box::pin(async move { request_confirmation(&tx, desc).await })
         });
+        // Terminal CON confirmación: comandos mutantes pasan por HITL (confirm).
+        tools.register(Arc::new(crate::agent_tools::ShellTool::new(Some(
+            confirm.clone(),
+        ))));
         // El agente puede PREGUNTARTE un dato (pausa la tarea y espera tu respuesta).
         let ask_tx = tx.clone();
         let ask: aion_orchestrator::AskFn = std::sync::Arc::new(move |q: String| {
@@ -2325,7 +2328,7 @@ async fn crew(
         // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
-        tools.register(Arc::new(crate::agent_tools::ShellTool::new()));
+        tools.register(Arc::new(crate::agent_tools::ShellTool::new(None)));
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
         tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
         tools.register(Arc::new(crate::agent_tools::GraphSearchTool::new()));
