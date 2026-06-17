@@ -48,6 +48,7 @@ mod provider;
 mod reflection;
 mod research_memory;
 mod self_model;
+mod senses;
 mod sensors;
 mod serve;
 mod skill_store;
@@ -2242,6 +2243,7 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
         "estudiar",
         "investigar",
         "investigar-profundo",
+        "percibir",
         "comprender",
         "proponer",
         "proyecto",
@@ -2265,6 +2267,7 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
         match goal.as_str() {
             "investigar" => "investigando algo que me intriga",
             "investigar-profundo" => "investigando a fondo un tema que me importa",
+            "percibir" => "mirando a mi alrededor: red y dispositivos",
             "comprender" => "consolidando lo que sé",
             "proponer" => "pensando cómo mejorar",
             "proyecto" => "avanzando un proyecto de Ariel",
@@ -2277,6 +2280,7 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
     let (ok, detail) = match goal.as_str() {
         "investigar" => research_once(engine).await,
         "investigar-profundo" => deep_dive_once(engine).await,
+        "percibir" => crate::senses::sense_environment_once().await,
         "comprender" => synthesize_once(engine).await,
         "proponer" => propose_improvement_once(engine).await,
         "proyecto" => work_project_once(engine).await,

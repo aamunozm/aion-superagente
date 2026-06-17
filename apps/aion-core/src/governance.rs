@@ -31,6 +31,8 @@ pub enum Capability {
     DeepResearch,
     /// Descubrir dispositivos/servicios en la red local (solo lectura). Anillo 3.
     NetworkDiscover,
+    /// Enumerar dispositivos conectados (USB/BLE: listar ids y nombres, sin abrirlos). Solo lectura.
+    DeviceList,
     /// Leer sensores del host (batería, térmica, etc.). Bajo riesgo.
     SensorRead,
     /// Conectarse a un dispositivo de la red (SSH, API local, IoT). Anillo 3, sensible.
@@ -51,6 +53,7 @@ impl Capability {
             Capability::Research => "research",
             Capability::DeepResearch => "research.deep",
             Capability::NetworkDiscover => "network.discover",
+            Capability::DeviceList => "device.list",
             Capability::SensorRead => "sensor.read",
             Capability::NetworkConnect => "network.connect",
             Capability::Computer => "computer",
@@ -99,6 +102,7 @@ fn base_policy(cap: Capability) -> Decision {
         Capability::Research
         | Capability::DeepResearch
         | Capability::NetworkDiscover
+        | Capability::DeviceList
         | Capability::SensorRead => Decision::Allow,
         Capability::NetworkConnect
         | Capability::Computer
@@ -115,6 +119,7 @@ fn rate_limit(cap: Capability) -> (usize, i64) {
         Capability::Research => (6, 3600), // 6/hora (búsqueda ligera)
         Capability::DeepResearch => (2, 86_400), // 2/día (pesada: ~5 min, decenas de LLM)
         Capability::NetworkDiscover => (12, 3600), // 12/hora
+        Capability::DeviceList => (60, 3600), // enumerar: barato, frecuente
         Capability::SensorRead => (240, 3600), // sensores: frecuente, barato
         _ => (30, 3600),                   // sensibles: tope de cortesía (igual piden HITL)
     }

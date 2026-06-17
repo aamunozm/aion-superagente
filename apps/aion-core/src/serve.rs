@@ -530,6 +530,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/agent", post(agent))
         .route("/api/crew", post(crew))
         .route("/api/memory", get(memory_stats))
+        .route("/api/senses", get(senses_snapshot))
         .route("/api/memory/remember", post(memory_remember))
         .route("/api/memory/forget", post(memory_forget))
         .route("/api/memory/sleep", post(memory_sleep))
@@ -3901,6 +3902,25 @@ async fn memory_stats() -> Json<serde_json::Value> {
         Ok(m) => Json(serde_json::json!({ "count": m.len(), "path": memory_path() })),
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
+}
+
+/// 👁️ SENTIDOS (Anillo 3, solo lectura): qué dispositivos percibe AION en la red local (mDNS) y
+/// en USB. Bloqueante (descubrimiento ~4s) → corre en un hilo aparte para no frenar el runtime.
+async fn senses_snapshot() -> Json<serde_json::Value> {
+    let (net, usb) = tokio::task::spawn_blocking(|| {
+        (
+            crate::senses::discover_network(4),
+            crate::senses::list_usb(),
+        )
+    })
+    .await
+    .unwrap_or_else(|_| (Vec::new(), Vec::new()));
+    let (net_n, usb_n) = (net.len(), usb.len());
+    Json(serde_json::json!({
+        "network": net,
+        "usb": usb,
+        "counts": { "network": net_n, "usb": usb_n },
+    }))
 }
 
 #[derive(Deserialize)]
