@@ -320,7 +320,7 @@ impl ShellTool {
 }
 
 /// Patrones CATASTRÓFICOS: ni con confirmación se ejecutan (defensa en profundidad).
-fn shell_is_catastrophic(cmd: &str) -> bool {
+pub fn shell_is_catastrophic(cmd: &str) -> bool {
     let norm = cmd
         .to_lowercase()
         .split_whitespace()
@@ -504,12 +504,18 @@ impl Tool for ShellTool {
                 true,
             );
         } else {
-            // Sin canal de confirmación (p. ej. Equipo) → bloqueado.
-            return Err(
-                "Ese comando modifica el sistema y aquí no puedo pedirte confirmación; en \
-                        este modo solo ejecuto diagnóstico de lectura."
-                    .into(),
+            // Sin canal de confirmación EN VIVO (Equipo / vida autónoma): NO se bloquea — se DEFIERE
+            // a la Bandeja como permiso. Ariel lo aprueba cuando quiera y AION lo ejecuta entonces.
+            crate::governance::request_permit(
+                crate::governance::Capability::Shell,
+                "shell",
+                cmd,
+                &format!("ejecutar en la terminal: {cmd}"),
             );
+            return Ok(format!(
+                "Ese comando modifica el sistema: lo dejé en tu Bandeja para que lo apruebes. \
+                 En cuanto lo autorices, lo ejecuto.\n  {cmd}"
+            ));
         }
         let res = tokio::time::timeout(
             std::time::Duration::from_secs(20),
