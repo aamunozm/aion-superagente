@@ -175,6 +175,20 @@ pub fn request(cap: Capability, action: &str) -> Decision {
     decision
 }
 
+/// Registra una acción AUTORIZADA por orden directa de Ariel (no autónoma → su petición ES el
+/// human-in-the-loop, no se vuelve a preguntar). Deja traza en la auditoría como toda acción.
+pub fn note_user_action(cap: Capability, action: &str, ok: bool) {
+    audit(
+        cap,
+        if ok {
+            "user-allow:done"
+        } else {
+            "user-allow:failed"
+        },
+        action,
+    );
+}
+
 fn audit(cap: Capability, decision: &str, action: &str) {
     let log = aion_telemetry::AuditLog::default_local();
     log.record("gobernanza", cap.as_str(), format!("{decision}: {action}"));

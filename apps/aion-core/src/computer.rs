@@ -66,6 +66,88 @@ pub fn list_apps() -> Vec<AppInfo> {
     Vec::new()
 }
 
+// ── ACTUACIÓN (Anillo 2): abrir/enfocar una app ──────────────────────────────
+// Reversible y de bajo riesgo. Cuando Ariel lo PIDE por el chat, su orden directa ES el
+// human-in-the-loop (no hace falta volver a preguntar); queda auditado. Si fuera AION por su
+// cuenta, pasaría por la puerta (Capability::Computer = AskAriel → Bandeja).
+
+/// Lanza o trae al frente una aplicación por nombre (NSWorkspace). No requiere Accesibilidad.
+#[cfg(target_os = "macos")]
+pub fn open_app(name: &str) -> bool {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::NSString;
+    objc2::rc::autoreleasepool(|_| unsafe {
+        NSWorkspace::sharedWorkspace().launchApplication(&NSString::from_str(name))
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_app(_name: &str) -> bool {
+    false
+}
+
+/// Nombres de apps conocidas: las abiertas + las instaladas (carpetas *.app). Para reconocer con
+/// precisión a qué app se refiere Ariel y NO lanzar cosas arbitrarias.
+fn known_app_names() -> Vec<String> {
+    let mut names: Vec<String> = list_apps().into_iter().map(|a| a.name).collect();
+    for dir in [
+        "/Applications",
+        "/System/Applications",
+        "/Applications/Utilities",
+    ] {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().to_string();
+                if let Some(stem) = n.strip_suffix(".app") {
+                    names.push(stem.to_string());
+                }
+            }
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if let Ok(rd) = std::fs::read_dir(format!("{home}/Applications")) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().to_string();
+                if let Some(stem) = n.strip_suffix(".app") {
+                    names.push(stem.to_string());
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Si el prompt es una ORDEN de abrir/enfocar una app conocida, devuelve su nombre exacto.
+/// Exige un verbo de apertura + el nombre de una app real mencionado → preciso, sin falsos disparos.
+pub fn match_open_command(prompt: &str) -> Option<String> {
+    let p = prompt.to_lowercase();
+    const VERBS: &[&str] = &[
+        "abre",
+        "abrí",
+        "ábre",
+        "abrir",
+        "open ",
+        "enfoca",
+        "pon en primer plano",
+        "ponme en primer plano",
+        "tráeme",
+        "cambia a ",
+        "lanza ",
+        "inicia ",
+        "ábreme",
+    ];
+    if !VERBS.iter().any(|v| p.contains(v)) {
+        return None;
+    }
+    // De las apps conocidas mencionadas, elige el nombre MÁS LARGO (el más específico).
+    known_app_names()
+        .into_iter()
+        .filter(|n| n.len() >= 3 && p.contains(&n.to_lowercase()))
+        .max_by_key(|n| n.len())
+}
+
 /// ¿Ariel pregunta por sus apps / lo que tiene abierto / la ventana activa?
 pub fn is_apps_query(prompt: &str) -> bool {
     let p = prompt.to_lowercase();

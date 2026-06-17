@@ -1379,6 +1379,32 @@ async fn chat(
     } else {
         String::new()
     };
+    // 🖐️ ACTUACIÓN (Anillo 2, reversible): si Ariel PIDE abrir/enfocar una app, AION lo hace AHORA.
+    // Su orden directa por el chat ES el human-in-the-loop (no se vuelve a preguntar); queda auditado.
+    let action_note = if let Some(app) = crate::computer::match_open_command(&body.prompt) {
+        let a = app.clone();
+        let ok = tokio::task::spawn_blocking(move || crate::computer::open_app(&a))
+            .await
+            .unwrap_or(false);
+        crate::governance::note_user_action(
+            crate::governance::Capability::Computer,
+            &format!("abrir/enfocar la app «{app}»"),
+            ok,
+        );
+        if ok {
+            format!(
+                "\n\nACCIÓN REAL QUE ACABAS DE EJECUTAR (por orden de Ariel): abriste/enfocaste «{app}» \
+                 en su Mac. Confírmalo con naturalidad, en una línea."
+            )
+        } else {
+            format!(
+                "\n\nINTENTASTE abrir «{app}» pero no lo conseguiste (quizá el nombre no es exacto o no \
+                 está instalada). Dilo con franqueza y pide el nombre correcto."
+            )
+        }
+    } else {
+        String::new()
+    };
     // Módulos coactivados en ESTE turno (memoria, biblioteca, proyecto): el chat
     // también integra — medirlo evita que el índice Φ ignore el modo principal.
     let chat_modules = usize::from(mem_hits > 0)
@@ -1386,7 +1412,7 @@ async fn chat(
         + usize::from(!proj_block.is_empty())
         + usize::from(!epi_block.is_empty());
     let self_ctx = format!(
-        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}",
+        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}{}",
         self_awareness_prompt(),
         lang_directive(&body.lang),
         crate::prompts::persona(&mode),
@@ -1399,6 +1425,7 @@ async fn chat(
         comp_block,
         senses_block,
         computer_block,
+        action_note,
     );
 
     // ACTO CONSCIENTE + MEMORIA DE HECHOS: si comprendimos EN LÍNEA (turno-pregunta), los
