@@ -172,6 +172,115 @@ pub fn name_person(id: &str, name: &str) -> bool {
     }
 }
 
+/// Ruta del helper Swift `face-probe` (sidecar, junto al binario aion-core en la app).
+fn probe_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("face-probe")))
+        .unwrap_or_else(|| PathBuf::from("face-probe"))
+}
+
+/// **Escanea con la cámara y reconoce.** Bajo demanda y con permiso (gobernanza Camera). Ejecuta el
+/// helper Swift (captura + Apple Vision detecta + faceprint), y para cada cara decide quién es
+/// (`observe`). Devuelve a quién reconoce. BLOQUEANTE (~4s): llamar desde spawn_blocking.
+pub fn scan() -> serde_json::Value {
+    if !crate::governance::request(
+        crate::governance::Capability::Camera,
+        "encender la cámara para reconocer quién está delante",
+    )
+    .allowed()
+    {
+        return serde_json::json!({ "error": "permiso de cámara no concedido (gobernanza)", "recognized": [] });
+    }
+    let out = match std::process::Command::new(probe_path()).output() {
+        Ok(o) => o,
+        Err(_) => {
+            return serde_json::json!({ "error": "no encuentro el helper de cámara (face-probe)", "recognized": [] })
+        }
+    };
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    if let Some(err) = parsed.get("error").and_then(|e| e.as_str()) {
+        return serde_json::json!({ "error": err, "recognized": [] });
+    }
+    let mut recognized = Vec::new();
+    if let Some(faces) = parsed.get("faces").and_then(|f| f.as_array()) {
+        for f in faces {
+            let emb: Vec<f32> = f
+                .get("embedding")
+                .and_then(|e| e.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_f64().map(|v| v as f32))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if emb.is_empty() {
+                continue;
+            }
+            let (id, label, known) = observe(&emb);
+            recognized.push(serde_json::json!({ "id": id, "label": label, "known": known }));
+        }
+    }
+    serde_json::json!({ "error": serde_json::Value::Null, "recognized": recognized })
+}
+
+/// ¿Ariel pregunta por reconocimiento facial / quién está delante?
+pub fn is_recognize_query(prompt: &str) -> bool {
+    let p = prompt.to_lowercase();
+    const CUES: &[&str] = &[
+        "quién soy",
+        "quien soy",
+        "me reconoces",
+        "reconóceme",
+        "reconoceme",
+        "quién está",
+        "quien esta",
+        "quién hay delante",
+        "mírame",
+        "mirame",
+        "usa la cámara",
+        "usa la camara",
+        "con la cámara",
+        "con la camara",
+        "reconocimiento facial",
+        "reconoce mi cara",
+        "reconoce mi rostro",
+    ];
+    CUES.iter().any(|c| p.contains(c))
+}
+
+/// Formatea el resultado de un escaneo como CONTEXTO para el prompt (AION responde desde lo real).
+pub fn recognize_note(scan: &serde_json::Value) -> String {
+    if let Some(err) = scan.get("error").and_then(|e| e.as_str()) {
+        return format!(
+            "INTENTASTE reconocer con la cámara pero no pudiste: {err}. Dilo con franqueza \
+             (quizá falta concederme el permiso de cámara, o no hay nadie delante)."
+        );
+    }
+    let rec = scan
+        .get("recognized")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if rec.is_empty() {
+        return "Encendiste la cámara pero NO detectaste ninguna cara ahora mismo. Dilo con franqueza."
+            .into();
+    }
+    let mut s = String::from("LO QUE RECONOCES AHORA POR LA CÁMARA (real, responde desde esto):\n");
+    for r in &rec {
+        let label = r.get("label").and_then(|l| l.as_str()).unwrap_or("?");
+        let known = r.get("known").and_then(|k| k.as_bool()).unwrap_or(false);
+        if known {
+            s.push_str(&format!("- Reconozco a {label}.\n"));
+        } else {
+            s.push_str(&format!(
+                "- Veo a alguien que aún no tengo nombrado ({label}). Si Ariel me dice quién es, lo recuerdo.\n"
+            ));
+        }
+    }
+    s
+}
+
 /// Lista de personas conocidas (sin biometría), para la UI/endpoints.
 pub fn list() -> Vec<PersonSummary> {
     let mut people = load();

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSCameraUsageDescription</key>
+    <string>AION usa la cámara, solo cuando se lo pides, para reconocer quién está delante (Ariel y las personas que registres). Las huellas faciales se guardan solo en este Mac y nunca salen.</string>
+</dict>
+</plist>

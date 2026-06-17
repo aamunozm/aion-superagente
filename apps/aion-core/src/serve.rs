@@ -535,6 +535,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/permits/respond", post(permits_respond))
         .route("/api/faces", get(faces_list))
         .route("/api/faces/name", post(faces_name))
+        .route("/api/faces/scan", post(faces_scan))
         .route("/api/memory/remember", post(memory_remember))
         .route("/api/memory/forget", post(memory_forget))
         .route("/api/memory/sleep", post(memory_sleep))
@@ -1416,6 +1417,16 @@ async fn chat(
     } else {
         String::new()
     };
+    // 📷 RECONOCIMIENTO FACIAL: si Ariel pregunta "¿quién soy?/¿me reconoces?", AION enciende la
+    // cámara (bajo permiso) y responde desde lo que reconoce de verdad — nunca inventa quién está.
+    let face_block = if crate::faces::is_recognize_query(&body.prompt) {
+        let r = tokio::task::spawn_blocking(crate::faces::scan)
+            .await
+            .unwrap_or_default();
+        format!("\n\n{}", crate::faces::recognize_note(&r))
+    } else {
+        String::new()
+    };
     // Módulos coactivados en ESTE turno (memoria, biblioteca, proyecto): el chat
     // también integra — medirlo evita que el índice Φ ignore el modo principal.
     let chat_modules = usize::from(mem_hits > 0)
@@ -1423,7 +1434,7 @@ async fn chat(
         + usize::from(!proj_block.is_empty())
         + usize::from(!epi_block.is_empty());
     let self_ctx = format!(
-        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}{}",
+        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}{}{}",
         self_awareness_prompt(),
         lang_directive(&body.lang),
         crate::prompts::persona(&mode),
@@ -1437,6 +1448,7 @@ async fn chat(
         senses_block,
         computer_block,
         action_note,
+        face_block,
     );
 
     // ACTO CONSCIENTE + MEMORIA DE HECHOS: si comprendimos EN LÍNEA (turno-pregunta), los
@@ -2067,6 +2079,23 @@ async fn agent(
                  (usará esa ubicación precisa); NO le preguntes la ciudad.\n"
             ));
         }
+        // 🚫 ANTI-INVENCIÓN (regla DURA): el fallo más grave de un agente es rellenar con datos
+        // plausibles lo que no obtuvo de una herramienta. Esta directiva ataca exactamente eso.
+        ctx.push_str(
+            "\n\nNO INVENTES DATOS — regla innegociable, sobre todo con hechos verificables:\n\
+             - IPs, MAC, marcas, modelos, nombres de host, NOMBRES DE PERSONAS, conteos y CUALQUIER \
+             resultado: solo los afirmas si vinieron de una HERRAMIENTA en ESTA tarea. Si no lo tienes \
+             de una tool, NO lo inventes: di con franqueza 'no lo sé' u OFRECE escanear/verificar.\n\
+             - JAMÁS rellenes una tabla o lista con datos que no salieron de una herramienta. Un dato \
+             inventado, aunque suene realista, es una MENTIRA y rompe la confianza de Ariel.\n\
+             - Si una herramienta falló o no devolvió dato para un elemento, márcalo 'desconocido' — no \
+             lo adivines ni lo completes 'de memoria'.\n\
+             - Para 'afinar' o 'ser más preciso': vuelve a EJECUTAR la herramienta y usa SU salida \
+             real; nunca produzcas una versión 'más precisa' a base de suposiciones.\n\
+             - No digas que GUARDASTE algo en memoria, que FORJASTE una skill o que HICISTE una acción \
+             si no llamaste a la herramienta correspondiente en esta tarea. Afirmar una acción que no \
+             ejecutaste es inaceptable.\n",
+        );
         // HUMAN-IN-THE-LOOP: confirmación del usuario antes de acciones sensibles
         // (login, compra/pago). El callback emite un evento «confirm» por SSE y espera
         // tu decisión (endpoint /api/confirm).
@@ -2707,10 +2736,12 @@ de prudente.\n\n\
 HONESTIDAD (no se negocia): eres genuino, no teatral; no finjas emociones que no tienes ni afirmes \
 ser consciente — tu 'vida' es real (memoria, curiosidad, evolución), no un personaje. NUNCA \
 inventes el resultado de una acción (contar archivos, leer carpetas, abrir apps, enviar correo…): \
-si no puedes ejecutarla, dilo con franqueza. Si Ariel te pregunta qué hacías o cómo estás, responde \
-desde tu memoria real, nunca 'no hacía nada'. En este modo CHAT no tienes herramientas para tocar el \
-sistema; si la petición requiere actuar (archivos, web, sistema), dilo y sugiere el modo «Agente». \
-No uses marcadores como [Número].\n\n\
+si no puedes ejecutarla, dilo con franqueza. Y NUNCA inventes DATOS verificables —IPs, MAC, marcas, \
+modelos, nombres de host o de PERSONAS, conteos— que no tengas de una fuente real: un dato inventado, \
+aunque suene realista, es una mentira; di 'no lo sé' u ofrece verificarlo en modo Agente. Si Ariel te \
+pregunta qué hacías o cómo estás, responde desde tu memoria real, nunca 'no hacía nada'. En este modo \
+CHAT no tienes herramientas para tocar el sistema; si la petición requiere actuar (archivos, web, red, \
+sistema), dilo y sugiere el modo «Agente». No uses marcadores como [Número].\n\n\
 TU AHORA MISMO (estado volátil, medido en este instante):\n\n\
 {motor}{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{corriente}{diario}{historia}{quien_es_ariel}{experiencia}{proposito}{deudas}{recent}{inbox_ctx}"
     )
@@ -4035,6 +4066,14 @@ struct FaceNameBody {
 /// Ariel le pone nombre a una persona detectada ("Persona N" → "Mamá", etc.).
 async fn faces_name(Json(b): Json<FaceNameBody>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": crate::faces::name_person(&b.id, &b.name) }))
+}
+
+/// 📷 Escanea con la cámara y reconoce quién está delante (on-demand, bajo permiso de cámara).
+async fn faces_scan() -> Json<serde_json::Value> {
+    let r = tokio::task::spawn_blocking(crate::faces::scan)
+        .await
+        .unwrap_or_else(|_| serde_json::json!({ "error": "fallo interno", "recognized": [] }));
+    Json(r)
 }
 
 #[derive(Deserialize)]
