@@ -46,6 +46,25 @@ func crop112(_ img: CGImage) -> String? {
     return rgb.base64EncodedString()
 }
 
+// Convierte un CGImage a JPEG en base64, redimensionado para que pese poco (la foto va al CHAT,
+// no necesita resolución de cámara). Usa CoreGraphics (escalado) + CoreImage (codificación JPEG).
+func jpegBase64(_ cg: CGImage, maxDim: Int = 260) -> String? {
+    let w = cg.width, h = cg.height
+    let scale = min(1.0, Double(maxDim) / Double(max(w, h)))
+    let tw = max(1, Int(Double(w) * scale)), th = max(1, Int(Double(h) * scale))
+    let space = CGColorSpaceCreateDeviceRGB()
+    guard let ctx = CGContext(data: nil, width: tw, height: th, bitsPerComponent: 8,
+                              bytesPerRow: 0, space: space,
+                              bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+    ctx.interpolationQuality = .high
+    ctx.draw(cg, in: CGRect(x: 0, y: 0, width: tw, height: th))
+    guard let scaled = ctx.makeImage() else { return nil }
+    let ci = CIImage(cgImage: scaled)
+    guard let data = CIContext().jpegRepresentation(of: ci, colorSpace: space, options: [:])
+    else { return nil }
+    return data.base64EncodedString()
+}
+
 final class Grabber: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     let sem = DispatchSemaphore(value: 0)
     var image: CGImage?
@@ -144,6 +163,14 @@ for obs in (faceReq.results ?? []) {
     }
     var face: [String: Any] = ["embedding": emb, "bbox": [Double(rx), Double(ry), Double(rw), Double(rh)]]
     if let c = crop112(faceCG) { face["crop112"] = c }
+    // Foto para MOSTRAR en el chat: recorte de la cara con un margen (más natural que la caja
+    // justa), redimensionado y en JPEG. Acotado a la imagen para no salirse de los bordes.
+    let mx = rw * 0.35, my = rh * 0.35
+    let photoRect = CGRect(x: rx - mx, y: ry - my, width: rw + 2 * mx, height: rh + 2 * my)
+        .integral
+        .intersection(CGRect(x: 0, y: 0, width: W, height: H))
+    let photoCG = cg.cropping(to: photoRect) ?? faceCG
+    if let j = jpegBase64(photoCG) { face["face_jpeg"] = j }
     faces.append(face)
 }
 emit(["faces": faces, "error": NSNull(),
