@@ -172,8 +172,25 @@ pub async fn execute_approved() {
 async fn dispatch(kind: &str, payload: &str) -> bool {
     match kind {
         "open_app" => crate::computer::open_app(payload),
+        "shell" => run_shell(payload).await,
         _ => false,
     }
+}
+
+/// Ejecuta un comando de terminal YA APROBADO por Ariel. Veta lo catastrófico aunque esté aprobado.
+async fn run_shell(cmd: &str) -> bool {
+    if crate::agent_tools::shell_is_catastrophic(cmd) {
+        return false;
+    }
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::process::Command::new("/bin/zsh")
+            .arg("-c")
+            .arg(cmd)
+            .output(),
+    )
+    .await;
+    matches!(res, Ok(Ok(_)))
 }
 
 #[cfg(test)]
