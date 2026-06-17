@@ -35,6 +35,8 @@ pub enum Capability {
     DeviceList,
     /// Leer sensores del host (batería, térmica, etc.). Bajo riesgo.
     SensorRead,
+    /// PERCIBIR el computador (qué apps están abiertas / en primer plano). Solo lectura. Anillo 2.
+    ComputerRead,
     /// Conectarse a un dispositivo de la red (SSH, API local, IoT). Anillo 3, sensible.
     NetworkConnect,
     /// Controlar el computador y sus apps (Accessibility/teclado/ratón). Anillo 2, sensible.
@@ -55,6 +57,7 @@ impl Capability {
             Capability::NetworkDiscover => "network.discover",
             Capability::DeviceList => "device.list",
             Capability::SensorRead => "sensor.read",
+            Capability::ComputerRead => "computer.read",
             Capability::NetworkConnect => "network.connect",
             Capability::Computer => "computer",
             Capability::Bluetooth => "bluetooth",
@@ -103,7 +106,8 @@ fn base_policy(cap: Capability) -> Decision {
         | Capability::DeepResearch
         | Capability::NetworkDiscover
         | Capability::DeviceList
-        | Capability::SensorRead => Decision::Allow,
+        | Capability::SensorRead
+        | Capability::ComputerRead => Decision::Allow,
         Capability::NetworkConnect
         | Capability::Computer
         | Capability::Bluetooth
@@ -121,6 +125,7 @@ fn rate_limit(cap: Capability) -> (usize, i64) {
         Capability::NetworkDiscover => (12, 3600), // 12/hora
         Capability::DeviceList => (60, 3600), // enumerar: barato, frecuente
         Capability::SensorRead => (240, 3600), // sensores: frecuente, barato
+        Capability::ComputerRead => (120, 3600), // percibir apps: barato
         _ => (30, 3600),                   // sensibles: tope de cortesía (igual piden HITL)
     }
 }

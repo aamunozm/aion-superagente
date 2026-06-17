@@ -14,6 +14,7 @@ mod capabilities;
 mod claude_code;
 mod claude_mcp;
 mod comprehension;
+mod computer;
 mod consciousness;
 mod credentials;
 mod deep_research;

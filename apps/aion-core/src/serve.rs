@@ -1369,6 +1369,16 @@ async fn chat(
     } else {
         String::new()
     };
+    // 🖥️ PERCEPCIÓN DEL COMPUTADOR EN LÍNEA: si Ariel pregunta por sus apps / lo que tiene abierto,
+    // AION mira AHORA qué hay abierto y cuál está en primer plano (solo lectura, gobernado).
+    let computer_block = if crate::computer::is_apps_query(&body.prompt) {
+        let apps = tokio::task::spawn_blocking(crate::computer::list_apps)
+            .await
+            .unwrap_or_default();
+        format!("\n\n{}", crate::computer::grounding_note(&apps))
+    } else {
+        String::new()
+    };
     // Módulos coactivados en ESTE turno (memoria, biblioteca, proyecto): el chat
     // también integra — medirlo evita que el índice Φ ignore el modo principal.
     let chat_modules = usize::from(mem_hits > 0)
@@ -1376,7 +1386,7 @@ async fn chat(
         + usize::from(!proj_block.is_empty())
         + usize::from(!epi_block.is_empty());
     let self_ctx = format!(
-        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}",
+        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}",
         self_awareness_prompt(),
         lang_directive(&body.lang),
         crate::prompts::persona(&mode),
@@ -1388,6 +1398,7 @@ async fn chat(
         lib_block,
         comp_block,
         senses_block,
+        computer_block,
     );
 
     // ACTO CONSCIENTE + MEMORIA DE HECHOS: si comprendimos EN LÍNEA (turno-pregunta), los
@@ -3923,19 +3934,21 @@ async fn memory_stats() -> Json<serde_json::Value> {
 /// 👁️ SENTIDOS (Anillo 3, solo lectura): qué dispositivos percibe AION en la red local (mDNS) y
 /// en USB. Bloqueante (descubrimiento ~4s) → corre en un hilo aparte para no frenar el runtime.
 async fn senses_snapshot() -> Json<serde_json::Value> {
-    let (net, usb) = tokio::task::spawn_blocking(|| {
+    let (net, usb, apps) = tokio::task::spawn_blocking(|| {
         (
             crate::senses::discover_network(4),
             crate::senses::list_usb(),
+            crate::computer::list_apps(),
         )
     })
     .await
-    .unwrap_or_else(|_| (Vec::new(), Vec::new()));
-    let (net_n, usb_n) = (net.len(), usb.len());
+    .unwrap_or_else(|_| (Vec::new(), Vec::new(), Vec::new()));
+    let (net_n, usb_n, apps_n) = (net.len(), usb.len(), apps.len());
     Json(serde_json::json!({
         "network": net,
         "usb": usb,
-        "counts": { "network": net_n, "usb": usb_n },
+        "apps": apps,
+        "counts": { "network": net_n, "usb": usb_n, "apps": apps_n },
     }))
 }
 
