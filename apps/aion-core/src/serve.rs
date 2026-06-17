@@ -1955,6 +1955,16 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
+        // RECETAS (macros): el clon del registro se toma AQUÍ —tras las herramientas reales,
+        // antes de registrar las de recetas— para que una receta despache a todas SIN poder
+        // invocarse a sí misma (no recursión). La gobernanza HITL vive en cada herramienta.
+        let recipe_reg = tools.clone();
+        tools.register(Arc::new(crate::agent_tools::RecipeSaveTool::new(
+            recipe_reg.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::RecipeInvokeTool::new(
+            recipe_reg,
+        )));
 
         let bus = EventBus::default();
 
@@ -2057,6 +2067,15 @@ async fn agent(
         let (grounding, grounding_hits, cross_mode_hits, grounding_ids) =
             grounding_for_agent(&*engine, &body.task).await;
         ctx.push_str(&grounding);
+        // RECETAS (macros) que el agente se ha guardado (Facultad 4): para que SEPA que
+        // existen y pueda invocarlas con recipe_invoke (como el catálogo de skills forjadas).
+        let recipes_cat = crate::recipes::catalog();
+        if !recipes_cat.is_empty() {
+            ctx.push_str("\nRecetas (macros) que te has guardado — invócalas con recipe_invoke:\n");
+            for (n, d) in recipes_cat {
+                ctx.push_str(&format!("- {n}: {d}\n"));
+            }
+        }
         let skills = crate::skill_store::catalog();
         if !skills.is_empty() {
             ctx.push_str("\nSkills que ya te has forjado (úsalas con skill_invoke si aplican):\n");
@@ -2331,6 +2350,15 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
+        // RECETAS (macros): mismas herramientas que en el agente (ver ese sitio). Clon del
+        // registro tras las herramientas reales → la receta despacha a todas, no a sí misma.
+        let recipe_reg = tools.clone();
+        tools.register(Arc::new(crate::agent_tools::RecipeSaveTool::new(
+            recipe_reg.clone(),
+        )));
+        tools.register(Arc::new(crate::agent_tools::RecipeInvokeTool::new(
+            recipe_reg,
+        )));
 
         let bus = EventBus::default();
         // GWT: el equipo entero entra al foco del tablón global. PRIVACIDAD: la

@@ -541,23 +541,41 @@ export default function ChatPage() {
               </details>
             )}
 
-            {(t.mode === "agent" || t.mode === "crew") &&
-              t.steps.map((s, j) => (
-                <div key={j} className="flex items-start gap-2 text-sm pl-1" style={{ color: "var(--text-2)" }}>
-                  <span style={{ color: STEP_STYLE[s.kind].color }} className="mt-0.5 shrink-0">
-                    <Icon name={STEP_STYLE[s.kind].icon} size={15} />
+            {(t.mode === "agent" || t.mode === "crew") && t.steps.length > 0 && (
+              // Los detalles del razonamiento (pasos: pensamientos, acciones y volcados de
+              // observación) van PLEGADOS por defecto: son ruido para el resultado. Botón
+              // para desplegarlos, igual que el «razonamiento» del chat.
+              <details className="text-sm">
+                <summary className="cursor-pointer select-none" style={{ color: "var(--accent)" }}>
+                  <span className="inline-flex items-center gap-1">
+                    <Icon name="brain" size={13} /> detalles · {t.steps.length}{" "}
+                    {t.steps.length === 1 ? "paso" : "pasos"}
                   </span>
-                  {s.agent && (
-                    <span
-                      className="text-[10px] px-1.5 py-0.5 rounded-full shrink-0 font-medium"
-                      style={{ background: "var(--accent-subtle)", color: "var(--accent)" }}
+                </summary>
+                <div className="mt-2 flex flex-col gap-2">
+                  {t.steps.map((s, j) => (
+                    <div
+                      key={j}
+                      className="flex items-start gap-2 text-sm pl-1"
+                      style={{ color: "var(--text-2)" }}
                     >
-                      {s.agent}
-                    </span>
-                  )}
-                  <span className={s.kind === "action" ? "font-mono text-xs" : ""}>{s.text}</span>
+                      <span style={{ color: STEP_STYLE[s.kind].color }} className="mt-0.5 shrink-0">
+                        <Icon name={STEP_STYLE[s.kind].icon} size={15} />
+                      </span>
+                      {s.agent && (
+                        <span
+                          className="text-[10px] px-1.5 py-0.5 rounded-full shrink-0 font-medium"
+                          style={{ background: "var(--accent-subtle)", color: "var(--accent)" }}
+                        >
+                          {s.agent}
+                        </span>
+                      )}
+                      <span className={s.kind === "action" ? "font-mono text-xs" : ""}>{s.text}</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              </details>
+            )}
 
             {t.answer && (
               <div className="msg w-full self-start">

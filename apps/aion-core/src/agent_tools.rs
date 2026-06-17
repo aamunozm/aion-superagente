@@ -9,7 +9,7 @@ use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, SkillHost};
 use aion_kernel::types::Message;
 use aion_llm::OllamaEngine;
 use aion_memory::VectorMemory;
-use aion_orchestrator::Tool;
+use aion_orchestrator::{Tool, ToolRegistry};
 use aion_skills::{SkillManifest, WasmSkillHost};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -2006,5 +2006,153 @@ impl Tool for SkillInvokeTool {
             .await
             .map_err(|e| e.to_string())?;
         Ok(format!("{} = {}", name, out.output["result"]))
+    }
+}
+
+// ── RECETAS (macros): componer herramientas existentes en una skill nueva ────────
+// Facultad 4 por la vía SEGURA. Cada paso usa una herramienta que YA existe (con su
+// gobernanza). GOBERNANZA: una receta NUNCA ejecuta una herramienta que requiere tu OK
+// (HITL) — se comprueba al guardar y, fail-closed, al ejecutar.
+
+/// Guarda una RECETA reutilizable a partir de un formato de una línea.
+pub struct RecipeSaveTool {
+    registry: ToolRegistry,
+}
+impl RecipeSaveTool {
+    pub fn new(registry: ToolRegistry) -> Self {
+        Self { registry }
+    }
+}
+#[async_trait]
+impl Tool for RecipeSaveTool {
+    fn name(&self) -> &str {
+        "recipe_save"
+    }
+    fn description(&self) -> &str {
+        "Guarda una RECETA reutilizable: una secuencia con nombre de herramientas que YA \
+         tienes, para repetir un flujo útil. Entrada: «nombre ::: descripción ::: herramienta1 \
+         | entrada1 ;; herramienta2 | entrada2». Las entradas admiten {{param}} (un dato que se \
+         pasa al invocar) y {{N}} (la salida del paso N). NO puede incluir herramientas que \
+         pidan tu confirmación. Luego se ejecuta con recipe_invoke."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let parts: Vec<&str> = input.splitn(3, ":::").collect();
+        if parts.len() < 3 {
+            return Err(
+                "formato: nombre ::: descripción ::: tool1 | entrada1 ;; tool2 | entrada2".into(),
+            );
+        }
+        let name = parts[0].trim().to_string();
+        let description = parts[1].trim().to_string();
+        if name.is_empty() {
+            return Err("la receta necesita un nombre".into());
+        }
+        let mut steps = Vec::new();
+        for raw in parts[2].split(";;") {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                continue;
+            }
+            let (tool, inp) = raw
+                .split_once('|')
+                .ok_or_else(|| format!("paso sin '|': {raw}"))?;
+            let tool = tool.trim().to_string();
+            let inp = inp.trim().to_string();
+            // GOBERNANZA: la herramienta debe existir y NO requerir tu confirmación.
+            let Some(t) = self.registry.get(&tool) else {
+                return Err(format!("herramienta desconocida en un paso: '{tool}'"));
+            };
+            if t.needs_confirm(&inp).is_some() {
+                return Err(format!(
+                    "'{tool}' requiere tu confirmación; una receta no puede incluir herramientas \
+                     sensibles (evitamos que una macro burle tu OK)"
+                ));
+            }
+            steps.push(crate::recipes::Step { tool, input: inp });
+        }
+        if steps.is_empty() {
+            return Err("la receta no tiene pasos".into());
+        }
+        let n = steps.len();
+        crate::recipes::upsert(crate::recipes::Recipe {
+            name: name.clone(),
+            description,
+            steps,
+        });
+        Ok(format!(
+            "Receta «{name}» guardada con {n} paso(s). Invócala con recipe_invoke."
+        ))
+    }
+}
+
+/// Ejecuta una RECETA guardada, paso a paso, con las herramientas reales.
+pub struct RecipeInvokeTool {
+    registry: ToolRegistry,
+}
+impl RecipeInvokeTool {
+    pub fn new(registry: ToolRegistry) -> Self {
+        Self { registry }
+    }
+}
+#[async_trait]
+impl Tool for RecipeInvokeTool {
+    fn name(&self) -> &str {
+        "recipe_invoke"
+    }
+    fn description(&self) -> &str {
+        "Ejecuta una RECETA que guardaste (recipe_save), paso a paso con tus herramientas \
+         reales. Entrada: «nombre» o «nombre ::: param1=valor1, param2=valor2»."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let (name, params_str) = match input.split_once(":::") {
+            Some((n, p)) => (n.trim(), p.trim()),
+            None => (input.trim(), ""),
+        };
+        let Some(recipe) = crate::recipes::get(name) else {
+            return Err(format!("no tengo ninguna receta llamada «{name}»"));
+        };
+        let mut params = std::collections::HashMap::new();
+        for kv in params_str.split(',') {
+            if let Some((k, v)) = kv.split_once('=') {
+                params.insert(k.trim().to_string(), v.trim().to_string());
+            }
+        }
+        let mut outputs: Vec<String> = Vec::new();
+        let mut log = String::new();
+        for (i, step) in recipe.steps.iter().enumerate() {
+            let filled = crate::recipes::fill(&step.input, &params, &outputs);
+            let Some(tool) = self.registry.get(&step.tool) else {
+                return Err(format!(
+                    "paso {}: herramienta desconocida '{}'",
+                    i + 1,
+                    step.tool
+                ));
+            };
+            // FAIL-CLOSED: nunca ejecutar un paso sensible (HITL) desde una macro.
+            if tool.needs_confirm(&filled).is_some() {
+                return Err(format!(
+                    "paso {}: '{}' requiere tu confirmación; no ejecuto herramientas sensibles \
+                     dentro de una receta",
+                    i + 1,
+                    step.tool
+                ));
+            }
+            let out = tool
+                .run(&filled)
+                .await
+                .map_err(|e| format!("paso {} ({}): {e}", i + 1, step.tool))?;
+            log.push_str(&format!(
+                "Paso {} [{}]: {}\n",
+                i + 1,
+                step.tool,
+                out.chars().take(200).collect::<String>()
+            ));
+            outputs.push(out);
+        }
+        Ok(format!(
+            "Receta «{}» ejecutada:\n{}",
+            recipe.name,
+            log.trim_end()
+        ))
     }
 }
