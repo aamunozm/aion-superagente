@@ -538,6 +538,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/models/remove", post(models_remove))
         .route("/api/provider", get(provider_get).post(provider_set))
         .route("/api/provider/toggle", post(provider_toggle))
+        // Catálogo REAL de herramientas del agente (para el dashboard, sin desincronizar).
+        .route("/api/tools", get(tools_list))
+        // Gobernanza de comunicaciones: con quién y por qué canal puede hablar AION.
+        .route("/api/comms", get(comms_get).post(comms_set))
         .route("/api/governance/setup", post(governance_setup))
         .route("/api/chat", post(chat))
         .route("/api/chat/new", post(chat_reset))
@@ -1074,6 +1078,288 @@ async fn provider_toggle() -> Json<serde_json::Value> {
             "ok": true, "kind": next.kind, "model": next.model,
             "has_key": !next.api_key.is_empty(),
         })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// Catálogo CANÓNICO de herramientas del agente, agrupado por categoría. Es la
+/// fuente única para el dashboard (`/api/tools`) y refleja lo que `agent`/`crew`
+/// registran de verdad — así el panel no se desincroniza del backend.
+/// Tupla: (categoría, nombre, descripción corta, sensible/HITL).
+const TOOLS_CATALOG: &[(&str, &str, &str, bool)] = &[
+    (
+        "Cálculo",
+        "calculator",
+        "Aritmética exacta (delega el cálculo en código).",
+        false,
+    ),
+    (
+        "Memoria",
+        "memory_search",
+        "Busca en su memoria de largo plazo.",
+        false,
+    ),
+    (
+        "Memoria",
+        "remember",
+        "Guarda un hecho o aprendizaje duradero.",
+        false,
+    ),
+    (
+        "Memoria",
+        "episodic_recall",
+        "Recupera micromomentos de conversaciones pasadas.",
+        false,
+    ),
+    (
+        "Conocimiento",
+        "library_search",
+        "Pasajes de la biblioteca de documentos (con cita).",
+        false,
+    ),
+    (
+        "Conocimiento",
+        "graph_search",
+        "Conexiones multi-salto en el grafo de conocimiento.",
+        false,
+    ),
+    (
+        "Web e investigación",
+        "web_search",
+        "Busca en internet (multi-fuente).",
+        false,
+    ),
+    (
+        "Web e investigación",
+        "web_fetch",
+        "Lee el texto legible de una URL (rápido).",
+        false,
+    ),
+    (
+        "Web e investigación",
+        "github_search",
+        "Busca repos y código en GitHub.",
+        false,
+    ),
+    (
+        "Web e investigación",
+        "weather",
+        "Clima actual (Open-Meteo).",
+        false,
+    ),
+    (
+        "Web e investigación",
+        "place_lookup",
+        "Qué hay en una dirección (OpenStreetMap).",
+        false,
+    ),
+    (
+        "Navegador",
+        "browser_open",
+        "Abre una URL en navegador real (con JS).",
+        false,
+    ),
+    (
+        "Navegador",
+        "browser_read",
+        "Re-lee la página abierta.",
+        false,
+    ),
+    (
+        "Navegador",
+        "browser_click",
+        "Clic en un elemento por número/selector.",
+        false,
+    ),
+    (
+        "Navegador",
+        "browser_type",
+        "Escribe en un campo de la página.",
+        false,
+    ),
+    (
+        "Navegador",
+        "browser_see",
+        "Visión multimodal de la página.",
+        false,
+    ),
+    (
+        "Navegador",
+        "credential_login",
+        "Inicia sesión con credenciales del Llavero.",
+        true,
+    ),
+    (
+        "Archivos y sistema",
+        "files_list",
+        "Lista/cuenta archivos de una carpeta.",
+        false,
+    ),
+    (
+        "Archivos y sistema",
+        "file_read",
+        "Lee un archivo de texto (confinado).",
+        false,
+    ),
+    (
+        "Archivos y sistema",
+        "make_document",
+        "Crea y abre un documento en el Escritorio.",
+        false,
+    ),
+    (
+        "Archivos y sistema",
+        "make_note",
+        "Crea una nota en Apple Notes.",
+        false,
+    ),
+    (
+        "Archivos y sistema",
+        "run_command",
+        "Ejecuta un comando de shell (con confirmación).",
+        true,
+    ),
+    (
+        "Archivos y sistema",
+        "shell",
+        "Terminal: diagnóstico directo; mutaciones con HITL.",
+        true,
+    ),
+    (
+        "Red",
+        "net_scan",
+        "Escanea la red local (IP, MAC, fabricante).",
+        false,
+    ),
+    ("Red", "wifi_scan", "Lista redes WiFi al alcance.", false),
+    (
+        "Pantalla y control",
+        "screen_see",
+        "Captura y describe la pantalla.",
+        false,
+    ),
+    (
+        "Pantalla y control",
+        "screen_elements",
+        "Lista elementos de la ventana frontal.",
+        false,
+    ),
+    (
+        "Pantalla y control",
+        "pc_click",
+        "Clic del ratón en (x,y).",
+        true,
+    ),
+    (
+        "Pantalla y control",
+        "pc_type",
+        "Teclea texto en la app frontal.",
+        true,
+    ),
+    (
+        "Pantalla y control",
+        "pc_key",
+        "Pulsa una tecla (enter/tab/esc…).",
+        true,
+    ),
+    (
+        "Reconocimiento facial",
+        "reconocer_cara",
+        "Enciende la cámara y reconoce quién está (local).",
+        true,
+    ),
+    (
+        "Comunicaciones",
+        "calendar_list",
+        "Mira la agenda: próximos eventos del Calendario.",
+        false,
+    ),
+    (
+        "Comunicaciones",
+        "calendar_create",
+        "Crea un evento en el Calendario (con confirmación).",
+        true,
+    ),
+    (
+        "Comunicaciones",
+        "contacts_search",
+        "Busca una persona en tus Contactos.",
+        false,
+    ),
+    (
+        "Comunicaciones",
+        "messages_read",
+        "Lee mensajes recientes (iMessage/SMS).",
+        false,
+    ),
+    (
+        "Comunicaciones",
+        "messages_send",
+        "Envía un iMessage/SMS (con confirmación).",
+        true,
+    ),
+    (
+        "Comunicaciones",
+        "whatsapp_open",
+        "Abre WhatsApp Web en una conversación.",
+        true,
+    ),
+    (
+        "Skills",
+        "skill_forge",
+        "Se escribe una skill nueva (validada en sandbox).",
+        false,
+    ),
+    (
+        "Skills",
+        "skill_invoke",
+        "Ejecuta una skill que ha forjado.",
+        false,
+    ),
+    (
+        "Confirmación",
+        "confirm_action",
+        "Pide tu OK antes de algo sensible/irreversible.",
+        true,
+    ),
+];
+
+/// Devuelve el catálogo de herramientas agrupado por categoría para el dashboard.
+async fn tools_list() -> Json<serde_json::Value> {
+    use std::collections::BTreeMap;
+    // Preserva el orden de aparición de las categorías en el catálogo.
+    let mut order: Vec<&str> = Vec::new();
+    let mut by_cat: BTreeMap<&str, Vec<serde_json::Value>> = BTreeMap::new();
+    for (cat, name, desc, sensitive) in TOOLS_CATALOG {
+        if !order.contains(cat) {
+            order.push(cat);
+        }
+        by_cat.entry(cat).or_default().push(serde_json::json!({
+            "name": name, "description": desc, "sensitive": sensitive,
+        }));
+    }
+    let groups: Vec<serde_json::Value> = order
+        .iter()
+        .map(|cat| serde_json::json!({ "category": cat, "tools": by_cat[cat] }))
+        .collect();
+    Json(serde_json::json!({ "count": TOOLS_CATALOG.len(), "groups": groups }))
+}
+
+/// Devuelve la política de comunicaciones (contactos permitidos y canales).
+async fn comms_get() -> Json<serde_json::Value> {
+    let p = crate::comms::load();
+    Json(serde_json::json!({
+        "enabled": p.enabled,
+        "default_allow": p.default_allow,
+        "channels": crate::comms::CHANNELS,
+        "contacts": p.contacts,
+    }))
+}
+
+/// Guarda la política de comunicaciones completa (desde el menú Comunicaciones).
+async fn comms_set(Json(p): Json<crate::comms::CommsPolicy>) -> Json<serde_json::Value> {
+    match crate::comms::save(&p) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
 }
@@ -2024,7 +2310,7 @@ async fn agent(
             browser.clone(),
         )));
         tools.register(Arc::new(crate::agent_tools::CredentialLoginTool::new(
-            browser,
+            browser.clone(),
         )));
         tools.register(Arc::new(crate::agent_tools::ConfirmActionTool::new()));
         tools.register(Arc::new(crate::agent_tools::ScreenSeeTool::new()));
@@ -2035,6 +2321,18 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
+        // 💬 COMUNICACIONES: calendario, contactos, Mensajes y WhatsApp. Cada una pasa por
+        // `comms::CommsPolicy` (filtro de con quién/qué canal) y los envíos piden HITL. Va en
+        // el modo Agente (con el que hablas) con el set completo, incluido enviar.
+        tools.register(Arc::new(crate::comms_tools::CalendarListTool::new()));
+        tools.register(Arc::new(crate::comms_tools::CalendarCreateTool::new()));
+        tools.register(Arc::new(crate::comms_tools::ContactsSearchTool::new()));
+        tools.register(Arc::new(crate::comms_tools::MessagesReadTool::new()));
+        tools.register(Arc::new(crate::comms_tools::MessagesSendTool::new()));
+        tools.register(Arc::new(crate::comms_tools::WhatsAppOpenTool::new(
+            browser.clone(),
+            web.clone(),
+        )));
         // 📷 Reconocimiento facial REAL como herramienta del agente (mata el teatro: antes el LLM
         // inventaba un comando de cámara). La foto capturada se guarda en este buffer y se antepone
         // al Final Answer para mostrarla en el chat. NO se registra en la `crew` autónoma: la cámara
@@ -2488,6 +2786,11 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
+        // 💬 COMUNICACIONES en modo autónomo: SOLO lectura (agenda y contactos) para que el
+        // equipo sea consciente de horarios/personas. NUNCA leer mensajes privados ni enviar
+        // de forma autónoma: eso queda reservado al modo Agente con HITL.
+        tools.register(Arc::new(crate::comms_tools::CalendarListTool::new()));
+        tools.register(Arc::new(crate::comms_tools::ContactsSearchTool::new()));
 
         let bus = EventBus::default();
         // GWT: el equipo entero entra al foco del tablón global. PRIVACIDAD: la

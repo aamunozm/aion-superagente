@@ -683,6 +683,40 @@ export const governanceSetup = (posture: string) =>
     body: JSON.stringify({ posture }),
   });
 
+// ── Catálogo REAL de herramientas del agente (dashboard sincronizado) ──
+export type ToolInfo = { name: string; description: string; sensitive: boolean };
+export type ToolGroup = { category: string; tools: ToolInfo[] };
+export const toolsList = () =>
+  jsonCall<{ count: number; groups: ToolGroup[] }>("/api/tools");
+
+// ── Comunicaciones: gobernanza por contacto y canal ──
+export type CommContact = {
+  id: string;
+  name: string;
+  handle: string;
+  channels: string[];
+  allow_read: boolean;
+  allow_send: boolean;
+  note: string;
+};
+export type CommsPolicy = {
+  enabled: boolean;
+  default_allow: boolean;
+  channels: string[];
+  contacts: CommContact[];
+};
+export const commsGet = () => jsonCall<CommsPolicy>("/api/comms");
+export const commsSet = (p: {
+  enabled: boolean;
+  default_allow: boolean;
+  contacts: CommContact[];
+}) =>
+  jsonCall<{ ok?: boolean; error?: string }>("/api/comms", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(p),
+  });
+
 /// Descarga un modelo local con progreso (SSE).
 export type InstalledModel = { name: string; size_gb: number };
 

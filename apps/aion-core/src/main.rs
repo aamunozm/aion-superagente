@@ -14,6 +14,8 @@ mod biography;
 mod capabilities;
 mod claude_code;
 mod claude_mcp;
+mod comms;
+mod comms_tools;
 mod comprehension;
 mod computer;
 mod consciousness;

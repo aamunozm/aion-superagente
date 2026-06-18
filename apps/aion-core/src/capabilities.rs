@@ -19,6 +19,7 @@ const TOOL_FAMILIES: &[(&str, &str)] = &[
     ("Archivos y sistema", "listar/crear archivos, leerlos, ejecutar comandos, crear documentos y notas (files, file_read, run_command, make_document, make_note)"),
     ("Red", "inspeccionar la red local (net)"),
     ("Pantalla y PC", "ver la pantalla, sus elementos y controlar ratón/teclado del Mac (screen_see, screen_elements, pc_click, pc_type, pc_key)"),
+    ("Comunicaciones", "mirar la agenda y crear eventos, buscar contactos, leer y enviar Mensajes (iMessage/SMS) y abrir WhatsApp Web — SOLO con los contactos que Ariel ha permitido en el menú Comunicaciones, y pidiendo confirmación antes de enviar (calendar_list, calendar_create, contacts_search, messages_read, messages_send, whatsapp_open)"),
     ("Cálculo", "calcular con precisión (calculator)"),
     ("Skills", "invocar las skills que te has forjado y FORJAR otras nuevas (skill_invoke, skill_forge)"),
 ];
