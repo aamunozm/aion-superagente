@@ -48,6 +48,37 @@ const NUDGE_VERIFY: &str = "\n\nNOTA: tu respuesta afirma datos concretos (cifra
     plausible es el peor error—. Si en cambio es algo que sabes de TI MISMO (tu identidad, tu \
     estado, tus capacidades), da tu 'Final Answer:' con naturalidad.";
 
+/// Presupuesto de tokens de contexto por defecto. Se usa para el preflight check
+/// que comprime el scratchpad antes de que el LLM local rechace por overflow.
+pub const DEFAULT_CONTEXT_BUDGET: usize = 8192;
+
+/// Estimación O(1) del número de tokens en un texto.
+/// Aproximación: 1 token ≈ 4 caracteres UTF-8.
+pub fn estimate_tokens(text: &str) -> usize {
+    text.len() / 4
+}
+
+/// Comprime el scratchpad si supera el 80 % del presupuesto de tokens.
+/// Si está por debajo del umbral devuelve el texto sin cambios.
+/// Si lo supera, conserva solo las últimas 20 líneas y antepone un aviso.
+pub fn compress_scratchpad(scratchpad: &str, budget_tokens: usize) -> String {
+    let threshold = budget_tokens * 4 / 5; // 80 % del budget en tokens
+    if estimate_tokens(scratchpad) <= threshold {
+        return scratchpad.to_string();
+    }
+    let lines: Vec<&str> = scratchpad.lines().collect();
+    let keep = lines
+        .iter()
+        .rev()
+        .take(20)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .cloned()
+        .collect::<Vec<_>>();
+    format!("[...contexto anterior comprimido...]\n{}", keep.join("\n"))
+}
+
 /// Resultado de una ejecución del agente.
 #[derive(Debug, Clone, Default)]
 pub struct AgentRun {
@@ -79,6 +110,9 @@ pub struct ReActAgent<'a> {
     confirm: Option<ConfirmFn>,
     /// Pregunta al usuario (pausa la tarea y espera su respuesta). Opcional.
     ask: Option<AskFn>,
+    /// Contador de solicitudes a herramientas desconocidas: nombre → número de veces pedida.
+    /// Si una herramienta se solicita ≥3 veces sin existir, se sugiere crearla con skill_forge.
+    unknown_tool_requests: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u32>>>,
     /// PRESUPUESTO DE TIEMPO REAL del bucle. El límite por `max_steps` es solo un
     /// proxy del tiempo: un único paso con una herramienta lenta (navegador, red)
     /// puede agotar el timeout de pared ANTES de que la síntesis final rescate lo
@@ -99,6 +133,9 @@ impl<'a> ReActAgent<'a> {
             verify: false,
             confirm: None,
             ask: None,
+            unknown_tool_requests: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             deadline: None,
         }
     }
@@ -147,6 +184,16 @@ impl<'a> ReActAgent<'a> {
         let c = context.into();
         self.context = if c.trim().is_empty() { None } else { Some(c) };
         self
+    }
+
+    /// Devuelve las herramientas desconocidas solicitadas y su contador de intentos,
+    /// ordenadas de mayor a menor frecuencia. Útil para detectar capacidades que faltan
+    /// y que podrían crearse con `skill_forge`.
+    pub fn unknown_tool_stats(&self) -> Vec<(String, u32)> {
+        let map = self.unknown_tool_requests.lock().unwrap();
+        let mut stats: Vec<(String, u32)> = map.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        stats.sort_by_key(|a| std::cmp::Reverse(a.1));
+        stats
     }
 
     fn system_prompt(&self) -> String {
@@ -327,6 +374,14 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
             // condiciona QUÉ decide: solo le pide que TERMINE de decidirlo o que funde lo
             // que afirma. Es criterio, no guion.
             let nudge = pending_nudge.take().unwrap_or("");
+
+            // PREFLIGHT: comprimir el scratchpad si está a punto de desbordar el contexto
+            // del LLM. Mejor recortar aquí (deterministamente) que dejar que el motor
+            // rechace la petición por overflow y pierda el turno entero.
+            if estimate_tokens(&scratchpad) > DEFAULT_CONTEXT_BUDGET * 4 / 5 {
+                scratchpad = compress_scratchpad(&scratchpad, DEFAULT_CONTEXT_BUDGET);
+            }
+
             let user = format!(
                 "Tarea: {task}\n\n{scratchpad}\n\
                  Escribe el siguiente paso (Thought + Action/Action Input, o Thought + Final Answer):{nudge}"
@@ -573,13 +628,42 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                         if !approved {
                             "❌ acción cancelada por el usuario (no se ejecutó).".to_string()
                         } else {
-                            match tool.run(input.trim()).await {
+                            // Reputación bayesiana (estilo Hermes): cronometramos y grabamos
+                            // el resultado de CADA ejecución. El registro aprende qué
+                            // herramientas son fiables y `describe()` marca con [⚠] las que
+                            // fallan repetidamente — el agente lo ve en su propio prompt.
+                            let t0 = std::time::Instant::now();
+                            let result = tool.run(input.trim()).await;
+                            self.tools.record_call(
+                                &action,
+                                result.is_ok(),
+                                t0.elapsed().as_millis() as u64,
+                            );
+                            match result {
                                 Ok(out) => out,
                                 Err(e) => format!("error de herramienta: {e}"),
                             }
                         }
                     }
-                    None => format!("herramienta desconocida: '{action}'"),
+                    None => {
+                        // Registrar la solicitud a herramienta desconocida y contar cuántas veces
+                        // se ha pedido. Si se alcanza el umbral de 3, sugerir crearla con skill_forge.
+                        let count = {
+                            let mut map = self.unknown_tool_requests.lock().unwrap();
+                            let entry = map.entry(action.clone()).or_insert(0);
+                            *entry += 1;
+                            *entry
+                        };
+                        if count >= 3 {
+                            format!(
+                                "herramienta desconocida: '{action}'. Has pedido esta herramienta \
+                                 {count} veces sin que exista. Considera crearla con 'skill_forge': \
+                                 Action: skill_forge\nAction Input: {action}"
+                            )
+                        } else {
+                            format!("herramienta desconocida: '{action}'")
+                        }
+                    }
                 };
                 // Si falló o se canceló, recuérdalo: (a) para no repetir esta acción
                 // idéntica y (b) para que la capa superior APRENDA del fallo.
@@ -1132,6 +1216,95 @@ fn sanitize(text: &str) -> String {
     collapsed.join("\n").trim().to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Parallel tool execution helpers
+// ---------------------------------------------------------------------------
+
+/// Extracts ALL `Action:` / `Action Input:` pairs from a block of LLM text.
+///
+/// Iterates lines looking for `Action: <tool>` markers and then the immediately
+/// following `Action Input: <value>` line. Returns a `Vec<(action_name, input)>`
+/// suitable for concurrent dispatch. Handles multiple Action/ActionInput pairs
+/// in a single LLM response (parallel execution pattern).
+#[allow(dead_code)]
+pub fn extract_all_actions(text: &str) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut pending_action: Option<String> = None;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Action:") {
+            // New action marker: store it (may replace an earlier one that had no input yet).
+            let name = rest.trim().to_string();
+            if !name.is_empty() {
+                pending_action = Some(name);
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("Action Input:") {
+            // Pair with the most recent pending action.
+            if let Some(action) = pending_action.take() {
+                let input = rest.trim().to_string();
+                pairs.push((action, input));
+            }
+        }
+    }
+    pairs
+}
+
+/// Executes multiple tools concurrently and returns all results.
+///
+/// For each `(action_name, input)` in `actions`:
+/// - If the tool does not exist, the observation is an error message.
+/// - If the tool `needs_confirm` and a `confirm` callback is provided, waits for
+///   approval; denies (fail-closed) when no callback is available.
+/// - Otherwise runs the tool and collects its output.
+///
+/// All tools are dispatched concurrently via `futures::future::join_all`.
+///
+/// Returns `Vec<(tool_name, input, observation)>`.
+#[allow(dead_code)]
+pub async fn run_parallel_tools(
+    tools: &crate::tool::ToolRegistry,
+    actions: &[(String, String)],
+    confirm: &Option<ConfirmFn>,
+) -> Vec<(String, String, String)> {
+    use futures::future::join_all;
+
+    let futures: Vec<_> = actions
+        .iter()
+        .map(|(action, input)| {
+            let action = action.clone();
+            let input = input.clone();
+            // Clone what we need to move into the async block.
+            let tool_opt = tools.get(&action);
+            let confirm_clone = confirm.clone();
+            async move {
+                let observation = match tool_opt {
+                    None => format!("herramienta desconocida: '{action}'"),
+                    Some(tool) => {
+                        let approved = match (tool.needs_confirm(input.trim()), &confirm_clone) {
+                            (None, _) => true,
+                            (Some(desc), Some(cb)) => cb(desc).await,
+                            // Needs confirm but no callback → fail-closed.
+                            (Some(_), None) => false,
+                        };
+                        if !approved {
+                            "❌ acción cancelada por el usuario (no se ejecutó).".to_string()
+                        } else {
+                            match tool.run(input.trim()).await {
+                                Ok(out) => out,
+                                Err(e) => format!("error de herramienta: {e}"),
+                            }
+                        }
+                    }
+                };
+                (action, input, observation)
+            }
+        })
+        .collect();
+
+    join_all(futures).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1261,6 +1434,25 @@ mod tests {
         // Un '<' legítimo (comparación, con espacios o dígitos) NO se toca.
         assert_eq!(sanitize("a < b"), "a < b");
         assert_eq!(sanitize("x<5"), "x<5");
+    }
+
+    #[test]
+    fn extract_all_actions_returns_pairs() {
+        let text = "Thought: first\nAction: web_search\nAction Input: rust futures\n\
+                    Thought: second\nAction: calculator\nAction Input: 2+2";
+        let pairs = extract_all_actions(text);
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].0, "web_search");
+        assert_eq!(pairs[0].1, "rust futures");
+        assert_eq!(pairs[1].0, "calculator");
+        assert_eq!(pairs[1].1, "2+2");
+    }
+
+    #[test]
+    fn extract_all_actions_empty_on_no_actions() {
+        let text = "Thought: nothing here\nFinal Answer: done";
+        let pairs = extract_all_actions(text);
+        assert!(pairs.is_empty());
     }
 
     #[test]
