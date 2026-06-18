@@ -4,6 +4,22 @@ import { useEffect, useRef, useState } from "react";
 import { AppShell, Icon, Markdown, MessageActions, VoiceBar } from "@/components";
 import { useT } from "@/lib/i18n";
 import { useSpeech, useDictation } from "@/lib/voice";
+import { LightboxProvider, useLightbox } from "@/lib/lightbox";
+
+// Foto adjunta por Ariel, mostrada en su burbuja del chat. Clic = ampliar (lightbox).
+function ChatPhoto({ src, name }: { src: string; name: string }) {
+  const lightbox = useLightbox();
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={src}
+      alt={name}
+      onClick={() => lightbox.open(src, name)}
+      title="Ampliar"
+      style={{ cursor: "zoom-in", maxWidth: 240, maxHeight: 240, borderRadius: 12, marginTop: 6, objectFit: "cover" }}
+    />
+  );
+}
 import {
   agentStream,
   crewStream,
@@ -33,6 +49,8 @@ type Turn = {
   steps: Step[];
   answer: string;
   meta?: string;
+  /** Foto adjunta por Ariel (data URL), para mostrarla en su burbuja. NO se persiste. */
+  image?: string;
   /** Mensaje que AION inició por su cuenta (saludo/aviso): se muestra sin burbuja de usuario. */
   reach?: { kind: string; at: string };
 };
@@ -117,7 +135,7 @@ export default function ChatPage() {
   const [pendingAsk, setPendingAsk] = useState<{ id: string; text: string } | null>(null);
   const [askDraft, setAskDraft] = useState("");
   // Adjunto de imagen pendiente (se envía con el siguiente mensaje, vía visión).
-  const [pendingImage, setPendingImage] = useState<{ name: string; b64: string } | null>(null);
+  const [pendingImage, setPendingImage] = useState<{ name: string; b64: string; dataUrl: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   // ¿Ariel ya habló en esta sesión? Si saludó él primero, el saludo automático
@@ -148,7 +166,12 @@ export default function ChatPage() {
   // Persiste los turnos de la conversación actual + actualiza su título en la lista.
   useEffect(() => {
     if (!convoId) return;
-    localStorage.setItem(turnsKey(convoId), JSON.stringify(turns));
+    // No persistimos las imágenes adjuntas (data URL pesado): se quedan en la sesión,
+    // como las fotos del agente. Evita reventar la cuota de localStorage.
+    localStorage.setItem(
+      turnsKey(convoId),
+      JSON.stringify(turns.map(({ image, ...rest }) => rest)),
+    );
     if (turns.length === 0) return;
     setConvos((prev) => {
       const title = turns[0].prompt.slice(0, 40) || "Nueva conversación";
@@ -264,7 +287,8 @@ export default function ChatPage() {
     if (!b64) return;
     if (file.type.startsWith("image/")) {
       // Queda pendiente; se analiza al pulsar Enviar (con tu pregunta opcional).
-      setPendingImage({ name: file.name, b64 });
+      // Guardamos también el data URL para mostrar la foto en el chat.
+      setPendingImage({ name: file.name, b64, dataUrl: `data:${file.type || "image/png"};base64,${b64}` });
       return;
     }
     // Documento → ingestar en la biblioteca (dominio elegido o "documentos").
@@ -300,7 +324,7 @@ export default function ChatPage() {
       setInput("");
       setBusy(true);
       const idx = turns.length;
-      setTurns((t) => [...t, { prompt: prompt || `🖼️ ${img.name}`, mode, thinking: "", steps: [], answer: "" }]);
+      setTurns((t) => [...t, { prompt: prompt || "", image: img.dataUrl, mode, thinking: "", steps: [], answer: "" }]);
       try {
         const answer = await visionAsk(prompt, img.b64);
         setTurns((prev) => prev.map((t, i) => (i === idx ? { ...t, answer } : t)));
@@ -434,6 +458,7 @@ export default function ChatPage() {
   }, [turns, busy, handsFree, lang]);
 
   return (
+    <LightboxProvider>
     <AppShell title={t("nav.chat")}>
       <div className="flex flex-col h-full max-w-7xl mx-auto w-full px-6">
       <div className="flex items-center gap-2 py-3 shrink-0">
@@ -585,7 +610,12 @@ export default function ChatPage() {
               </div>
             ) : (
             <>
-            {t.prompt && <div className="self-end msg-user max-w-[80%]">{t.prompt}</div>}
+            {(t.prompt || t.image) && (
+              <div className="self-end msg-user max-w-[80%] flex flex-col items-end">
+                {t.image && <ChatPhoto src={t.image} name="foto" />}
+                {t.prompt && <div className={t.image ? "mt-1" : ""}>{t.prompt}</div>}
+              </div>
+            )}
 
             {t.mode === "chat" && t.thinking && (
               <details className="text-sm" style={{ color: "var(--text-3)" }}>
@@ -765,5 +795,6 @@ export default function ChatPage() {
       </form>
       </div>
     </AppShell>
+    </LightboxProvider>
   );
 }

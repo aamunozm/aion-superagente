@@ -210,6 +210,45 @@
     border-radius: 12px;
   }
 
+  /* Bloque de código con botón "copiar" flotante (aparece al pasar el ratón). */
+  .md-codewrap {
+    position: relative;
+    margin: 0.8em 0;
+  }
+  .md-codewrap .md-scroll {
+    margin: 0;
+  }
+  .md-copy {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 1;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 7px;
+    background: var(--surface);
+    border: 1px solid var(--border-2);
+    color: var(--text-2);
+    opacity: 0;
+    transition: opacity 180ms var(--ease-premium), color 180ms, border-color 180ms;
+  }
+  .md-codewrap:hover .md-copy {
+    opacity: 0.95;
+  }
+  .md-copy:hover {
+    color: var(--gold-deep);
+    border-color: var(--accent);
+  }
+
+  /* Imágenes del chat: realce sutil al pasar (invitan al zoom). */
+  .md img {
+    transition: filter 180ms var(--ease-premium);
+  }
+  .md img:hover {
+    filter: brightness(1.04);
+  }
+
   /* Tablas estilo Perplexity: limpias, con cabecera tenue y filas alternas. */
   .md table {
     border-collapse: collapse;
