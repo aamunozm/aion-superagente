@@ -70,6 +70,17 @@ const PROVIDERS: Record<
   },
 };
 
+// Modelos disponibles en la API de DeepSeek (platform.deepseek.com)
+const DEEPSEEK_MODELS: { id: string; label: string; desc: string }[] = [
+  { id: "deepseek-v4-pro",    label: "DeepSeek V4 Pro",      desc: "Máxima capacidad · tareas complejas" },
+  { id: "deepseek-v4-flash",  label: "DeepSeek V4 Flash",    desc: "Rápido y eficiente · menor coste" },
+  { id: "deepseek-chat",      label: "DeepSeek V3 (chat)",   desc: "Modelo general estable · recomendado" },
+  { id: "deepseek-reasoner",  label: "DeepSeek R1",          desc: "Razonamiento profundo · cadena larga" },
+  { id: "deepseek-r1-0528",   label: "DeepSeek R1-0528",     desc: "Snapshot R1 de mayo 2025" },
+  { id: "deepseek-v3-0324",   label: "DeepSeek V3-0324",     desc: "Snapshot V3 de marzo 2025" },
+  { id: "__custom__",         label: "Otro (escribir ID)",   desc: "" },
+];
+
 export default function SettingsPage() {
   const { t, lang, setLang } = useT();
   const [email, setEmail] = useState<string | null>(null);
@@ -100,6 +111,7 @@ export default function SettingsPage() {
   const [customUrl, setCustomUrl] = useState<string>("");
   const [provBusy, setProvBusy] = useState(false);
   const [provMsg, setProvMsg] = useState<string>("");
+  const [dsCustomModel, setDsCustomModel] = useState(false);
 
   function applyProv(p: ProviderState) {
     setProv(p);
@@ -109,6 +121,8 @@ export default function SettingsPage() {
       setProvSel("google");
     } else if (p.base_url.includes("deepseek")) {
       setProvSel("deepseek");
+      const known = DEEPSEEK_MODELS.some(m => m.id !== "__custom__" && m.id === p.model);
+      setDsCustomModel(!known && p.model !== "");
     } else {
       setProvSel("custom");
     }
@@ -557,7 +571,16 @@ export default function SettingsPage() {
                   onClick={() => {
                     setProvSel(k);
                     setProvMsg("");
-                    if (k !== "local") setProvModel(prov?.kind === "external" && prov.base_url === PROVIDERS[k].base_url ? prov.model : PROVIDERS[k].defaultModel);
+                    if (k !== "local") {
+                      const model = prov?.kind === "external" && prov.base_url === PROVIDERS[k].base_url
+                        ? prov.model
+                        : PROVIDERS[k].defaultModel;
+                      setProvModel(model);
+                      if (k === "deepseek") {
+                        const known = DEEPSEEK_MODELS.some(m => m.id !== "__custom__" && m.id === model);
+                        setDsCustomModel(!known && model !== "");
+                      }
+                    }
                   }}
                   className="px-3 py-1.5 rounded-xl text-xs transition-all"
                   style={{
@@ -588,13 +611,50 @@ export default function SettingsPage() {
                   autoComplete="off"
                 />
               )}
-              <input
-                className="input"
-                placeholder="Modelo (p. ej. gemini-2.5-flash, deepseek-chat)"
-                value={provModel}
-                onChange={(e) => setProvModel(e.target.value)}
-                autoComplete="off"
-              />
+
+              {provSel === "deepseek" ? (
+                <>
+                  <select
+                    className="input"
+                    value={dsCustomModel ? "__custom__" : (DEEPSEEK_MODELS.find(m => m.id === provModel) ? provModel : "__custom__")}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === "__custom__") {
+                        setDsCustomModel(true);
+                        setProvModel("");
+                      } else {
+                        setDsCustomModel(false);
+                        setProvModel(v);
+                      }
+                    }}
+                    style={{ background: "var(--surface-1)", color: "var(--text-1)" }}
+                  >
+                    {DEEPSEEK_MODELS.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}{m.desc ? ` — ${m.desc}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {dsCustomModel && (
+                    <input
+                      className="input"
+                      placeholder="ID del modelo (p. ej. deepseek-v5-pro)"
+                      value={provModel}
+                      onChange={(e) => setProvModel(e.target.value)}
+                      autoComplete="off"
+                      autoFocus
+                    />
+                  )}
+                </>
+              ) : (
+                <input
+                  className="input"
+                  placeholder="Modelo (p. ej. gemini-2.5-flash, deepseek-chat)"
+                  value={provModel}
+                  onChange={(e) => setProvModel(e.target.value)}
+                  autoComplete="off"
+                />
+              )}
               <input
                 className="input"
                 type="password"
