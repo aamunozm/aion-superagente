@@ -11,5 +11,7 @@
 //! la capa de capabilities (conceder red/FS explícitamente a skills de confianza).
 
 mod host;
+pub mod skillbook;
 
 pub use host::{SkillManifest, WasmSkillHost, SUM_TO_WAT};
+pub use skillbook::{Procedure, ProcedureStep, SkillBook};

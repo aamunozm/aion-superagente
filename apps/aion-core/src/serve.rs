@@ -2321,6 +2321,15 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
+        // 📘 SkillBook (Hermes): memoria PROCEDIMENTAL — cómo hacer cosas que ya funcionaron.
+        // El agente lista/busca/guarda/actualiza procedimientos reutilizables (ranking por
+        // reputación bayesiana × relevancia). Persiste en skillbook.json.
+        {
+            let book = std::sync::Arc::new(tokio::sync::Mutex::new(aion_skills::SkillBook::load(
+                crate::app_data_dir().join("skillbook.json"),
+            )));
+            tools.register(Arc::new(crate::skillbook_tool::SkillBookTool::new(book)));
+        }
         // 💬 COMUNICACIONES: calendario, contactos, Mensajes y WhatsApp. Cada una pasa por
         // `comms::CommsPolicy` (filtro de con quién/qué canal) y los envíos piden HITL. Va en
         // el modo Agente (con el que hablas) con el set completo, incluido enviar.
