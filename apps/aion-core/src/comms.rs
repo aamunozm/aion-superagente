@@ -41,9 +41,10 @@ pub struct Contact {
     pub note: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommsPolicy {
     /// Interruptor maestro: si está desactivado, NINGUNA herramienta de comunicación opera.
+    /// Por defecto false: las comunicaciones nacen apagadas (privacidad por defecto).
     #[serde(default)]
     pub enabled: bool,
     /// Si es true, un contacto no listado se PERMITE (modo abierto). Por defecto false:
@@ -53,16 +54,6 @@ pub struct CommsPolicy {
     /// Allowlist de contactos.
     #[serde(default)]
     pub contacts: Vec<Contact>,
-}
-
-impl Default for CommsPolicy {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            default_allow: false,
-            contacts: Vec::new(),
-        }
-    }
 }
 
 /// Normaliza un handle para comparar (teléfonos sin espacios/guiones, emails en minúscula).
