@@ -17,7 +17,7 @@ use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, StreamChunk};
 use aion_kernel::types::Message;
 use aion_llm::OllamaEngine;
 use aion_memory::ConsolidationConfig;
-use aion_orchestrator::{CalculatorTool, ReActAgent, ToolRegistry};
+use aion_orchestrator::{CalculatorTool, ReActAgent, Tool, ToolRegistry};
 use aion_skills::{SkillManifest, WasmSkillHost, SUM_TO_WAT};
 use axum::{
     extract::{Query, State},
@@ -1670,6 +1670,62 @@ fn is_read_url_intent(s: &str) -> bool {
     read.iter().any(|c| m.contains(c)) && !interact.iter().any(|c| m.contains(c))
 }
 
+/// ¿Pide LISTAR las redes WiFi al alcance? (descubrimiento; NO conectar/cambiar/configurar).
+/// Gate del fast-path determinista: el LLM tiende a alucinar comandos de shell para esto.
+fn is_wifi_list_query(task: &str) -> bool {
+    let m = task.to_lowercase();
+    let wifi = m.contains("wifi")
+        || m.contains("wi-fi")
+        || m.contains("wi fi")
+        || m.contains("inalámbric")
+        || m.contains("inalambric");
+    if !wifi {
+        return false;
+    }
+    // Intenciones que NO son «listar disponibles» → que las maneje el agente normal.
+    const NOT_LIST: &[&str] = &[
+        "conect",
+        "conéct",
+        "contraseña",
+        "contrasena",
+        "clave",
+        "password",
+        "cambia",
+        "configura",
+        "apaga",
+        "apagar",
+        "enciende",
+        "encender",
+        "olvida",
+        "borra",
+    ];
+    if NOT_LIST.iter().any(|k| m.contains(k)) {
+        return false;
+    }
+    const LIST: &[&str] = &[
+        "disponible",
+        "alcance",
+        "alrededor",
+        "cerca",
+        "hay",
+        "cuál",
+        "cual",
+        "qué redes",
+        "que redes",
+        "lista",
+        "listar",
+        "escanea",
+        "escanear",
+        "muestra",
+        "ver",
+        "detecta",
+        "busca",
+        "cuántas",
+        "cuantas",
+    ];
+    LIST.iter().any(|k| m.contains(k))
+}
+
 /// Agente ReAct con herramientas. Emite por SSE los pasos (thought/action/
 /// observation) y al final `answer` + `done`.
 async fn agent(
@@ -1703,6 +1759,33 @@ async fn agent(
                 out.push_str("\n\n");
             }
             out.push_str(&crate::faces::recognize_reply(&scan));
+            agent_perceive_and_remember(task, out.clone());
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "answer", "text": out, "steps": 1 }).to_string(),
+                ))
+                .await;
+            let _ = tx
+                .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                .await;
+        });
+        let stream = ReceiverStream::new(rx).map(Ok);
+        return Sse::new(stream);
+    }
+
+    // 📶 FAST-PATH DE REDES WIFI (determinista, anti-teatro): listar las redes al alcance es
+    // SIEMPRE wifi_scan. Bajo el contexto pesado de producción el LLM alucina comandos de
+    // terminal (networksetup/airport) en vez de usar la tool. Lo ejecutamos aquí y respondemos
+    // DESDE su salida REAL — imposible inventar redes. (Mismo principio que el reconocimiento
+    // facial; corrige el misruteo donde el prompt no basta.)
+    if is_wifi_list_query(&body.task) {
+        crate::inner_state::set_focus("agente", "escaneando redes WiFi");
+        let task = body.task.clone();
+        tokio::spawn(async move {
+            let out = match crate::agent_tools::WifiTool::new().run("").await {
+                Ok(s) => s,
+                Err(e) => format!("No pude escanear las redes WiFi: {e}"),
+            };
             agent_perceive_and_remember(task, out.clone());
             let _ = tx
                 .send(Event::default().data(
@@ -1984,6 +2067,7 @@ async fn agent(
         // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
+        tools.register(Arc::new(crate::agent_tools::WifiTool::new()));
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
         tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
         tools.register(Arc::new(crate::agent_tools::GraphSearchTool::new()));
@@ -2431,6 +2515,7 @@ async fn crew(
         // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
+        tools.register(Arc::new(crate::agent_tools::WifiTool::new()));
         tools.register(Arc::new(crate::agent_tools::ShellTool::new(None)));
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
         tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));

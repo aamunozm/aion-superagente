@@ -172,6 +172,9 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
              skills para esto.\n\
              • RED LOCAL (cuántos equipos hay conectados, qué dispositivos, sus IPs): usa \
              SIEMPRE net_scan. NUNCA uses web_search para esto ni inventes IPs.\n\
+             • REDES WIFI al alcance («qué WiFi hay», «redes disponibles», «a qué me conecto»): \
+             usa SIEMPRE wifi_scan. NUNCA improvises comandos de terminal (airport ya NO existe \
+             en macOS) ni inventes redes.\n\
              • DIRECCIONES/NEGOCIOS/LUGARES (qué negocio hay en una calle, dónde queda \
              algo, tipo de local): usa SIEMPRE place_lookup (mapas), NUNCA web_search \
              para direcciones.\n\

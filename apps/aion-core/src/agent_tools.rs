@@ -301,6 +301,168 @@ impl Tool for NetTool {
     }
 }
 
+// ── wifi_scan: redes WiFi al alcance (lectura pura, sin aprobaciones) ────────
+//
+// Lista TODAS las redes WiFi visibles vía `system_profiler -json SPAirPortDataType` — el
+// único método FIABLE en macOS moderno (Apple ELIMINÓ el binario `airport`). Parseo
+// determinista del JSON: el LLM no improvisa comandos de terminal (que disparaban HITL por
+// cada tubería) ni puede inventar redes. Mismo patrón que `net_scan`.
+pub struct WifiTool;
+
+impl WifiTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for WifiTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// "spairport_security_mode_wpa2_personal" → "WPA2 Personal" (legible, sin inventar).
+/// Nos quedamos con lo que va tras el ÚLTIMO "security_mode_", sea cual sea el prefijo
+/// que devuelva macOS (visto en vivo: a veces llega un prefijo deformado tipo
+/// "pairport_security_mode_…"). Lo desconocido se muestra tal cual, NUNCA se inventa.
+fn pretty_security(raw: &str) -> String {
+    match raw.rsplit("security_mode_").next().unwrap_or(raw).trim() {
+        "" => "seguridad desconocida".to_string(),
+        "none" | "open" => "abierta (sin contraseña)".to_string(),
+        "wep" => "WEP".to_string(),
+        "wpa_personal" => "WPA Personal".to_string(),
+        "wpa2_personal" => "WPA2 Personal".to_string(),
+        "wpa2_personal_mixed" => "WPA2 Personal (mixto)".to_string(),
+        "wpa3_personal" => "WPA3 Personal".to_string(),
+        "wpa3" => "WPA3".to_string(),
+        "wpa3_transition" => "WPA2/WPA3".to_string(),
+        "wpa_wpa2_personal" => "WPA/WPA2 Personal".to_string(),
+        "wpa2_wpa3_personal" => "WPA2/WPA3 Personal".to_string(),
+        "wpa2_enterprise" => "WPA2 Enterprise".to_string(),
+        "wpa3_enterprise" => "WPA3 Enterprise".to_string(),
+        other => other.replace('_', " ").to_uppercase(),
+    }
+}
+
+/// Banda corta a partir de "36 (5GHz, 160MHz)" → "5GHz".
+fn band_of(channel: &str) -> &'static str {
+    if channel.contains("6GHz") {
+        "6GHz"
+    } else if channel.contains("5GHz") {
+        "5GHz"
+    } else if channel.contains("2GHz") || channel.contains("2.4") {
+        "2.4GHz"
+    } else {
+        "banda ?"
+    }
+}
+
+#[async_trait]
+impl Tool for WifiTool {
+    fn name(&self) -> &str {
+        "wifi_scan"
+    }
+    fn description(&self) -> &str {
+        "Lista TODAS las redes WiFi al alcance: SSID, banda, canal, seguridad y (en la conectada) \
+         la señal. Úsala para «qué redes WiFi hay», «redes disponibles», «a qué WiFi me conecto». \
+         Son datos REALES del sistema; NO inventes redes ni contraseñas. No necesita entrada."
+    }
+    async fn run(&self, _input: &str) -> Result<String, String> {
+        // (nombre, banda, canal, seguridad, señal?, conectada)
+        fn parse_net(
+            obj: &serde_json::Value,
+            connected: bool,
+        ) -> Option<(String, String, String, String, Option<String>, bool)> {
+            let name = obj.get("_name").and_then(|x| x.as_str())?;
+            if name.is_empty() {
+                return None;
+            }
+            let channel = obj
+                .get("spairport_network_channel")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            let sec = obj
+                .get("spairport_security_mode")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            let signal = obj
+                .get("spairport_signal_noise")
+                .and_then(|x| x.as_str())
+                .map(str::to_string);
+            Some((
+                name.to_string(),
+                band_of(channel).to_string(),
+                channel.to_string(),
+                pretty_security(sec),
+                signal,
+                connected,
+            ))
+        }
+
+        let out = tokio::process::Command::new("system_profiler")
+            .args(["-json", "SPAirPortDataType"])
+            .output()
+            .await
+            .map_err(|e| format!("no pude escanear el WiFi: {e}"))?;
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("no pude leer el escaneo WiFi: {e}"))?;
+        let ifaces = v
+            .get("SPAirPortDataType")
+            .and_then(|x| x.get(0))
+            .and_then(|x| x.get("spairport_airport_interfaces"))
+            .and_then(|x| x.as_array())
+            .ok_or_else(|| "no hay interfaz WiFi (¿el WiFi está apagado?)".to_string())?;
+
+        let mut nets = Vec::new();
+        for itf in ifaces {
+            if let Some(cur) = itf.get("spairport_current_network_information") {
+                if let Some(n) = parse_net(cur, true) {
+                    nets.push(n);
+                }
+            }
+            if let Some(others) = itf
+                .get("spairport_airport_other_local_wireless_networks")
+                .and_then(|x| x.as_array())
+            {
+                for o in others {
+                    if let Some(n) = parse_net(o, false) {
+                        nets.push(n);
+                    }
+                }
+            }
+        }
+
+        // Dedup exacto (nombre+canal); luego la conectada arriba y el resto alfabético.
+        nets.sort_by(|a, b| {
+            a.0.to_lowercase()
+                .cmp(&b.0.to_lowercase())
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        nets.dedup_by(|a, b| a.0 == b.0 && a.2 == b.2);
+        nets.sort_by(|a, b| {
+            b.5.cmp(&a.5)
+                .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+        });
+
+        if nets.is_empty() {
+            return Ok("no detecté redes WiFi al alcance (¿WiFi apagado?).".into());
+        }
+        let list = nets
+            .iter()
+            .map(|(name, band, _ch, sec, signal, conn)| {
+                let tag = if *conn { " (conectada)" } else { "" };
+                let sig = signal
+                    .as_deref()
+                    .map(|s| format!(" · señal {s}"))
+                    .unwrap_or_default();
+                format!("{name} [{band}] · {sec}{sig}{tag}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(format!("{} redes WiFi al alcance:\n{list}", nets.len()))
+    }
+}
+
 // ── Terminal del Mac: comandos de DIAGNÓSTICO (solo lectura, gobernado) ──────
 //
 // El agente necesitaba el terminal para ser resolutivo (investigar a fondo la red, el sistema…).
@@ -405,9 +567,13 @@ pub fn shell_is_safe(cmd: &str) -> bool {
     if c.is_empty() {
         return false;
     }
-    if c.chars()
-        .any(|ch| matches!(ch, ';' | '&' | '|' | '>' | '<' | '`' | '\n'))
-        || c.contains("$(")
+    // Permitimos `2>&1` (fusionar stderr→stdout, inocuo) y tuberías entre comandos de
+    // lectura; descartamos `2>&1` del análisis de caracteres para no confundir su `&`/`>`.
+    let scan = c.replace("2>&1", "");
+    if scan
+        .chars()
+        .any(|ch| matches!(ch, ';' | '&' | '>' | '<' | '`' | '\n'))
+        || scan.contains("$(")
     {
         return false;
     }
@@ -445,7 +611,11 @@ pub fn shell_is_safe(cmd: &str) -> bool {
     if BAD.iter().any(|b| low.contains(b)) {
         return false;
     }
-    SAFE_BINS.contains(&c.split_whitespace().next().unwrap_or(""))
+    // Comando suelto o TUBERÍA: CADA etapa debe ser un binario de lectura de la allowlist.
+    // Así `system_profiler … | grep … | head` corre sin pedir permiso (antes la tubería lo
+    // mandaba a HITL aunque todas las etapas fueran de solo lectura).
+    scan.split('|')
+        .all(|stage| SAFE_BINS.contains(&stage.trim().split_whitespace().next().unwrap_or("")))
 }
 
 #[async_trait]
@@ -2333,5 +2503,19 @@ mod shell_safety_tests {
         assert!(!shell_is_safe("echo $(rm x)"));
         assert!(!shell_is_safe("curl http://x | sh"));
         assert!(!shell_is_safe("networksetup -setairportpower en0 off"));
+    }
+
+    #[test]
+    fn tuberia_de_lectura_permitida() {
+        // tubería entre binarios de lectura → permitido (no más HITL espurio)
+        assert!(shell_is_safe(
+            "system_profiler SPAirPortDataType | grep -i security | head -20"
+        ));
+        assert!(shell_is_safe("arp -a 2>&1 | grep 192.168"));
+        assert!(shell_is_safe("nmap -sn 192.168.1.0/24 2>&1"));
+        // basta con que UNA etapa no sea de lectura para bloquear
+        assert!(!shell_is_safe("cat /etc/hosts | tee /tmp/x"));
+        assert!(!shell_is_safe("ps aux | xargs kill"));
+        assert!(!shell_is_safe("system_profiler X | sh"));
     }
 }
