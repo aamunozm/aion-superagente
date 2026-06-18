@@ -755,22 +755,39 @@ fn sanitize(text: &str) -> String {
             s.truncate(i);
         }
     }
-    // 3) Colapsar repetición degenerada: ningún token se repite >3 veces seguidas.
-    let mut out: Vec<&str> = Vec::new();
-    let mut run = 0usize;
-    let mut last = "";
-    for tok in s.split_whitespace() {
-        if tok == last {
-            run += 1;
-        } else {
-            run = 1;
-            last = tok;
-        }
-        if run <= 3 {
-            out.push(tok);
-        }
-    }
-    out.join(" ").trim().to_string()
+    // 3) Colapsar repetición degenerada POR LÍNEA: ningún token se repite >3 veces
+    //    seguidas. CRÍTICO: se hace línea a línea para PRESERVAR los saltos de línea —
+    //    antes era un único `split_whitespace()` + `join(" ")` que aplanaba TODO el texto
+    //    a una sola línea, destruyendo la estructura Markdown (encabezados, listas,
+    //    tablas, ---) y dejando solo el formato inline. Se conserva además la indentación
+    //    inicial de cada línea (la usan las listas anidadas) y los `|` de las tablas.
+    let collapsed: Vec<String> = s
+        .lines()
+        .map(|line| {
+            let indent_len = line.len() - line.trim_start().len();
+            let indent = &line[..indent_len];
+            let mut out: Vec<&str> = Vec::new();
+            let mut run = 0usize;
+            let mut last = "";
+            for tok in line.split_whitespace() {
+                if tok == last {
+                    run += 1;
+                } else {
+                    run = 1;
+                    last = tok;
+                }
+                if run <= 3 {
+                    out.push(tok);
+                }
+            }
+            if out.is_empty() {
+                String::new()
+            } else {
+                format!("{indent}{}", out.join(" "))
+            }
+        })
+        .collect();
+    collapsed.join("\n").trim().to_string()
 }
 
 #[cfg(test)]
@@ -836,5 +853,28 @@ mod tests {
         // Un '<' legítimo (comparación, con espacios o dígitos) NO se toca.
         assert_eq!(sanitize("a < b"), "a < b");
         assert_eq!(sanitize("x<5"), "x<5");
+    }
+
+    #[test]
+    fn sanitize_preserves_newlines_and_markdown_structure() {
+        // REGRESIÓN: antes el colapso de repeticiones aplanaba TODO a una línea
+        // (split_whitespace + join(" ")), destruyendo el Markdown. Debe conservar los
+        // saltos de línea, la indentación de listas anidadas y los `|` de tablas.
+        let md = "# Título\n\n- uno\n  - anidado\n\n| A | B |\n|---|---|\n| 1 | 2 |";
+        let out = sanitize(md);
+        assert!(out.contains("# Título"), "encabezado en su línea");
+        assert!(out.contains("\n- uno"), "lista preservada");
+        assert!(
+            out.contains("  - anidado"),
+            "indentación de anidado preservada"
+        );
+        assert!(out.contains("|---|---|"), "separador de tabla preservado");
+        assert_eq!(
+            out.lines().count(),
+            8,
+            "se conservan las 8 líneas (2 en blanco internas)"
+        );
+        // Y sigue colapsando repeticiones degeneradas DENTRO de una línea.
+        assert_eq!(sanitize("a\nb b b b b"), "a\nb b b");
     }
 }
