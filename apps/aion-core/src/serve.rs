@@ -2050,7 +2050,6 @@ async fn agent(
         tools.register(Arc::new(crate::tools::CalendarCreateTool));
         tools.register(Arc::new(crate::tools::DiscordTool));
         tools.register(Arc::new(crate::tools::CodeSandboxTool));
-        // 📘 MEMORIA PROCEDIMENTAL: SkillBook — procedimientos reutilizables del agente.
         let book_path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
             .join(".aion")
             .join("skillbook.json");
