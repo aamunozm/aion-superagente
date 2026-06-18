@@ -1,10 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import AppShell from "@/components/AppShell";
-import Icon from "@/components/Icon";
-import Markdown from "@/components/Markdown";
+import { AppShell, Icon, Markdown, MessageActions, VoiceBar } from "@/components";
 import { useT } from "@/lib/i18n";
+import { useSpeech, useDictation } from "@/lib/voice";
 import {
   agentStream,
   crewStream,
@@ -70,13 +69,20 @@ const STEP_STYLE: Record<Step["kind"], { icon: React.ComponentProps<typeof Icon>
 };
 
 export default function ChatPage() {
-  const { t } = useT();
+  const { t, lang } = useT();
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<Mode>("agent");
   const [think, setThink] = useState(true);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
   const [modelReady, setModelReady] = useState(true);
+  // ── Voz: TTS (leer respuestas) + STT (hablarle) + modo manos libres ──
+  const speech = useSpeech();
+  const [handsFree, setHandsFree] = useState(false);
+  // Índice del último turno que AION ya leyó en voz (evita releer en cada render).
+  const lastSpokenRef = useRef<number>(-1);
+  // El dictado, al terminar de oírte, envía directamente lo transcrito.
+  const dictation = useDictation(lang, (text) => { void runSend(text); });
   // Proveedor del motor (local Ollama / API externa) para el indicador + toggle del header.
   const [prov, setProv] = useState<ProviderState | null>(null);
   const [provBusy, setProvBusy] = useState(false);
@@ -279,7 +285,11 @@ export default function ChatPage() {
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
-    const prompt = input.trim();
+    await runSend(input);
+  }
+
+  async function runSend(rawPrompt: string) {
+    const prompt = rawPrompt.trim();
     if (busy) return;
     userSpokeRef.current = true;
 
@@ -384,6 +394,44 @@ export default function ChatPage() {
       setBusy(false);
     }
   }
+
+  // Micrófono: alterna escuchar/parar. Antes de oír, calla cualquier lectura
+  // en curso para no transcribir la propia voz de AION.
+  function onMic() {
+    if (dictation.listening) {
+      dictation.stop();
+    } else {
+      speech.stop();
+      dictation.start();
+    }
+  }
+
+  // Manos libres: al activar, AION leerá sus respuestas y reabrirá el micro al
+  // terminar. Al desactivar, corta voz y escucha de inmediato.
+  function toggleHandsFree() {
+    setHandsFree((h) => {
+      const next = !h;
+      if (!next) { speech.stop(); dictation.stop(); }
+      return next;
+    });
+  }
+
+  // Conversación hablada en tiempo real: cuando una respuesta termina (no hay
+  // stream en curso) y el modo manos libres está activo, AION la lee en voz alta
+  // y, al acabar, reabre el micrófono para que sigas hablando sin tocar nada.
+  useEffect(() => {
+    if (!handsFree || busy || turns.length === 0) return;
+    const i = turns.length - 1;
+    const last = turns[i];
+    if (!last.answer || last.answer.startsWith("⚠️")) return;
+    if (i === lastSpokenRef.current) return;
+    lastSpokenRef.current = i;
+    speech.speak(`turn-${i}`, last.answer, lang, () => {
+      if (handsFree && dictation.supported && !busy) dictation.start();
+    });
+    // speech/dictation son estables (useCallback); el disparador real es turns/busy.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turns, busy, handsFree, lang]);
 
   return (
     <AppShell title={t("nav.chat")}>
@@ -527,6 +575,13 @@ export default function ChatPage() {
             {t.reach ? (
               <div className="msg w-full self-start">
                 <Markdown>{t.answer}</Markdown>
+                <MessageActions
+                  text={t.answer}
+                  speaking={speech.speakingId === `turn-${i}`}
+                  canSpeak={speech.supported}
+                  onSpeak={() => speech.speak(`turn-${i}`, t.answer, lang)}
+                  onStop={speech.stop}
+                />
               </div>
             ) : (
             <>
@@ -567,6 +622,13 @@ export default function ChatPage() {
                     {t.meta}
                   </p>
                 )}
+                <MessageActions
+                  text={t.answer}
+                  speaking={speech.speakingId === `turn-${i}`}
+                  canSpeak={speech.supported}
+                  onSpeak={() => speech.speak(`turn-${i}`, t.answer, lang)}
+                  onStop={speech.stop}
+                />
               </div>
             )}
             </>
@@ -681,11 +743,21 @@ export default function ChatPage() {
             <span className="inline-flex items-center gap-1"><Icon name="brain" size={14} /> {think ? "on" : "off"}</span>
           </button>
         )}
+        <VoiceBar
+          micSupported={dictation.supported}
+          ttsSupported={speech.supported}
+          listening={dictation.listening}
+          handsFree={handsFree}
+          disabled={busy}
+          onMic={onMic}
+          onToggleHandsFree={toggleHandsFree}
+        />
         <input
           className="input"
-          placeholder={mode === "chat" ? t("chat.placeholderChat") : mode === "crew" ? t("chat.placeholderCrew") : t("chat.placeholderAgent")}
-          value={input}
+          placeholder={dictation.listening ? t("chat.listening") : mode === "chat" ? t("chat.placeholderChat") : mode === "crew" ? t("chat.placeholderCrew") : t("chat.placeholderAgent")}
+          value={dictation.listening && dictation.interim ? dictation.interim : input}
           onChange={(e) => setInput(e.target.value)}
+          style={dictation.listening ? { color: "var(--text-3)", fontStyle: "italic" } : undefined}
         />
         <button className="btn shrink-0" disabled={busy}>
           {busy ? "…" : t("chat.send")}
