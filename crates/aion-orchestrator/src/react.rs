@@ -113,6 +113,12 @@ pub struct ReActAgent<'a> {
     /// Contador de solicitudes a herramientas desconocidas: nombre → número de veces pedida.
     /// Si una herramienta se solicita ≥3 veces sin existir, se sugiere crearla con skill_forge.
     unknown_tool_requests: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u32>>>,
+    /// PRESUPUESTO DE TIEMPO REAL del bucle. El límite por `max_steps` es solo un
+    /// proxy del tiempo: un único paso con una herramienta lenta (navegador, red)
+    /// puede agotar el timeout de pared ANTES de que la síntesis final rescate lo
+    /// recopilado. Con un deadline el bucle cede a tiempo y SIEMPRE pasa por la
+    /// síntesis con lo que tenga, en vez de morir a media iteración. Opcional.
+    deadline: Option<std::time::Duration>,
 }
 
 impl<'a> ReActAgent<'a> {
@@ -130,7 +136,16 @@ impl<'a> ReActAgent<'a> {
             unknown_tool_requests: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            deadline: None,
         }
+    }
+
+    /// Fija el PRESUPUESTO DE TIEMPO del bucle. Debe dejar holgura bajo el timeout
+    /// de pared externo para que la síntesis final (una generación más) quepa: p. ej.
+    /// con 150 s de pared, un deadline de ~120 s deja ~30 s para sintetizar.
+    pub fn with_deadline(mut self, d: std::time::Duration) -> Self {
+        self.deadline = Some(d);
+        self
     }
 
     /// Registra el callback de PREGUNTA al usuario (pausa la tarea y espera texto).
@@ -334,7 +349,26 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
         // prefijo estable → mejor reutilización del KV-cache de Ollama (prefill barato).
         let system_msg = Message::system(self.system_prompt());
 
+        // Reloj del presupuesto de tiempo (ver `deadline`). `steps_taken` recuerda
+        // cuántos pasos llegamos a dar para reportarlo en la síntesis de rescate.
+        let started = std::time::Instant::now();
+        let mut steps_taken = 0usize;
+
         for step in 0..self.max_steps {
+            // PRESUPUESTO DE TIEMPO: si nos quedamos sin margen, no arranques otro paso
+            // (que dispararía una generación + posible herramienta lenta y reventaría el
+            // timeout de pared). Cede AQUÍ y deja que la síntesis final rescate lo que
+            // ya hay en el scratchpad — respuesta honesta en vez de «me quedé atascado».
+            if let Some(budget) = self.deadline {
+                if started.elapsed() >= budget {
+                    self.bus.publish(AionEvent::ThoughtEmitted {
+                        agent: self.name.clone(),
+                        text: "Se agota el tiempo: cierro con lo recopilado.".into(),
+                    });
+                    break;
+                }
+            }
+            steps_taken = step + 1;
             // Si en el paso anterior quedó un empujón pendiente (cerrar un paso a medias,
             // o verificar datos sin fundamento), lo añadimos al prompt de este paso. No
             // condiciona QUÉ decide: solo le pide que TERMINE de decidirlo o que funde lo
@@ -678,7 +712,7 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
         if !useful_obs {
             return Ok(AgentRun {
                 answer: HONEST_REFUSAL.into(),
-                steps: self.max_steps,
+                steps: steps_taken,
                 failures: failed.values().cloned().collect(),
                 ..Default::default()
             });
@@ -710,7 +744,7 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
         };
         Ok(AgentRun {
             answer,
-            steps: self.max_steps,
+            steps: steps_taken,
             failures: failed.values().cloned().collect(),
             ..Default::default()
         })
@@ -1136,22 +1170,39 @@ fn sanitize(text: &str) -> String {
             s.truncate(i);
         }
     }
-    // 3) Colapsar repetición degenerada: ningún token se repite >3 veces seguidas.
-    let mut out: Vec<&str> = Vec::new();
-    let mut run = 0usize;
-    let mut last = "";
-    for tok in s.split_whitespace() {
-        if tok == last {
-            run += 1;
-        } else {
-            run = 1;
-            last = tok;
-        }
-        if run <= 3 {
-            out.push(tok);
-        }
-    }
-    out.join(" ").trim().to_string()
+    // 3) Colapsar repetición degenerada POR LÍNEA: ningún token se repite >3 veces
+    //    seguidas. CRÍTICO: se hace línea a línea para PRESERVAR los saltos de línea —
+    //    antes era un único `split_whitespace()` + `join(" ")` que aplanaba TODO el texto
+    //    a una sola línea, destruyendo la estructura Markdown (encabezados, listas,
+    //    tablas, ---) y dejando solo el formato inline. Se conserva además la indentación
+    //    inicial de cada línea (la usan las listas anidadas) y los `|` de las tablas.
+    let collapsed: Vec<String> = s
+        .lines()
+        .map(|line| {
+            let indent_len = line.len() - line.trim_start().len();
+            let indent = &line[..indent_len];
+            let mut out: Vec<&str> = Vec::new();
+            let mut run = 0usize;
+            let mut last = "";
+            for tok in line.split_whitespace() {
+                if tok == last {
+                    run += 1;
+                } else {
+                    run = 1;
+                    last = tok;
+                }
+                if run <= 3 {
+                    out.push(tok);
+                }
+            }
+            if out.is_empty() {
+                String::new()
+            } else {
+                format!("{indent}{}", out.join(" "))
+            }
+        })
+        .collect();
+    collapsed.join("\n").trim().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1391,5 +1442,28 @@ mod tests {
         let text = "Thought: nothing here\nFinal Answer: done";
         let pairs = extract_all_actions(text);
         assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn sanitize_preserves_newlines_and_markdown_structure() {
+        // REGRESIÓN: antes el colapso de repeticiones aplanaba TODO a una línea
+        // (split_whitespace + join(" ")), destruyendo el Markdown. Debe conservar los
+        // saltos de línea, la indentación de listas anidadas y los `|` de tablas.
+        let md = "# Título\n\n- uno\n  - anidado\n\n| A | B |\n|---|---|\n| 1 | 2 |";
+        let out = sanitize(md);
+        assert!(out.contains("# Título"), "encabezado en su línea");
+        assert!(out.contains("\n- uno"), "lista preservada");
+        assert!(
+            out.contains("  - anidado"),
+            "indentación de anidado preservada"
+        );
+        assert!(out.contains("|---|---|"), "separador de tabla preservado");
+        assert_eq!(
+            out.lines().count(),
+            8,
+            "se conservan las 8 líneas (2 en blanco internas)"
+        );
+        // Y sigue colapsando repeticiones degeneradas DENTRO de una línea.
+        assert_eq!(sanitize("a\nb b b b b"), "a\nb b b");
     }
 }

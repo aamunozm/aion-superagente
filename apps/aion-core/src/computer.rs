@@ -211,6 +211,10 @@ pub fn inventory_note(apps: &[String], tools: &[String]) -> String {
 pub fn open_app(name: &str) -> bool {
     use objc2_app_kit::NSWorkspace;
     use objc2_foundation::NSString;
+    // launchApplication está deprecada a favor de openApplicationAtURL:…, pero sigue
+    // funcionando y es de una sola llamada (la API nueva es async con callback). Se
+    // silencia el aviso para mantener el build limpio sin reescribir el flujo.
+    #[allow(deprecated)]
     objc2::rc::autoreleasepool(|_| unsafe {
         NSWorkspace::sharedWorkspace().launchApplication(&NSString::from_str(name))
     })

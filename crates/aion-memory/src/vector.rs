@@ -111,6 +111,29 @@ pub struct MemoryRecord {
     /// (marcar lo externo al inyectarlo en prompts) sin separar almacenes.
     #[serde(default)]
     pub origin: String,
+    /// Derivados INMUTABLES del contenido, cacheados para NO recomputarlos en cada
+    /// consulta. Antes `retrieve` re-tokenizaba (`fold_words`) y re-extraía entidades
+    /// (`entities`) por CADA recuerdo y CADA query → O(n·L) en CPU + 2n allocaciones de
+    /// `HashSet` por consulta, creciendo con la memoria. Como el contenido no cambia, se
+    /// calculan UNA vez (al crear/cargar). Transitorios: `serde(skip)` → no cambian el
+    /// formato en disco y los JSONL viejos cargan igual. `None` = aún sin calcular.
+    #[serde(skip)]
+    words: Option<std::collections::HashSet<String>>,
+    #[serde(skip)]
+    ents: Option<std::collections::HashSet<String>>,
+}
+
+impl MemoryRecord {
+    /// Calcula y cachea los derivados léxicos/entidades del contenido (idempotente).
+    /// Llamar al crear o cargar un recuerdo; tras esto `retrieve` no recomputa nada.
+    fn prime_features(&mut self) {
+        if self.words.is_none() {
+            self.words = Some(fold_words(&self.content));
+        }
+        if self.ents.is_none() {
+            self.ents = Some(entities(&self.content));
+        }
+    }
 }
 
 fn default_importance() -> f32 {
@@ -517,7 +540,11 @@ impl VectorMemory {
             importance: estimate_importance(content).min(max_importance),
             links: Vec::new(),
             origin: origin.to_string(),
+            words: None,
+            ents: None,
         };
+        // Cachea léxico/entidades UNA vez al crear, para que `retrieve` no los recompute.
+        record.prime_features();
         let now = Utc::now();
         let mut recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         // MEMORIA TEMPORAL: si actualiza a otro casi idéntico, marca el viejo obsoleto.
@@ -595,8 +622,16 @@ impl MemoryStore for VectorMemory {
             .filter(|(_, r)| !r.superseded) // memoria temporal: ignora lo obsoleto
             .map(|(i, r)| {
                 let sem = cosine(&q, &r.embedding).clamp(0.0, 1.0);
-                let lex = lexical_overlap_pre(&q_words, &r.content);
-                let ent = entity_overlap(&q_ents, &entities(&r.content));
+                // Léxico y entidades desde el set CACHEADO del recuerdo (calculado al
+                // crear/cargar). Solo si falta (recuerdo sin primar) se recompute al vuelo.
+                let lex = match &r.words {
+                    Some(w) => jaccard(&q_words, w),
+                    None => lexical_overlap_pre(&q_words, &r.content),
+                };
+                let ent = match &r.ents {
+                    Some(e) => entity_overlap(&q_ents, e),
+                    None => entity_overlap(&q_ents, &entities(&r.content)),
+                };
                 // Recencia REAL (Generative Agents): decay exponencial por edad con
                 // semivida de 7 días — antes era el índice ordinal, que premiaba la
                 // posición en el archivo y no el tiempo. Las fechas DESCONOCIDAS (epoch
@@ -814,23 +849,25 @@ fn fold_words(s: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// Jaccard entre un conjunto de palabras YA plegado (la consulta) y un texto. Evita re-plegar
-/// la consulta una vez por cada recuerdo en el bucle de `retrieve` (antes era O(N·len_query)).
-fn lexical_overlap_pre(qa: &std::collections::HashSet<String>, b: &str) -> f32 {
-    if qa.is_empty() {
+/// Jaccard entre dos conjuntos de palabras YA plegados. Núcleo del solapamiento léxico:
+/// `retrieve` lo usa con el set del recuerdo CACHEADO (cero recomputación por consulta).
+fn jaccard(qa: &std::collections::HashSet<String>, wb: &std::collections::HashSet<String>) -> f32 {
+    if qa.is_empty() || wb.is_empty() {
         return 0.0;
     }
-    let wb = fold_words(b);
-    if wb.is_empty() {
-        return 0.0;
-    }
-    let inter = qa.intersection(&wb).count() as f32;
-    let union = qa.union(&wb).count() as f32;
+    let inter = qa.intersection(wb).count() as f32;
+    let union = qa.union(wb).count() as f32;
     if union > 0.0 {
         inter / union
     } else {
         0.0
     }
+}
+
+/// Jaccard entre la consulta pre-plegada y un TEXTO (lo pliega al vuelo). Fallback para
+/// recuerdos cuyo set léxico aún no está cacheado (p. ej. construidos en tests).
+fn lexical_overlap_pre(qa: &std::collections::HashSet<String>, b: &str) -> f32 {
+    jaccard(qa, &fold_words(b))
 }
 
 /// Solapamiento léxico (Jaccard de palabras significativas, normalizadas con `fold`). El hot
@@ -973,7 +1010,9 @@ fn load_jsonl(path: &PathBuf) -> Result<Vec<MemoryRecord>> {
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(rec) = serde_json::from_str::<MemoryRecord>(&line) {
+        if let Ok(mut rec) = serde_json::from_str::<MemoryRecord>(&line) {
+            // `words`/`ents` no se persisten (serde skip): se calculan al cargar, una vez.
+            rec.prime_features();
             out.push(rec);
         }
     }
@@ -1000,6 +1039,103 @@ fn append_jsonl(path: &PathBuf, record: &MemoryRecord) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Vector determinista de 64 dims a partir del texto (para benchmark sin Ollama).
+    fn mock_vec(text: &str) -> Vec<f32> {
+        let mut v = vec![0.0f32; 64];
+        for (i, b) in text.bytes().enumerate() {
+            v[i % 64] += (b as f32) / 255.0;
+        }
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+        for x in v.iter_mut() {
+            *x /= n;
+        }
+        v
+    }
+
+    struct MockEmb;
+    #[async_trait::async_trait]
+    impl aion_kernel::Embedder for MockEmb {
+        async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            Ok(mock_vec(text))
+        }
+        fn model(&self) -> &str {
+            "mock"
+        }
+    }
+
+    /// BENCHMARK (ignored: correr con `cargo test -p aion-memory --release bench_retrieve
+    /// -- --ignored --nocapture`). Mide el coste por consulta del escaneo de `retrieve`
+    /// ANTES (sin cachear `words`/`ents` → recomputa por recuerdo y consulta) y DESPUÉS
+    /// (cacheados). Verifica además que cachear NO cambia los resultados (top-k idénticos).
+    #[tokio::test]
+    #[ignore]
+    async fn bench_retrieve_cached_vs_recompute() {
+        const N: usize = 4000;
+        const ITERS: usize = 40;
+        let mem = VectorMemory::new(MockEmb);
+        {
+            let mut recs = mem.records.lock().unwrap();
+            for i in 0..N {
+                let content = format!(
+                    "Ariel decidió usar Rust para el proyecto AION-{i} en Milano con Gemma 12B \
+                     y embeddings BGE-M3 porque prefiere local-first, baja latencia y coste cero",
+                );
+                let emb = mock_vec(&content);
+                let mut r = rec(emb, 0.5, 0);
+                r.content = content;
+                r.words = None; // estado "viejo": sin cachear
+                r.ents = None;
+                recs.push(r);
+            }
+        }
+        let query = "qué stack eligió Ariel para AION en Milano y por qué local-first";
+
+        // Calienta y MIDE el camino de recompute (campos en None → fallback).
+        let _ = mem.retrieve(query, 8).await.unwrap();
+        let before_ids = top_ids(&mem.retrieve(query, 8).await.unwrap());
+        let t0 = std::time::Instant::now();
+        for _ in 0..ITERS {
+            let _ = mem.retrieve(query, 8).await.unwrap();
+        }
+        let recompute = t0.elapsed();
+
+        // Prima (cachea) y MIDE de nuevo sobre los MISMOS datos.
+        {
+            let mut recs = mem.records.lock().unwrap();
+            for r in recs.iter_mut() {
+                r.prime_features();
+            }
+        }
+        let after_ids = top_ids(&mem.retrieve(query, 8).await.unwrap());
+        let t1 = std::time::Instant::now();
+        for _ in 0..ITERS {
+            let _ = mem.retrieve(query, 8).await.unwrap();
+        }
+        let cached = t1.elapsed();
+
+        let per_recompute = recompute.as_micros() as f64 / ITERS as f64;
+        let per_cached = cached.as_micros() as f64 / ITERS as f64;
+        println!(
+            "retrieve sobre {N} recuerdos — recompute: {per_recompute:.0} µs/consulta | \
+             cacheado: {per_cached:.0} µs/consulta | speedup x{:.2}",
+            per_recompute / per_cached.max(1.0)
+        );
+        // CORRECCIÓN: cachear no debe cambiar el resultado.
+        assert_eq!(
+            before_ids, after_ids,
+            "el top-k cambió al cachear (regresión)"
+        );
+        // RENDIMIENTO: el camino cacheado debe ser estrictamente más rápido.
+        assert!(
+            cached < recompute,
+            "cacheado no fue más rápido que recompute"
+        );
+    }
+
+    fn top_ids(hits: &[MemoryHit]) -> Vec<String> {
+        hits.iter().map(|h| h.id.clone()).collect()
+    }
+
     fn rec(emb: Vec<f32>, fitness: f32, access: u32) -> MemoryRecord {
         MemoryRecord {
             id: Uuid::new_v4().to_string(),
@@ -1013,6 +1149,8 @@ mod tests {
             importance: 0.5,
             links: Vec::new(),
             origin: String::new(),
+            words: None,
+            ents: None,
         }
     }
 

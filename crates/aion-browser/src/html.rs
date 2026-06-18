@@ -28,7 +28,12 @@ fn remove_block(input: &str, tag: &str) -> String {
     let open = format!("<{tag}");
     let close = format!("</{tag}>");
     loop {
-        let lower = s.to_lowercase();
+        // to_ASCII_lowercase, NO to_lowercase: los nombres de etiqueta son ASCII, y el
+        // lowercase Unicode puede CAMBIAR la longitud en bytes (ß→ss, İ→i̇, Σ griego),
+        // desincronizando los índices de `lower` respecto a `s` → `replace_range` con
+        // índices ajenos = panic o recorte corrupto. El ASCII-lowercase preserva cada
+        // byte, así que los índices hallados en `lower` son válidos en `s`.
+        let lower = s.to_ascii_lowercase();
         let Some(start) = lower.find(&open) else {
             break;
         };
@@ -85,6 +90,20 @@ mod tests {
         let text = to_text(html);
         assert!(text.contains("Hola & chau"));
         assert!(text.contains("Mundo real"));
+    }
+
+    #[test]
+    fn no_panic_with_length_changing_unicode_before_block() {
+        // Con to_lowercase() Unicode, 'İ'/'ß' cambian de longitud en bytes y
+        // desincronizaban los índices → panic en replace_range. Debe quedar limpio.
+        let html = "İß<script>alert('x')</script>café ñoño";
+        let text = to_text(html);
+        assert!(!text.contains("alert"));
+        assert!(text.contains("café"));
+        assert!(text.contains("ñoño"));
+        // Etiqueta en MAYÚSCULAS también se elimina (case-insensitive ASCII).
+        let upper = to_text("a<SCRIPT>mal</SCRIPT>b");
+        assert!(!upper.contains("mal"));
         assert!(!text.contains("alert"));
         assert!(!text.contains("color:red"));
     }

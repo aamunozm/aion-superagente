@@ -283,12 +283,15 @@ export default function SettingsPage() {
     try { setInstalled(await modelsInstalled()); } catch { /* */ }
     try { setCurrent((await status()).engine.replace(/^ollama:/, "")); } catch { /* */ }
   }
+  // Compara nombres de modelo por su nombre COMPLETO (incluido el tag de tamaño),
+  // normalizando solo la etiqueta implícita `:latest`. Antes se comparaba por la base
+  // de familia (`nombre.split(":")[0]`), lo que marcaba "instalado"/"En uso" a TODOS los
+  // tamaños de una misma familia: con qwen2.5-abliterate:7b activo, el :14b también se
+  // iluminaba porque comparten base. El tag (7b/14b) es justo lo que los distingue.
+  const normName = (s: string) => (s.includes(":") ? s : `${s}:latest`);
   const isInstalled = (ollama: string) =>
-    installed.some((i) => i.name === ollama || i.name.startsWith(`${ollama.split(":")[0]}:`));
-  const isCurrent = (ollama: string) => {
-    const base = ollama.split(":")[0];
-    return current === ollama || current.startsWith(`${base}:`) || current === base;
-  };
+    installed.some((i) => normName(i.name) === normName(ollama));
+  const isCurrent = (ollama: string) => normName(current) === normName(ollama);
 
   // Usa un modelo: si no está instalado, lo descarga (con progreso) y luego lo activa.
   async function useModel(m: ModelOption) {
