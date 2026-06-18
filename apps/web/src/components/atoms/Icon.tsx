@@ -12,7 +12,7 @@ export type IconName =
   // ── Nuevos: voz, copiar, comunicaciones ──
   | "copy" | "play" | "stop" | "volume" | "phone" | "message" | "users"
   | "filter" | "x" | "wifi" | "network" | "terminal" | "key" | "trash"
-  | "whatsapp";
+  | "whatsapp" | "bell" | "bellOff";
 
 const PATHS: Record<IconName, React.ReactNode> = {
   chat: <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />,
@@ -71,6 +71,8 @@ const PATHS: Record<IconName, React.ReactNode> = {
   terminal: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m7 9 3 3-3 3M13 15h4" /></>,
   key: <><circle cx="8" cy="8" r="4" /><path d="m11 11 8 8M16 16l2-2M18 18l2-2" /></>,
   trash: <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13" />,
+  bell: <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0" />,
+  bellOff: <><path d="M13.7 21a2 2 0 0 1-3.4 0M18.6 13A6 6 0 0 0 18 8M6 8a6 6 0 0 1 .9-3.2M3 3l18 18M17 17H3s3-2 3-9" /></>,
 };
 
 export default function Icon({

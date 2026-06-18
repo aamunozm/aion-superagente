@@ -83,6 +83,7 @@ const ES: Dict = {
   "chat.handsFree": "Manos libres",
   "chat.handsFreeOn": "Manos libres activado",
   "nav.communications": "Comunicaciones",
+  "nav.inbox": "Bandeja",
   "nav.claudeCode": "Claude Code",
   "cc.title": "Claude Code",
   "cc.note":
@@ -234,6 +235,7 @@ const IT: Dict = {
   "chat.handsFree": "Mani libere",
   "chat.handsFreeOn": "Mani libere attivo",
   "nav.communications": "Comunicazioni",
+  "nav.inbox": "Posta",
   "nav.claudeCode": "Claude Code",
   "cc.title": "Claude Code",
   "cc.note":
@@ -385,6 +387,7 @@ const EN: Dict = {
   "chat.handsFree": "Hands-free",
   "chat.handsFreeOn": "Hands-free on",
   "nav.communications": "Communications",
+  "nav.inbox": "Inbox",
   "nav.claudeCode": "Claude Code",
   "cc.title": "Claude Code",
   "cc.note":

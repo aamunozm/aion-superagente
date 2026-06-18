@@ -2,10 +2,12 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Icon, Avatar } from "@/components/atoms";
 import { NAV_GROUPS } from "@/lib/nav";
 import { useT } from "@/lib/i18n";
+import { inboxList } from "@/lib/api";
+import { chime } from "@/lib/chime";
 
 /**
  * TEMPLATE: AppShell — shell interno con SIDEBAR (estilo CEO·Intelligence):
@@ -24,12 +26,39 @@ export default function AppShell({
   const { t } = useT();
   const [email, setEmail] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(false);
+  // Avisos sin leer de la Bandeja (píldora en el nav). Sondea cada 25s.
+  const [unread, setUnread] = useState(0);
+  // Recuerda el conteo previo para sonar SOLO cuando llega algo nuevo (no en cada tick).
+  const prevUnread = useRef<number | null>(null);
 
   useEffect(() => {
     setEmail(localStorage.getItem("aion_email"));
     // Guard: si no hay sesión, al login.
     if (!localStorage.getItem("aion_token")) router.replace("/login");
   }, [router]);
+
+  useEffect(() => {
+    let alive = true;
+    const tick = () =>
+      inboxList()
+        .then((r) => {
+          if (!alive) return;
+          const n = r.unread_count ?? 0;
+          // Suena solo al AUMENTAR (mensaje nuevo), no en el primer sondeo ni al bajar.
+          if (prevUnread.current !== null && n > prevUnread.current) chime();
+          prevUnread.current = n;
+          setUnread(n);
+        })
+        .catch(() => {});
+    tick();
+    const id = setInterval(tick, 25000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+
+  const badgeFor = (k?: string) => (k === "inbox" ? unread : 0);
 
   function logout() {
     localStorage.removeItem("aion_token");
@@ -100,8 +129,24 @@ export default function AppShell({
                     }}
                     title={label}
                   >
-                    <Icon name={item.icon} size={18} className="shrink-0" />
-                    {!collapsed && <span>{label}</span>}
+                    <span className="relative shrink-0 flex">
+                      <Icon name={item.icon} size={18} />
+                      {badgeFor(item.badgeKey) > 0 && collapsed && (
+                        <span
+                          className="absolute -top-1 -right-1 w-2 h-2 rounded-full"
+                          style={{ background: "var(--accent)" }}
+                        />
+                      )}
+                    </span>
+                    {!collapsed && <span className="flex-1">{label}</span>}
+                    {!collapsed && badgeFor(item.badgeKey) > 0 && (
+                      <span
+                        className="text-[10px] font-bold rounded-full px-1.5 py-0.5 min-w-[18px] text-center"
+                        style={{ background: "var(--accent)", color: "#04201f" }}
+                      >
+                        {badgeFor(item.badgeKey)}
+                      </span>
+                    )}
                   </Link>
                 );
               })}
