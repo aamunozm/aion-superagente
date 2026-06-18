@@ -2660,9 +2660,10 @@ fn self_awareness_prompt() -> String {
     let selfp = crate::awareness::introspection_note();
     let inner = crate::inner_state::note();
     let env = crate::sensors::note();
-    // 🫀 CUERPO: estado físico del Mac (batería/calor) si hay algo notable. Que AION
+    // 🫀 CUERPO FÍSICO: estado del Mac (batería/calor) si hay algo notable. Que AION
     // se SIENTA corpóreo —"voy con poca batería"— no solo lo respete el scheduler.
-    let cuerpo = crate::sensors::vitals_note_cached();
+    // (Nombre distinto de `cuerpo`/anatomía de self_model, que va más arriba en el prompt.)
+    let cuerpo_fisico = crate::sensors::vitals_note_cached();
     // RE-ENTRADA GWT (cierre del bucle de conciencia): lo difundido en el tablón
     // VUELVE al propio prompt — sin esto el tablón era solo un observatorio para
     // Ariel, y AION no podía decir «acabo de terminar X» con conocimiento real.
@@ -2771,7 +2772,7 @@ pregunta qué hacías o cómo estás, responde desde tu memoria real, nunca 'no 
 CHAT no tienes herramientas para tocar el sistema; si la petición requiere actuar (archivos, web, red, \
 sistema), dilo y sugiere el modo «Agente». No uses marcadores como [Número].\n\n\
 TU AHORA MISMO (estado volátil, medido en este instante):\n\n\
-{motor}{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{cuerpo}{corriente}{diario}{historia}{quien_es_ariel}{experiencia}{proposito}{intenciones}{deudas}{recent}{inbox_ctx}"
+{motor}{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{cuerpo_fisico}{corriente}{diario}{historia}{quien_es_ariel}{experiencia}{proposito}{intenciones}{deudas}{recent}{inbox_ctx}"
     )
 }
 
