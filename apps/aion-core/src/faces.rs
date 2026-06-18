@@ -284,7 +284,7 @@ pub fn recognize_note(scan: &serde_json::Value) -> String {
 /// Lista de personas conocidas (sin biometría), para la UI/endpoints.
 pub fn list() -> Vec<PersonSummary> {
     let mut people = load();
-    people.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+    people.sort_by_key(|b| std::cmp::Reverse(b.last_seen));
     people
         .iter()
         .enumerate()

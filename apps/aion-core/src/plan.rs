@@ -80,6 +80,16 @@ fn path() -> std::path::PathBuf {
 }
 
 /// El plan ACTIVO, si lo hay.
+///
+/// LECTURA SIN QLOCK A PROPÓSITO: el QLOCK serializa el ciclo leer→modificar→escribir de
+/// los ESCRITORES; las lecturas no lo toman porque (a) `write_atomic` hace el reemplazo por
+/// rename, así que un lector ve el archivo viejo O el nuevo completos, nunca a medias, y
+/// (b) NO hay escritores concurrentes: todas las mutaciones del plan viven en funciones
+/// autónomas (advance_plan_once, materialize_intention) serializadas por `autonomous_gate`,
+/// y ningún endpoint HTTP toca el plan. Tomar el lock aquí, además, haría DEADLOCK:
+/// `mark_step_done`/`bump_attempt` ya lo sostienen y llaman a `active()` (Mutex no reentrante).
+/// ⚠️ Si algún día se añade un endpoint que MUTE el plan en paralelo a la vida, revisar esto
+/// (capturar índice + escribir bajo un mismo lock, o marcar por texto del paso, no por índice).
 pub fn active() -> Option<Plan> {
     let txt = std::fs::read_to_string(path()).ok()?;
     serde_json::from_str(&txt).ok()

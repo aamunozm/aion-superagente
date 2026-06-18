@@ -330,6 +330,13 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
             if idle_secs() < 300 {
                 continue; // Ariel está activo: su conversación manda
             }
+            // PRESUPUESTO FÍSICO (Loop Engineering local-first): la vida autónoma no
+            // cuesta dinero, cuesta CUERPO. Si el Mac va con poca batería, ardiendo o
+            // saturado, AION baja el pulso y cede el turno —respeta su propio hardware—.
+            if let Some(reason) = crate::sensors::autonomous_budget_block().await {
+                tracing::info!(reason = %reason, "vida: cede turno por presupuesto físico");
+                continue;
+            }
             let _permit = autonomous_gate().acquire().await; // serializa trabajo autónomo
             if idle_secs() < 300 {
                 continue; // llegó Ariel mientras esperaba el turno: cede el LLM
@@ -371,6 +378,13 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
             let now = chrono::Utc::now().timestamp();
             if idle_secs() < 300 || now - last_run < interval {
                 continue; // Ariel activo, o aún no toca otro ciclo
+            }
+            // PRESUPUESTO FÍSICO: la reflexión también consume cuerpo (LLM). Si el Mac
+            // sufre (batería/calor/CPU), pospón el ciclo sin marcar last_run, para
+            // reintentarlo en cuanto el equipo se recupere.
+            if let Some(reason) = crate::sensors::autonomous_budget_block().await {
+                tracing::info!(reason = %reason, "reflexión: pospone por presupuesto físico");
+                continue;
             }
             let _permit = autonomous_gate().acquire().await; // serializa trabajo autónomo
             if idle_secs() < 300 {
@@ -968,12 +982,15 @@ async fn models_pull(
             }
         };
         let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
+        // Búfer de BYTES: decodificar cada chunk por separado partiría un carácter multibyte
+        // que cayera en el borde del chunk. Partimos por el byte '\n' (nunca dentro de un
+        // multibyte) y decodificamos solo líneas COMPLETAS (siempre UTF-8 válido).
+        let mut buf: Vec<u8> = Vec::new();
         while let Some(item) = stream.next().await {
             let Ok(bytes) = item else { break };
-            buf.push_str(&String::from_utf8_lossy(&bytes));
-            while let Some(nl) = buf.find('\n') {
-                let line = buf[..nl].trim().to_string();
+            buf.extend_from_slice(&bytes);
+            while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+                let line = String::from_utf8_lossy(&buf[..nl]).trim().to_string();
                 buf.drain(..=nl);
                 if line.is_empty() {
                     continue;
@@ -2120,6 +2137,11 @@ async fn agent(
             // la síntesis caben en el presupuesto → SIEMPRE responde con lo recopilado en vez
             // de «me quedé atascado». Suficiente para tareas reales (buscar+leer+responder).
             .with_max_steps(5)
+            // PRESUPUESTO DE TIEMPO interno: ~30 s por debajo de la pared de 150 s para
+            // que el bucle ceda a tiempo y la síntesis final (una generación más) quepa,
+            // en vez de que el salvavidas de pared lo corte a media iteración y pierda lo
+            // recopilado. Es el límite por TIEMPO REAL que `max_steps` solo aproxima.
+            .with_deadline(std::time::Duration::from_secs(120))
             .with_ask(ask);
         // SALVAVIDAS DE PARED: una herramienta colgada (navegador/red sin timeout) o un bucle
         // que no converge NO debe dejar la UI en "trabajando…" para siempre. Si la tarea no
@@ -2638,6 +2660,10 @@ fn self_awareness_prompt() -> String {
     let selfp = crate::awareness::introspection_note();
     let inner = crate::inner_state::note();
     let env = crate::sensors::note();
+    // 🫀 CUERPO FÍSICO: estado del Mac (batería/calor) si hay algo notable. Que AION
+    // se SIENTA corpóreo —"voy con poca batería"— no solo lo respete el scheduler.
+    // (Nombre distinto de `cuerpo`/anatomía de self_model, que va más arriba en el prompt.)
+    let cuerpo_fisico = crate::sensors::vitals_note_cached();
     // RE-ENTRADA GWT (cierre del bucle de conciencia): lo difundido en el tablón
     // VUELVE al propio prompt — sin esto el tablón era solo un observatorio para
     // Ariel, y AION no podía decir «acabo de terminar X» con conocimiento real.
@@ -2661,6 +2687,9 @@ fn self_awareness_prompt() -> String {
     // 🌍 PROPÓSITO EN CURSO (#5): si AION está persiguiendo un plan de varios pasos, lo SABE
     // y por dónde va — puede hablar desde su intención, no solo reaccionar.
     let proposito = crate::plan::note();
+    // 🎯 INTENCIONES PROPIAS (ADR-0005): lo que AION QUIERE por su cuenta (con su porqué),
+    // por encima del plan que lo ejecuta. Vacío hasta que el arbitraje (Paso 3) las forme.
+    let intenciones = crate::intentions::note();
     // 🛠️ CONCIENCIA DE CAPACIDADES: AION sabe qué herramientas tiene, qué skills se ha
     // forjado y que puede crear más. Así no se rinde en CHAT ("no puedo") creyéndose
     // inerte: sabe que sus manos viven en el modo Agente y puede proponerlo.
@@ -2743,7 +2772,7 @@ pregunta qué hacías o cómo estás, responde desde tu memoria real, nunca 'no 
 CHAT no tienes herramientas para tocar el sistema; si la petición requiere actuar (archivos, web, red, \
 sistema), dilo y sugiere el modo «Agente». No uses marcadores como [Número].\n\n\
 TU AHORA MISMO (estado volátil, medido en este instante):\n\n\
-{motor}{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{corriente}{diario}{historia}{quien_es_ariel}{experiencia}{proposito}{deudas}{recent}{inbox_ctx}"
+{motor}{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{cuerpo_fisico}{corriente}{diario}{historia}{quien_es_ariel}{experiencia}{proposito}{intenciones}{deudas}{recent}{inbox_ctx}"
     )
 }
 
@@ -5010,6 +5039,9 @@ fn spawn_presence_loop() {
 
             // Latido: percibir el entorno (barato, sin LLM). El clima se autocachea.
             crate::sensors::refresh_weather().await;
+            // Percibir el CUERPO: refresca el caché de vitales (batería/calor/CPU) para
+            // que el prompt pueda leerlo síncrono y AION se sienta corpóreo. Autocacheado.
+            let _ = crate::sensors::host_vitals().await;
             // Pulso de vida EFÍMERO: solo por el bus (la página Mente lo ve en vivo).
             // No se persiste: 288 latidos/día expulsarían del recorte la historia
             // real de la corriente (reflexiones, focos, acciones).

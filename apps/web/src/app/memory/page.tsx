@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
+import Markdown from "@/components/Markdown";
 import {
   libraryAsk,
   libraryEnqueue,
@@ -317,7 +318,9 @@ export default function MemoryPage() {
               </button>
             </div>
             {askAnswer && (
-              <p className="mt-3 text-sm whitespace-pre-wrap" style={{ color: "var(--text-2)" }}>{askAnswer}</p>
+              <div className="mt-3" style={{ color: "var(--text-2)" }}>
+                <Markdown>{askAnswer}</Markdown>
+              </div>
             )}
           </div>
         )}
