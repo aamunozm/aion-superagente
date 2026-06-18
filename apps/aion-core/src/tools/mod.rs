@@ -8,6 +8,6 @@ pub mod skillbook_tool;
 pub use calendar::{CalendarCreateTool, CalendarListTool};
 pub use discord::DiscordTool;
 pub use home_assistant::HomeAssistantTool;
-pub use mcp_consumer::McpConsumerTool;
+// McpConsumerTool: stub arquitectural — se activa cuando se configura el primer servidor MCP
 pub use sandbox::CodeSandboxTool;
 pub use skillbook_tool::SkillBookTool;

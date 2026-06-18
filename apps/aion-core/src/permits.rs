@@ -200,6 +200,7 @@ mod tests {
     // El ciclo de estados sobre una lista en memoria (sin tocar disco).
     #[test]
     fn ciclo_pending_approved() {
+        #[allow(clippy::useless_vec)]
         let mut items = vec![Permit {
             id: "x".into(),
             capability: "computer".into(),

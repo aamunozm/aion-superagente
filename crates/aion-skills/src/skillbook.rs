@@ -187,8 +187,7 @@ impl SkillBook {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(&self.procedures)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(&self.procedures).map_err(std::io::Error::other)?;
         std::fs::write(&self.path, json)
     }
 
@@ -296,7 +295,7 @@ impl SkillBook {
                 total_calls: p.success_count + p.failure_count,
             })
             .collect();
-        report.sort_by(|a, b| b.version.cmp(&a.version));
+        report.sort_by_key(|a| std::cmp::Reverse(a.version));
         report
     }
 

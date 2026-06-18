@@ -177,7 +177,7 @@ impl<'a> ReActAgent<'a> {
     pub fn unknown_tool_stats(&self) -> Vec<(String, u32)> {
         let map = self.unknown_tool_requests.lock().unwrap();
         let mut stats: Vec<(String, u32)> = map.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        stats.sort_by(|a, b| b.1.cmp(&a.1));
+        stats.sort_by_key(|a| std::cmp::Reverse(a.1));
         stats
     }
 
@@ -1164,6 +1164,7 @@ fn sanitize(text: &str) -> String {
 /// following `Action Input: <value>` line. Returns a `Vec<(action_name, input)>`
 /// suitable for concurrent dispatch. Handles multiple Action/ActionInput pairs
 /// in a single LLM response (parallel execution pattern).
+#[allow(dead_code)]
 pub fn extract_all_actions(text: &str) -> Vec<(String, String)> {
     let mut pairs: Vec<(String, String)> = Vec::new();
     let mut pending_action: Option<String> = None;
@@ -1198,6 +1199,7 @@ pub fn extract_all_actions(text: &str) -> Vec<(String, String)> {
 /// All tools are dispatched concurrently via `futures::future::join_all`.
 ///
 /// Returns `Vec<(tool_name, input, observation)>`.
+#[allow(dead_code)]
 pub async fn run_parallel_tools(
     tools: &crate::tool::ToolRegistry,
     actions: &[(String, String)],

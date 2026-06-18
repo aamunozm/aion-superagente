@@ -27,7 +27,7 @@ impl Tool for CalendarListTool {
     }
 
     async fn run(&self, input: &str) -> Result<String, String> {
-        let days: u32 = input.trim().parse().unwrap_or(7).max(1).min(90);
+        let days: u32 = input.trim().parse().unwrap_or(7).clamp(1, 90);
 
         // AppleScript que obtiene eventos del Calendario en los próximos N días
         let script = format!(
@@ -216,8 +216,7 @@ end tell
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stdout = stdout.trim();
 
-        if stdout.starts_with("OK:") {
-            let info = &stdout[3..];
+        if let Some(info) = stdout.strip_prefix("OK:") {
             Ok(format!("Evento creado: {info}"))
         } else {
             Ok(format!("Evento creado. Respuesta: {stdout}"))

@@ -4,6 +4,7 @@ use aion_orchestrator::{Tool, ToolCategory};
 use async_trait::async_trait;
 
 /// Herramienta que delega la ejecución a un servidor MCP externo via JSON-RPC 2.0.
+#[allow(dead_code)]
 pub struct McpConsumerTool {
     pub tool_name: String,
     pub tool_description: String,
@@ -12,6 +13,7 @@ pub struct McpConsumerTool {
 }
 
 impl McpConsumerTool {
+    #[allow(dead_code)]
     pub fn new(
         tool_name: impl Into<String>,
         tool_description: impl Into<String>,

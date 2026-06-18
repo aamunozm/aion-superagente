@@ -207,6 +207,7 @@ pub fn inventory_note(apps: &[String], tools: &[String]) -> String {
 
 /// Lanza o trae al frente una aplicación por nombre (NSWorkspace). No requiere Accesibilidad.
 #[cfg(target_os = "macos")]
+#[allow(deprecated)]
 pub fn open_app(name: &str) -> bool {
     use objc2_app_kit::NSWorkspace;
     use objc2_foundation::NSString;
