@@ -58,6 +58,7 @@ mod sensors;
 mod serve;
 mod skill_store;
 mod skill_tool;
+mod tools;
 mod usermodel;
 mod web_tool;
 mod workspace;

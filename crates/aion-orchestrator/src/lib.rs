@@ -15,4 +15,4 @@ mod tool;
 
 pub use crew::{CrewRun, Orchestrator, Role, Step, ROLES};
 pub use react::{honesty_guard, AgentRun, AskFn, ConfirmFn, ReActAgent, HONEST_REFUSAL};
-pub use tool::{CalculatorTool, Tool, ToolRegistry};
+pub use tool::{CalculatorTool, Tool, ToolCategory, ToolRegistry};

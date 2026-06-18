@@ -2069,6 +2069,27 @@ impl Tool for SkillForgeTool {
          La skill se valida en sandbox con esos tests antes de integrarse; si pasa, \
          queda disponible para skill_invoke."
     }
+    // ── Integración con SkillBook ─────────────────────────────────────────────
+    //
+    // Cuando skill_forge genera y valida con éxito una skill WASM, existe una
+    // oportunidad natural de registrar un Procedure de alto nivel en el SkillBook
+    // que describa CÓMO se usa esa skill dentro de un flujo mayor.
+    //
+    // Patrón recomendado de integración (a implementar en una fase futura):
+    //   1. skill_forge finaliza con éxito (report.accepted == true, ratchet aprobado).
+    //   2. Se construye un Procedure con id = spec.name, descripción = spec.description
+    //      y un paso único: ProcedureStep { tool: "skill_invoke", input_template:
+    //      "{{spec.name}} {{n}}", description: "Invocar la skill generada" }.
+    //   3. Se llama a skill_book.upsert(proc) para que el agente pueda descubrir y
+    //      encadenar la skill dentro de procedimientos multi-paso.
+    //   4. En actualizaciones posteriores (si el ratchet acepta una versión mejorada),
+    //      skill_book.upgrade(id, new_steps, reason) actualiza el Procedure, sube su
+    //      versión y reinicia el contador de fallos — manteniendo coherencia entre el
+    //      registro WASM (skill_store) y la memoria procedimental (SkillBook).
+    //
+    // La lógica de forja NO se modifica aquí: este comentario documenta el contrato
+    // arquitectónico entre aion-evolution/aion-skills y la herramienta SkillBook.
+    // ─────────────────────────────────────────────────────────────────────────────
     async fn run(&self, input: &str) -> Result<String, String> {
         #[derive(serde::Deserialize)]
         struct Spec {

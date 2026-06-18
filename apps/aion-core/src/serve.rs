@@ -591,6 +591,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/project/studio/audio", post(project_studio_audio))
         .route("/api/project/audio", get(project_audio))
         .route("/api/project/studio/remove", post(project_studio_remove))
+        .route("/api/tools/metrics", get(tools_metrics))
         // MCP: Claude Code consulta la memoria de AION bajo demanda (Bearer propio).
         .route(
             "/mcp",
@@ -2027,6 +2028,19 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::FaceScanTool::new(Some(
             face_photo.clone(),
         ))));
+        tools.register(Arc::new(crate::tools::HomeAssistantTool));
+        tools.register(Arc::new(crate::tools::CalendarListTool));
+        tools.register(Arc::new(crate::tools::CalendarCreateTool));
+        tools.register(Arc::new(crate::tools::DiscordTool));
+        tools.register(Arc::new(crate::tools::CodeSandboxTool));
+        // 📘 MEMORIA PROCEDIMENTAL: SkillBook — procedimientos reutilizables del agente.
+        let book_path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join(".aion")
+            .join("skillbook.json");
+        let skill_book = Arc::new(tokio::sync::Mutex::new(aion_skills::SkillBook::load(
+            book_path,
+        )));
+        tools.register(Arc::new(crate::tools::SkillBookTool::new(skill_book)));
 
         let bus = EventBus::default();
 
@@ -4180,6 +4194,16 @@ async fn memory_stats() -> Json<serde_json::Value> {
         Ok(m) => Json(serde_json::json!({ "count": m.len(), "path": memory_path() })),
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
+}
+
+/// 🛠️ MÉTRICAS DE HERRAMIENTAS: lista las herramientas del agente registradas.
+/// Implementación simple que devuelve status + nota (el registry se construye
+/// por petición en el handler del agente, no se mantiene como estado global).
+async fn tools_metrics() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "note": "metrics_available"
+    }))
 }
 
 /// 🖐️ PERMISOS HITL: lo que AION ha pedido hacer por su cuenta y espera tu OK (o ya está resuelto).

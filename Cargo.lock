@@ -281,6 +281,7 @@ version = "0.0.1"
 dependencies = [
  "aion-kernel",
  "async-trait",
+ "futures",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -296,6 +297,7 @@ dependencies = [
  "async-trait",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
