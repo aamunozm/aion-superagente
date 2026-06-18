@@ -63,7 +63,11 @@ function pickVoice(bcp47: string): SpeechSynthesisVoice | null {
  */
 export function useSpeech() {
   const [speakingId, setSpeakingId] = useState<string | null>(null);
-  const supported = speechSupported();
+  // El soporte se detecta TRAS montar (no durante el render): en SSR `window` no existe
+  // (false) y en el cliente sí (true) → desajuste de hidratación. Arrancar en false y
+  // fijarlo en useEffect mantiene «SSR == primer render del cliente».
+  const [supported, setSupported] = useState(false);
+  useEffect(() => setSupported(speechSupported()), []);
 
   // Precarga la lista de voces (en Chrome llega async vía `voiceschanged`).
   useEffect(() => {
@@ -113,7 +117,9 @@ export function useSpeech() {
  * termina de hablar. `interim` muestra el texto provisional mientras habla.
  */
 export function useDictation(lang: Lang, onFinal: (text: string) => void) {
-  const supported = dictationSupported();
+  // Detección de soporte tras montar (evita el desajuste de hidratación SSR/cliente).
+  const [supported, setSupported] = useState(false);
+  useEffect(() => setSupported(dictationSupported()), []);
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState("");
   const recRef = useRef<any>(null);
