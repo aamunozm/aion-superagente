@@ -8,6 +8,7 @@
 mod a2a;
 mod agent_tools;
 mod apikeys;
+mod arcface;
 mod awareness;
 mod biography;
 mod capabilities;

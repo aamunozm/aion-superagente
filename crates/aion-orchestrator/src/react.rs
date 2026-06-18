@@ -187,6 +187,9 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
              skills para esto.\n\
              • RED LOCAL (cuántos equipos hay conectados, qué dispositivos, sus IPs): usa \
              SIEMPRE net_scan. NUNCA uses web_search para esto ni inventes IPs.\n\
+             • REDES WIFI al alcance («qué WiFi hay», «redes disponibles», «a qué me conecto»): \
+             usa SIEMPRE wifi_scan. NUNCA improvises comandos de terminal (airport ya NO existe \
+             en macOS) ni inventes redes.\n\
              • DIRECCIONES/NEGOCIOS/LUGARES (qué negocio hay en una calle, dónde queda \
              algo, tipo de local): usa SIEMPRE place_lookup (mapas), NUNCA web_search \
              para direcciones.\n\
@@ -373,6 +376,25 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                         failures: failed.values().cloned().collect(),
                         ..Default::default()
                     });
+                }
+                // CAPA 1 — GUARDIÁN DETERMINISTA DE ACCIONES (anti-teatro, sin LLM): el agente
+                // JAMÁS afirma una acción del mundo (reconocer, escanear, ejecutar, guardar, abrir,
+                // buscar) que no haya ejecutado con una herramienta REAL en esta tarea. Cruza lo
+                // que dice haber hecho contra las herramientas realmente ejecutadas con éxito
+                // (`executed`). Esto es lo que habría parado en seco la mentira de la cámara.
+                if self.verify {
+                    let tools_ok: Vec<String> = executed
+                        .keys()
+                        .map(|s| s.split('\u{1}').next().unwrap_or("").to_lowercase())
+                        .collect();
+                    if let Some(claim) = unsupported_action_claim(task, &answer, &tools_ok) {
+                        return Ok(AgentRun {
+                            answer: honest_unsupported_note(claim),
+                            steps: step + 1,
+                            failures: failed.values().cloned().collect(),
+                            ..Default::default()
+                        });
+                    }
                 }
                 // VERIFICACIÓN (anti-alucinación): un juez comprueba que la respuesta esté
                 // RESPALDADA por las observaciones. VELOCIDAD: solo gastamos esa llamada extra
@@ -668,13 +690,18 @@ impl ReActAgent<'_> {
         let req = GenerateRequest {
             messages: vec![
                 Message::system(
-                    "Eres un VERIFICADOR estricto. Te doy una tarea, las OBSERVACIONES \
-                     reales de herramientas y una RESPUESTA. Comprueba que cada dato concreto \
-                     de la respuesta (números, conteos, nombres, IPs, listas) aparezca en las \
-                     observaciones. Si TODO está respaldado, responde exactamente 'OK'. Si algo \
-                     está inventado o no respaldado, responde 'CORREGIR: ' seguido de la \
-                     respuesta corregida usando SOLO lo que sí aparece en las observaciones (o \
-                     diciendo con franqueza que no se pudo obtener). No añadas nada más.",
+                    "Eres un VERIFICADOR estricto y anti-mentiras. Te doy una tarea, las \
+                     OBSERVACIONES reales de herramientas y una RESPUESTA. Comprueba DOS cosas: \
+                     (1) que cada DATO concreto (números, conteos, nombres, IPs, listas) aparezca \
+                     en las observaciones; (2) que cada ACCIÓN que la respuesta dice HABER HECHO \
+                     (reconocer una cara, escanear, encender la cámara, ejecutar un comando, \
+                     guardar en memoria, abrir una app, buscar en la web) esté CONFIRMADA por una \
+                     observación real. Afirmar una acción que las observaciones no confirman es \
+                     una MENTIRA, aunque suene plausible. Si TODO está respaldado, responde \
+                     exactamente 'OK'. Si algo está inventado o no respaldado (dato O acción), \
+                     responde 'CORREGIR: ' seguido de la respuesta corregida usando SOLO lo que \
+                     sí aparece en las observaciones, o diciendo con franqueza que no se hizo / no \
+                     se pudo obtener. No añadas nada más.",
                 ),
                 Message::user(format!(
                     "Tarea: {task}\n\nOBSERVACIONES reales:\n{scratchpad}\n\nRESPUESTA a verificar:\n{answer}"
@@ -736,10 +763,253 @@ fn extract(text: &str, label: &str) -> Option<String> {
     }
 }
 
-/// ¿La respuesta contiene DATOS verificables (números, conteos, IPs, fechas)? Solo
-/// entonces vale la pena gastar la llamada extra del juez de groundedness.
+/// ¿La respuesta contiene DATOS verificables (números, IPs…) o AFIRMA HABER HECHO algo
+/// (reconocer, escanear, ejecutar, guardar, abrir, buscar)? Solo entonces vale la pena gastar
+/// la llamada extra del juez de groundedness. Antes solo miraba dígitos, y por eso una mentira
+/// CUALITATIVA sin números (p. ej. «hice un reconocimiento facial» sin tocar la cámara) se colaba.
 fn needs_verification(answer: &str) -> bool {
-    answer.chars().any(|c| c.is_ascii_digit())
+    if answer.chars().any(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    let a = answer.to_lowercase();
+    ACTION_VERBS.iter().any(|v| a.contains(v))
+}
+
+/// Verbos en 1ª persona que AFIRMAN una acción/percepción realizada — disparan verificación.
+const ACTION_VERBS: &[&str] = &[
+    "reconocí",
+    "reconoci",
+    "escaneé",
+    "escanee",
+    "ejecuté",
+    "ejecute",
+    "encendí",
+    "encendi",
+    "guardé",
+    "guarde",
+    "abrí",
+    "instalé",
+    "instale",
+    "forjé",
+    "forje",
+    "busqué",
+    "busque",
+    "encontré",
+    "encontre",
+    "detecté",
+    "detecte",
+    "miré",
+    "he abierto",
+    "he ejecutado",
+    "he guardado",
+    "he reconocido",
+    "he buscado",
+    "verifiqué",
+    "he verificado",
+    "revisé",
+    "probé",
+    "comprobé",
+    "medí",
+];
+
+/// CAPA 1 — GUARDIÁN DETERMINISTA DE ACCIONES FINGIDAS (no depende de ningún LLM).
+/// El agente solo puede AFIRMAR una acción del mundo si ejecutó CON ÉXITO la herramienta que la
+/// realiza. Cada entrada: (descripción, frases INEQUÍVOCAS que afirman haberla hecho, fragmentos
+/// del nombre de la herramienta que la haría). Patrones específicos a propósito, para no marcar
+/// expresiones legítimas («reconozco que…», «puedo reconocerte») como mentira.
+const ACTION_CLAIMS: &[(&str, &[&str], &[&str])] = &[
+    (
+        "ejecutar un comando en la terminal",
+        &[
+            "ejecuté el comando",
+            "ejecute el comando",
+            "corrí el comando",
+            "lancé el comando",
+            "ejecuté en la terminal",
+            "en la terminal ejecuté",
+        ],
+        &["shell"],
+    ),
+    (
+        "guardar en memoria",
+        &[
+            "lo guardé en memoria",
+            "guardé en mi memoria",
+            "guarde en memoria",
+            "lo he guardado en memoria",
+            "lo memoricé",
+        ],
+        &["remember", "memory", "recordar"],
+    ),
+    (
+        "abrir una aplicación",
+        &[
+            "abrí la app",
+            "abrí la aplicación",
+            "abri la aplicacion",
+            "he abierto la app",
+            "abrí el programa",
+        ],
+        &["open", "abrir", "app"],
+    ),
+    (
+        "buscar en la web",
+        &[
+            "busqué en la web",
+            "busque en internet",
+            "lo busqué en internet",
+            "encontré en la web",
+            "según mi búsqueda en la web",
+        ],
+        &["search", "buscar", "web", "navega", "browse"],
+    ),
+];
+
+/// CÁMARA: el dominio donde el LLM más teatro hace («activando cámara… te he visto… no te
+/// reconozco con ArcFace»). No se detecta por frases exactas (las varía sin fin), sino por
+/// CO-OCURRENCIA: menciona un término del dominio cámara Y afirma haber percibido/procesado.
+const CAM_DOMAIN: &[&str] = &[
+    "cámara",
+    "camara",
+    "arcface",
+    "reconocimiento facial",
+    "embedding",
+    "tu rostro",
+    "tu cara",
+    "escaneo facial",
+    "reconocimiento de cara",
+];
+const CAM_PERCEPT: &[&str] = &[
+    "activando",
+    "capturando",
+    "procesando la imagen",
+    "procesando tu imagen",
+    "te he visto",
+    "ya te vi",
+    "acabo de verte",
+    "te miré",
+    "te reconozco",
+    "no te reconozco",
+    "te he reconocido",
+    "reconocí tu",
+    "reconoci tu",
+    "capté",
+    "estoy mirándote",
+    "mirándote",
+    "según arcface",
+    "coincide con tu",
+    "hice un reconocimiento",
+    "hice el reconocimiento",
+    "escaneé",
+    "escanee",
+    // Afirmar haber VERIFICADO/PROBADO/REVISADO el motor o la cámara también es teatro si no se
+    // ejecutó nada (p. ej. «he verificado el motor ArcFace… los embeddings son estables»).
+    "he verificado",
+    "verifiqué",
+    "verifique",
+    "lo verifiqué",
+    "comprobé",
+    "comprobe",
+    "probé",
+    "estuve probando",
+    "estuve revisando",
+    "revisé",
+    "lo revisé",
+    // Afirmar un RESULTADO/CONCLUSIÓN del dominio sin haber medido nada también es invención
+    // («los embeddings son estables», «funciona muy bien», «estaba dándole vueltas a ArcFace»).
+    "dándole vueltas",
+    "dandole vueltas",
+    "se están comportando",
+    "se estan comportando",
+    "se comporta",
+    "comportando",
+    "son estables",
+    "muy estables",
+    "es estable",
+    "funciona muy bien",
+    "funciona bien",
+    "muy preciso",
+    "alta confianza",
+];
+
+/// ¿La TAREA de Ariel pide explícitamente reconocer una cara / usar la cámara? Esto NO depende de
+/// cómo el modelo redacte la respuesta — depende de lo que Ariel pidió, que conocemos con certeza.
+fn task_demands_camera(task: &str) -> bool {
+    let t = task.to_lowercase();
+    const CUES: &[&str] = &[
+        "reconóceme",
+        "reconoceme",
+        "reconocimiento facial",
+        "quién soy",
+        "quien soy",
+        "reconoce mi cara",
+        "reconoce mi rostro",
+        "mírame",
+        "mirame",
+        "con la cámara",
+        "con la camara",
+        "usa la cámara",
+        "usa la camara",
+        "usá la cámara",
+        "quién tengo delante",
+        "quién está delante",
+        "quien esta delante",
+    ];
+    CUES.iter().any(|c| t.contains(c))
+}
+
+/// Si la respuesta AFIRMA una acción que NO se ejecutó con la herramienta correspondiente,
+/// devuelve la descripción de esa acción (es teatro/invención). `None` si está respaldada.
+/// CLAVE: para la cámara, el criterio robusto es la TAREA + herramientas usadas (hechos ciertos),
+/// no las palabras del modelo (infinitas variantes); la co-ocurrencia en el texto es red extra.
+fn unsupported_action_claim(task: &str, answer: &str, tools_ok: &[String]) -> Option<&'static str> {
+    let a = answer.to_lowercase();
+    let used_cam = tools_ok
+        .iter()
+        .any(|t| t.contains("reconocer_cara") || t.contains("face"));
+    if !used_cam {
+        // (1) ROBUSTO: Ariel pidió reconocer y el agente NO ejecutó la cámara → no puede afirmar
+        //     identidad ni narrar la captura, lo redacte como lo redacte.
+        if task_demands_camera(task) {
+            return Some("usar la cámara / reconocer una cara");
+        }
+        // (2) RED EXTRA: aunque la tarea no lo pidiera explícito, si la respuesta narra cámara
+        //     (dominio + percepción) sin haberla usado, también es teatro.
+        if CAM_DOMAIN.iter().any(|d| a.contains(d)) && CAM_PERCEPT.iter().any(|p| a.contains(p)) {
+            return Some("usar la cámara / reconocer una cara");
+        }
+    }
+    // Resto de acciones: frases directas → herramienta.
+    for (desc, claims, tools) in ACTION_CLAIMS {
+        if claims.iter().any(|c| a.contains(c)) {
+            let used = tools_ok
+                .iter()
+                .any(|t| tools.iter().any(|exp| t.contains(exp)));
+            if !used {
+                return Some(desc);
+            }
+        }
+    }
+    None
+}
+
+/// GUARDIÁN DE HONESTIDAD reutilizable desde la capa HTTP. Como el LLM local responde por varias
+/// vías (Final Answer, síntesis final, charla), el control no puede vivir solo dentro del bucle:
+/// este es el punto único que se aplica a TODA respuesta del agente antes de llegar a Ariel. Si la
+/// respuesta afirma una acción (p. ej. reconocer por cámara) que no se ejecutó con su herramienta,
+/// devuelve una corrección honesta; si está respaldada, `None`.
+pub fn honesty_guard(task: &str, answer: &str, tools_used: &[String]) -> Option<String> {
+    unsupported_action_claim(task, answer, tools_used).map(honest_unsupported_note)
+}
+
+/// Corrección HONESTA y determinista cuando se pilla una acción fingida: niega lo que no hizo y
+/// ofrece hacerlo de verdad. Nunca deja pasar la mentira.
+fn honest_unsupported_note(action: &str) -> String {
+    format!(
+        "Tengo que ser honesto contigo: iba a darte por hecho algo ({action}) que en realidad NO \
+         ejecuté en esta tarea, así que no te lo voy a afirmar. No te invento resultados. \
+         ¿Quieres que lo haga ahora de verdad?"
+    )
 }
 
 /// ¿La observación indica que la acción falló, se denegó o se canceló? Se usa para
@@ -868,6 +1138,72 @@ fn sanitize(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guardian_pilla_accion_fingida_sin_herramienta() {
+        // (1) ROBUSTO POR TAREA: Ariel pidió reconocer y no se usó la tool → bloquea, REDACTE
+        // como redacte (presente, futuro, gerundio… da igual: el criterio no es el texto).
+        assert!(
+            unsupported_action_claim(
+                "reconóceme con la cámara",
+                "Eres Ariel, ya te tengo registrado de antes.",
+                &[]
+            )
+            .is_some(),
+            "pidió reconocer y no usó la tool → teatro"
+        );
+        assert!(
+            unsupported_action_claim(
+                "¿quién soy?",
+                "Voy a activar la cámara y capturo el frame... eres Ariel.",
+                &[]
+            )
+            .is_some(),
+            "el caso real que se colaba (presente/futuro) ahora se pilla"
+        );
+        // (2) RED EXTRA por texto: aunque la tarea no lo pida explícito.
+        assert!(unsupported_action_claim(
+            "dime algo",
+            "Hice un reconocimiento facial y eres Ariel.",
+            &[]
+        )
+        .is_some());
+        // El caso del saludo/respuesta que inventaba VERIFICAR el motor sin ejecutar nada.
+        assert!(unsupported_action_claim(
+            "¿puedes reconocerme?",
+            "He verificado el motor ArcFace en vivo y los embeddings son estables.",
+            &[]
+        )
+        .is_some());
+        // Con la herramienta ejecutada → legítimo, no se marca.
+        assert!(
+            unsupported_action_claim("reconóceme", "Eres Ariel.", &["reconocer_cara".into()])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn guardian_no_marca_lenguaje_legitimo() {
+        // Tarea NO de cámara + lenguaje legítimo → no se marca.
+        assert!(
+            unsupported_action_claim("¿tengo razón?", "Reconozco que tienes razón.", &[]).is_none()
+        );
+        // Pregunta de CAPACIDAD (no orden de hacerlo) → la respuesta honesta no es mentira.
+        assert!(unsupported_action_claim(
+            "¿qué sabes hacer?",
+            "Con la cámara y ArcFace puedo decirte quién eres si me lo pides.",
+            &[]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn needs_verification_dispara_con_acciones_sin_numeros() {
+        assert!(needs_verification("Hice un reconocimiento facial."));
+        assert!(needs_verification("Ya lo guardé en memoria."));
+        // Prosa pura sin datos ni acciones → no hace falta el juez.
+        assert!(!needs_verification("Es una bonita idea, me gusta."));
+    }
 
     #[test]
     fn failure_detection_covers_errors_and_cancel() {

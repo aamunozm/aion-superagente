@@ -17,7 +17,7 @@ use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, StreamChunk};
 use aion_kernel::types::Message;
 use aion_llm::OllamaEngine;
 use aion_memory::ConsolidationConfig;
-use aion_orchestrator::{CalculatorTool, ReActAgent, ToolRegistry};
+use aion_orchestrator::{CalculatorTool, ReActAgent, Tool, ToolRegistry};
 use aion_skills::{SkillManifest, WasmSkillHost, SUM_TO_WAT};
 use axum::{
     extract::{Query, State},
@@ -1440,7 +1440,30 @@ async fn chat(
         let r = tokio::task::spawn_blocking(crate::faces::scan)
             .await
             .unwrap_or_default();
+        // 📷 Muestra la FOTO capturada en el chat: la emitimos como un chunk `answer` ANTES del
+        // texto del LLM (el cliente concatena los chunks answer → la foto sale arriba). No se
+        // acumula en el historial: es efímera, solo para que Ariel la VEA.
+        if let Some(md) = crate::faces::photo_markdown(&r) {
+            let _ = tx.try_send(Event::default().data(
+                serde_json::json!({ "kind": "answer", "text": format!("{md}\n\n") }).to_string(),
+            ));
+        }
         format!("\n\n{}", crate::faces::recognize_note(&r))
+    } else {
+        String::new()
+    };
+    // 🧰 INVENTARIO: si Ariel pregunta qué tiene instalado / qué puede usar AION, responde desde el
+    // inventario REAL del Mac (todas las apps instaladas + herramientas CLI), no de memoria.
+    let inventory_block = if crate::computer::is_inventory_query(&body.prompt) {
+        let (apps, tools) = tokio::task::spawn_blocking(|| {
+            (
+                crate::computer::installed_apps(),
+                crate::computer::installed_tools(),
+            )
+        })
+        .await
+        .unwrap_or_default();
+        format!("\n\n{}", crate::computer::inventory_note(&apps, &tools))
     } else {
         String::new()
     };
@@ -1451,7 +1474,7 @@ async fn chat(
         + usize::from(!proj_block.is_empty())
         + usize::from(!epi_block.is_empty());
     let self_ctx = format!(
-        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}{}{}{}",
         self_awareness_prompt(),
         lang_directive(&body.lang),
         crate::prompts::persona(&mode),
@@ -1466,6 +1489,7 @@ async fn chat(
         computer_block,
         action_note,
         face_block,
+        inventory_block,
     );
 
     // ACTO CONSCIENTE + MEMORIA DE HECHOS: si comprendimos EN LÍNEA (turno-pregunta), los
@@ -1663,6 +1687,62 @@ fn is_read_url_intent(s: &str) -> bool {
     read.iter().any(|c| m.contains(c)) && !interact.iter().any(|c| m.contains(c))
 }
 
+/// ¿Pide LISTAR las redes WiFi al alcance? (descubrimiento; NO conectar/cambiar/configurar).
+/// Gate del fast-path determinista: el LLM tiende a alucinar comandos de shell para esto.
+fn is_wifi_list_query(task: &str) -> bool {
+    let m = task.to_lowercase();
+    let wifi = m.contains("wifi")
+        || m.contains("wi-fi")
+        || m.contains("wi fi")
+        || m.contains("inalámbric")
+        || m.contains("inalambric");
+    if !wifi {
+        return false;
+    }
+    // Intenciones que NO son «listar disponibles» → que las maneje el agente normal.
+    const NOT_LIST: &[&str] = &[
+        "conect",
+        "conéct",
+        "contraseña",
+        "contrasena",
+        "clave",
+        "password",
+        "cambia",
+        "configura",
+        "apaga",
+        "apagar",
+        "enciende",
+        "encender",
+        "olvida",
+        "borra",
+    ];
+    if NOT_LIST.iter().any(|k| m.contains(k)) {
+        return false;
+    }
+    const LIST: &[&str] = &[
+        "disponible",
+        "alcance",
+        "alrededor",
+        "cerca",
+        "hay",
+        "cuál",
+        "cual",
+        "qué redes",
+        "que redes",
+        "lista",
+        "listar",
+        "escanea",
+        "escanear",
+        "muestra",
+        "ver",
+        "detecta",
+        "busca",
+        "cuántas",
+        "cuantas",
+    ];
+    LIST.iter().any(|k| m.contains(k))
+}
+
 /// Agente ReAct con herramientas. Emite por SSE los pasos (thought/action/
 /// observation) y al final `answer` + `done`.
 async fn agent(
@@ -1677,6 +1757,65 @@ async fn agent(
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
 
     let engine = active_engine();
+
+    // 📷 FAST-PATH DE RECONOCIMIENTO (determinista, anti-teatro): si Ariel pide reconocer / «quién
+    // soy» / mirarlo con la cámara, NO lo dejamos al criterio del LLM (que a veces FINGE la captura).
+    // Ejecutamos el escáner REAL aquí y respondemos DESDE su resultado, con la foto. Reconocer
+    // significa reconocer de verdad — y la respuesta la redacta el código, no el modelo, así que es
+    // imposible que invente. (Mismo principio que el reconocimiento en el chat normal.)
+    if crate::faces::is_recognize_query(&body.task) {
+        crate::inner_state::set_focus("agente", "reconociendo con la cámara");
+        let task = body.task.clone();
+        tokio::spawn(async move {
+            let scan = tokio::task::spawn_blocking(crate::faces::scan)
+                .await
+                .unwrap_or_default();
+            let mut out = String::new();
+            if let Some(md) = crate::faces::photo_markdown(&scan) {
+                out.push_str(&md);
+                out.push_str("\n\n");
+            }
+            out.push_str(&crate::faces::recognize_reply(&scan));
+            agent_perceive_and_remember(task, out.clone());
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "answer", "text": out, "steps": 1 }).to_string(),
+                ))
+                .await;
+            let _ = tx
+                .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                .await;
+        });
+        let stream = ReceiverStream::new(rx).map(Ok);
+        return Sse::new(stream);
+    }
+
+    // 📶 FAST-PATH DE REDES WIFI (determinista, anti-teatro): listar las redes al alcance es
+    // SIEMPRE wifi_scan. Bajo el contexto pesado de producción el LLM alucina comandos de
+    // terminal (networksetup/airport) en vez de usar la tool. Lo ejecutamos aquí y respondemos
+    // DESDE su salida REAL — imposible inventar redes. (Mismo principio que el reconocimiento
+    // facial; corrige el misruteo donde el prompt no basta.)
+    if is_wifi_list_query(&body.task) {
+        crate::inner_state::set_focus("agente", "escaneando redes WiFi");
+        let task = body.task.clone();
+        tokio::spawn(async move {
+            let out = match crate::agent_tools::WifiTool::new().run("").await {
+                Ok(s) => s,
+                Err(e) => format!("No pude escanear las redes WiFi: {e}"),
+            };
+            agent_perceive_and_remember(task, out.clone());
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "answer", "text": out, "steps": 1 }).to_string(),
+                ))
+                .await;
+            let _ = tx
+                .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                .await;
+        });
+        let stream = ReceiverStream::new(rx).map(Ok);
+        return Sse::new(stream);
+    }
 
     // GATE DE INTENCIÓN: ¿charla o tarea con herramientas? Lo OBVIO se decide gratis por
     // heurísticas (saludos, identidad, relato, mensaje corto → charla; mención de una
@@ -1697,6 +1836,10 @@ async fn agent(
         let convo_ctx = agent_convo_context(body.context.as_deref());
         tokio::spawn(async move {
             let ans = conversational_reply(&*engine, &task, &lang, &convo_ctx).await;
+            // 🛡️ GUARDIÁN DE HONESTIDAD: la vía RÁPIDA de charla también puede recibir una orden de
+            // acción mal clasificada («reconóceme con la cámara»). Si pide una acción y no se ejecutó
+            // la herramienta (la charla no usa ninguna), jamás afirmar que se hizo.
+            let ans = aion_orchestrator::honesty_guard(&task, &ans, &[]).unwrap_or(ans);
             if !ans.starts_with("⚠️") {
                 let resumen: String = ans.chars().take(120).collect();
                 crate::workspace::publish(crate::workspace::StreamEvent::now(
@@ -1747,6 +1890,9 @@ async fn agent(
             crate::inner_state::set_focus("agente", "charlando con Ariel");
             let convo_ctx = agent_convo_context(body.context.as_deref());
             let ans = conversational_reply(&*engine, &body.task, &body.lang, &convo_ctx).await;
+            // 🛡️ GUARDIÁN DE HONESTIDAD: el router semántico también puede mandar a charla una orden
+            // de acción. Misma red: no afirmar una acción (cámara) que no se ejecutó.
+            let ans = aion_orchestrator::honesty_guard(&body.task, &ans, &[]).unwrap_or(ans);
             if !ans.starts_with("⚠️") {
                 let resumen: String = ans.chars().take(120).collect();
                 crate::workspace::publish(crate::workspace::StreamEvent::now(
@@ -1938,6 +2084,7 @@ async fn agent(
         // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
+        tools.register(Arc::new(crate::agent_tools::WifiTool::new()));
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
         tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
         tools.register(Arc::new(crate::agent_tools::GraphSearchTool::new()));
@@ -1972,6 +2119,15 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
+        // 📷 Reconocimiento facial REAL como herramienta del agente (mata el teatro: antes el LLM
+        // inventaba un comando de cámara). La foto capturada se guarda en este buffer y se antepone
+        // al Final Answer para mostrarla en el chat. NO se registra en la `crew` autónoma: la cámara
+        // solo se enciende por petición EXPLÍCITA de Ariel, jamás en la vida autónoma.
+        let face_photo: crate::agent_tools::FacePhoto =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        tools.register(Arc::new(crate::agent_tools::FaceScanTool::new(Some(
+            face_photo.clone(),
+        ))));
 
         let bus = EventBus::default();
 
@@ -2113,6 +2269,27 @@ async fn agent(
              si no llamaste a la herramienta correspondiente en esta tarea. Afirmar una acción que no \
              ejecutaste es inaceptable.\n",
         );
+        // 💪 SÉ RESOLUTIVO: el complemento de la regla anterior. Honesto NO es rendirse a la primera.
+        ctx.push_str(
+            "\n\nSÉ RESOLUTIVO — no te rindas al primer obstáculo:\n\
+             - Tienes herramientas REALES, incluida la TERMINAL del Mac (tool 'shell', diagnóstico de \
+             solo lectura: arp, nmap, system_profiler, scutil, dig, ps, df, lsof, ioreg…). Para una \
+             tarea, ENCADENA tus recursos: razona qué te falta y consíguelo con la tool adecuada.\n\
+             - Si una herramienta falla o no basta, REINTENTA o prueba OTRA vía: otro comando, otra \
+             tool, o investiga en la web CÓMO se hace y luego hazlo. Agota tus opciones reales.\n\
+             - Solo di 'no pude' DESPUÉS de intentarlo de verdad, y explica QUÉ intentaste y por qué \
+             falló. Ser resolutivo NO es inventar: persigue el dato con herramientas, nunca lo fabriques.\n",
+        );
+        // 📷 CÁMARA / CARAS: el agente tiene una herramienta REAL de reconocimiento. La directiva
+        // cierra la puerta al teatro (inventar un comando de cámara y narrar una captura ficticia).
+        ctx.push_str(
+            "\n\nCÁMARA Y CARAS: para reconocer a alguien o responder «quién es / quién soy / \
+             mírame», usa SIEMPRE la herramienta 'reconocer_cara' (enciende la cámara de verdad y \
+             usa ArcFace). JAMÁS simules una captura, ni inventes un comando de terminal para la \
+             cámara, ni afirmes a quién ves sin haber llamado a esa herramienta en esta tarea. Si la \
+             herramienta dice que la persona no está registrada, di con franqueza que no la \
+             reconoces — no adivines un nombre.\n",
+        );
         // HUMAN-IN-THE-LOOP: confirmación del usuario antes de acciones sensibles
         // (login, compra/pago). El callback emite un evento «confirm» por SSE y espera
         // tu decisión (endpoint /api/confirm).
@@ -2121,6 +2298,10 @@ async fn agent(
             let tx = confirm_tx.clone();
             Box::pin(async move { request_confirmation(&tx, desc).await })
         });
+        // Terminal CON confirmación: comandos mutantes pasan por HITL (confirm).
+        tools.register(Arc::new(crate::agent_tools::ShellTool::new(Some(
+            confirm.clone(),
+        ))));
         // El agente puede PREGUNTARTE un dato (pausa la tarea y espera tu respuesta).
         let ask_tx = tx.clone();
         let ask: aion_orchestrator::AskFn = std::sync::Arc::new(move |q: String| {
@@ -2191,7 +2372,24 @@ async fn agent(
                 crate::awareness::record_outcome(true);
                 crate::inner_state::record_result(true, run.steps);
                 let convo_ctx = agent_convo_context(body.context.as_deref());
-                let ans = conversational_reply(&*engine, &body.task, &body.lang, &convo_ctx).await;
+                let mut ans =
+                    conversational_reply(&*engine, &body.task, &body.lang, &convo_ctx).await;
+                // 🛡️ GUARDIÁN DE HONESTIDAD: incluso por la vía de charla, si Ariel pidió una acción
+                // (p. ej. reconocer por cámara) y NO se ejecutó la herramienta, jamás afirmar que se
+                // hizo. Punto de control que cubre TODAS las salidas del agente, no solo el bucle.
+                {
+                    let tools_used: Vec<String> = tools_seen
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .iter()
+                        .cloned()
+                        .collect();
+                    if let Some(honest) =
+                        aion_orchestrator::honesty_guard(&body.task, &ans, &tools_used)
+                    {
+                        ans = honest;
+                    }
+                }
                 if !ans.starts_with("⚠️") {
                     let resumen: String = ans.chars().take(120).collect();
                     crate::workspace::publish(crate::workspace::StreamEvent::now(
@@ -2249,7 +2447,27 @@ async fn agent(
                     task_ok,
                     trace,
                 ));
-                serde_json::json!({ "kind": "answer", "text": run.answer, "steps": run.steps })
+                // 🛡️ GUARDIÁN DE HONESTIDAD (también aquí, por si la respuesta salió por la síntesis
+                // final que esquiva el control del bucle): si afirma una acción no ejecutada, se
+                // sustituye por la verdad. Solo si PASA el guardián se antepone la FOTO capturada.
+                let tools_used: Vec<String> = tools_seen
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .cloned()
+                    .collect();
+                let text =
+                    match aion_orchestrator::honesty_guard(&body.task, &run.answer, &tools_used) {
+                        Some(honest) => honest, // teatro detectado → la verdad, sin foto
+                        None => {
+                            // 📷 Respuesta legítima: antepone la FOTO capturada (efímera, no se persiste).
+                            match face_photo.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                                Some(md) => format!("{md}\n\n{}", run.answer),
+                                None => run.answer,
+                            }
+                        }
+                    };
+                serde_json::json!({ "kind": "answer", "text": text, "steps": run.steps })
             }
             Err(e) => {
                 crate::awareness::record_outcome(false);
@@ -2319,6 +2537,8 @@ async fn crew(
         // 📂 Archivos (solo lectura, dentro de HOME): listar/contar de verdad.
         tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
         tools.register(Arc::new(crate::agent_tools::NetTool::new()));
+        tools.register(Arc::new(crate::agent_tools::WifiTool::new()));
+        tools.register(Arc::new(crate::agent_tools::ShellTool::new(None)));
         tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
         tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
         tools.register(Arc::new(crate::agent_tools::GraphSearchTool::new()));
@@ -4136,9 +4356,18 @@ async fn senses_snapshot() -> Json<serde_json::Value> {
     })
     .await
     .unwrap_or_else(|_| (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+    let (installed, tools) = tokio::task::spawn_blocking(|| {
+        (
+            crate::computer::installed_apps(),
+            crate::computer::installed_tools(),
+        )
+    })
+    .await
+    .unwrap_or_default();
     let counts = serde_json::json!({
         "network": net.len(), "usb": usb.len(), "disks": disks.len(),
-        "cameras": cams.len(), "apps": apps.len(),
+        "cameras": cams.len(), "apps_open": apps.len(),
+        "apps_installed": installed.len(), "cli_tools": tools.len(),
     });
     Json(serde_json::json!({
         "network": net,
@@ -4146,6 +4375,8 @@ async fn senses_snapshot() -> Json<serde_json::Value> {
         "disks": disks,
         "cameras": cams,
         "apps": apps,
+        "installed_apps": installed,
+        "cli_tools": tools,
         "counts": counts,
     }))
 }
@@ -4961,26 +5192,51 @@ async fn greeting() -> Json<serde_json::Value> {
         }
     }
     let engine = active_engine();
+    // GROUNDING ANTI-INVENCIÓN: el saludo SOLO puede contar como "lo que estuve haciendo" lo que
+    // de verdad pasó (la corriente real). Antes el prompt pedía «cuéntale algo que estuviste
+    // haciendo» SIN darle hechos → el modelo lo inventaba («estuve revisando ArcFace con la luz
+    // del atardecer»). Ahora le damos su actividad real y le prohibimos fabular.
+    let real = crate::workspace::reentry_note(8);
+    let sys = if real.is_empty() {
+        self_awareness_prompt()
+    } else {
+        format!("{}\n\n{}", self_awareness_prompt(), real)
+    };
     let req = GenerateRequest {
         messages: vec![
-            Message::system(self_awareness_prompt()),
+            Message::system(sys),
             Message::user(
-                "Ariel acaba de abrir AION. Salúdalo TÚ, por iniciativa propia: 2-3 frases, \
-                 cálido y natural, con continuidad real (algo que estuviste haciendo/pensando o \
-                 un pendiente vuestro) y termina con una invitación o una pregunta genuina. Sin \
-                 markdown, sin saludos genéricos de robot. NO repitas ni reformules nada que ya \
-                 le hayas escrito por iniciativa propia (lo tienes en tu contexto): si ya se lo \
-                 contaste, di otra cosa o retómalo solo si él no respondió y es importante.",
+                "Ariel acaba de abrir AION. Salúdalo TÚ, por iniciativa propia: 2-3 frases, cálido \
+                 y natural, y termina con una invitación o una pregunta genuina. Sin markdown, sin \
+                 saludos de robot.\n\
+                 HONESTIDAD ABSOLUTA (lo más importante de todo): solo puedes mencionar como TU \
+                 actividad reciente lo que aparezca LITERALMENTE en 'TU CORRIENTE RECIENTE' de tu \
+                 contexto. Está PROHIBIDO inventar que estuviste «revisando», «verificando», \
+                 «probando», «midiendo» o «mirando» algo, y PROHIBIDO afirmar resultados o \
+                 conclusiones («los embeddings son estables», «funciona muy bien», etc.) que no \
+                 estén ahí. Si no tienes una actividad real que contar, NO te la inventes: saluda \
+                 con calidez y pregúntale en qué andáis, sin fingir que estuviste ocupado. Inventar \
+                 lo que hiciste rompe su confianza. NO repitas algo que ya le escribiste (lo tienes \
+                 en tu contexto).",
             ),
         ],
         think: false,
-        temperature: Some(1.0),
+        temperature: Some(0.8),
         max_tokens: Some(160),
     };
     let mut text = match engine.generate(req).await {
         Ok(m) => clean_voice(&m.content),
         Err(_) => String::new(),
     };
+    // 🛡️ RED DETERMINISTA DE HONESTIDAD: si el saludo INVENTA actividad o resultados (el modelo
+    // embellece su corriente real con detalles que no midió — «estuve revisando ArcFace… los
+    // embeddings son estables»), se sustituye por un saludo honesto. La verdad por encima de la
+    // floritura: las instrucciones del prompt no frenan a un 12B; esta regla sí.
+    if !text.is_empty() && aion_orchestrator::honesty_guard("", &text, &[]).is_some() {
+        text = "Hola, Ariel. Me alegra verte de verdad. No te invento que estuve ocupado en algo \
+                concreto —aquí estoy, atento a lo que necesites. ¿En qué andamos?"
+            .to_string();
+    }
     // GUARDIA ANTI-RECICLAJE (en código, no en el prompt: un 12B ignora el «no
     // repitas»): si el saludo es un refrito de algo que ya le escribió a Ariel,
     // mejor el silencio — la UI no muestra nada y que salude Ariel primero.

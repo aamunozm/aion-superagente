@@ -175,6 +175,7 @@ async fn build_tools() -> Arc<ToolRegistry> {
     tools.register(Arc::new(CalculatorTool));
     tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
     tools.register(Arc::new(crate::agent_tools::NetTool::new()));
+    tools.register(Arc::new(crate::agent_tools::WifiTool::new()));
     tools.register(Arc::new(MemoryTool::new(memory, 3)));
     tools.register(Arc::new(crate::agent_tools::SearchTool::new(Arc::new(
         WebClient::new(),

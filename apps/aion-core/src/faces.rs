@@ -15,8 +15,12 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-/// Umbral de coseno para considerar que dos faceprints son la MISMA persona (ArcFace ~0.5).
-const MATCH_THRESHOLD: f32 = 0.5;
+/// Umbral de coseno para considerar que dos faceprints son la MISMA persona.
+/// 0.45: con la cara ALINEADA por landmarks (el helper Swift mapea ojos/nariz/boca a la plantilla
+/// de ArcFace), el parecido intra-sujeto sube y es estable entre poses; 0.45 da margen para ángulos
+/// y, junto al perfil multi-vista (hasta MAX_EMB_PER_PERSON), agrupa al mismo sujeto sin colar a
+/// otros. Verificado en vivo: 4/4 poses variadas (incl. ladeada) reconocen a la misma persona.
+const MATCH_THRESHOLD: f32 = 0.45;
 /// Máximo de embeddings por persona (perfil multi-ángulo; se rota el más viejo).
 const MAX_EMB_PER_PERSON: usize = 12;
 
@@ -182,46 +186,144 @@ fn probe_path() -> PathBuf {
 
 /// **Escanea con la cámara y reconoce.** Bajo demanda y con permiso (gobernanza Camera). Ejecuta el
 /// helper Swift (captura + Apple Vision detecta + faceprint), y para cada cara decide quién es
-/// (`observe`). Devuelve a quién reconoce. BLOQUEANTE (~4s): llamar desde spawn_blocking.
+/// (`observe`). Devuelve a quién reconoce. BLOQUEANTE: ~4-8s normalmente, pero hasta ~45s la PRIMERA
+/// vez (espera a que Ariel acepte el diálogo de permiso de cámara). Llamar desde spawn_blocking.
 pub fn scan() -> serde_json::Value {
-    if !crate::governance::request(
-        crate::governance::Capability::Camera,
-        "encender la cámara para reconocer quién está delante",
-    )
-    .allowed()
-    {
-        return serde_json::json!({ "error": "permiso de cámara no concedido (gobernanza)", "recognized": [] });
-    }
+    // `scan` SOLO se llama cuando Ariel lo pide explícitamente (chat "¿quién soy?" o el botón del
+    // panel): su petición ES la autorización humana (mismo criterio que abrir una app por orden
+    // directa). El gate REAL de privacidad es el permiso de cámara de macOS (TCC), que el SO pide
+    // la primera vez y Ariel concede conscientemente. Lo auditamos como acción autorizada por él.
+    use crate::governance::{note_user_action, Capability};
     let out = match std::process::Command::new(probe_path()).output() {
         Ok(o) => o,
         Err(_) => {
-            return serde_json::json!({ "error": "no encuentro el helper de cámara (face-probe)", "recognized": [] })
+            note_user_action(Capability::Camera, "reconocer con la cámara", false);
+            return serde_json::json!({ "error": "no encuentro el helper de cámara (face-probe)", "recognized": [] });
         }
     };
+    note_user_action(Capability::Camera, "reconocer con la cámara", true);
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let diag = parsed
+        .get("diag")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     if let Some(err) = parsed.get("error").and_then(|e| e.as_str()) {
-        return serde_json::json!({ "error": err, "recognized": [] });
+        return serde_json::json!({ "error": err, "recognized": [], "diag": diag });
     }
     let mut recognized = Vec::new();
     if let Some(faces) = parsed.get("faces").and_then(|f| f.as_array()) {
         for f in faces {
-            let emb: Vec<f32> = f
-                .get("embedding")
-                .and_then(|e| e.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_f64().map(|v| v as f32))
-                        .collect()
-                })
-                .unwrap_or_default();
+            // Faceprint POTENTE: crop 112×112 → ArcFace (512 dim). Si no hay modelo, cae al
+            // descriptor genérico de Vision (menos discriminativo, pero algo es algo).
+            let (emb, engine) = match f
+                .get("crop112")
+                .and_then(|c| c.as_str())
+                .and_then(arcface_from_crop)
+            {
+                Some(e) => (e, "arcface"),
+                None => {
+                    let v: Vec<f32> = f
+                        .get("embedding")
+                        .and_then(|e| e.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_f64().map(|v| v as f32))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (v, "vision")
+                }
+            };
             if emb.is_empty() {
                 continue;
             }
             let (id, label, known) = observe(&emb);
-            recognized.push(serde_json::json!({ "id": id, "label": label, "known": known }));
+            let mut obj =
+                serde_json::json!({ "id": id, "label": label, "known": known, "engine": engine });
+            // Foto efímera de la cara (para MOSTRAR en el chat): NO se persiste en faces.jsonl,
+            // solo viaja en esta respuesta. Datos biométricos → fuera de disco y de logs.
+            if let Some(j) = f.get("face_jpeg").and_then(|x| x.as_str()) {
+                obj["face_jpeg"] = serde_json::Value::String(j.to_string());
+            }
+            recognized.push(obj);
         }
     }
-    serde_json::json!({ "error": serde_json::Value::Null, "recognized": recognized })
+    serde_json::json!({ "error": serde_json::Value::Null, "recognized": recognized, "diag": diag })
+}
+
+/// Respuesta DIRECTA y 100% verídica (sin LLM) para mostrarle a Ariel tras un escaneo. La genera
+/// el código desde el resultado real del escáner — así reconocer significa reconocer de verdad, y
+/// es imposible que el modelo finja o adorne.
+pub fn recognize_reply(scan: &serde_json::Value) -> String {
+    if let Some(err) = scan.get("error").and_then(|e| e.as_str()) {
+        return format!("Encendí la cámara pero no pude reconocer: {err}.");
+    }
+    let rec = scan
+        .get("recognized")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if rec.is_empty() {
+        return "Encendí la cámara, pero ahora mismo no detecté ninguna cara delante.".into();
+    }
+    let mut known: Vec<String> = Vec::new();
+    let mut unknown = 0u32;
+    for r in &rec {
+        let label = r.get("label").and_then(|l| l.as_str()).unwrap_or("?");
+        if r.get("known").and_then(|k| k.as_bool()).unwrap_or(false) {
+            known.push(label.to_string());
+        } else {
+            unknown += 1;
+        }
+    }
+    let mut s = String::new();
+    if !known.is_empty() {
+        s.push_str(&format!(
+            "Te miré con la cámara y reconozco a {}.",
+            known.join(", ")
+        ));
+    }
+    if unknown > 0 {
+        if !s.is_empty() {
+            s.push(' ');
+        }
+        s.push_str(&format!(
+            "Veo {unknown} cara{} que aún no tengo registrada — si me dices quién es, la recuerdo.",
+            if unknown == 1 { "" } else { "s" }
+        ));
+    }
+    s
+}
+
+/// Markdown de la PRIMERA foto de cara del escaneo (data-URI JPEG), para mostrarla en el chat.
+/// `None` si no hay foto. Efímera: la imagen no se guarda en disco, solo se muestra.
+pub fn photo_markdown(scan: &serde_json::Value) -> Option<String> {
+    let rec = scan.get("recognized").and_then(|r| r.as_array())?;
+    for r in rec {
+        if let Some(j) = r.get("face_jpeg").and_then(|x| x.as_str()) {
+            let label = r.get("label").and_then(|l| l.as_str()).unwrap_or("cara");
+            return Some(format!("![{label}](data:image/jpeg;base64,{j})"));
+        }
+    }
+    None
+}
+
+/// Crop 112×112 RGB (base64, salida del helper Swift) → faceprint ArcFace (512 dim, L2).
+/// Preprocesa a NCHW normalizado a [-1,1] como espera InsightFace: `(px - 127.5) / 128`.
+fn arcface_from_crop(b64: &str) -> Option<Vec<f32>> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    const PLANE: usize = 112 * 112;
+    if bytes.len() != PLANE * 3 {
+        return None;
+    }
+    let mut nchw = vec![0f32; 3 * PLANE];
+    for px in 0..PLANE {
+        for c in 0..3 {
+            nchw[c * PLANE + px] = (bytes[px * 3 + c] as f32 - 127.5) / 128.0;
+        }
+    }
+    crate::arcface::embed(nchw)
 }
 
 /// ¿Ariel pregunta por reconocimiento facial / quién está delante?
@@ -266,17 +368,29 @@ pub fn recognize_note(scan: &serde_json::Value) -> String {
         return "Encendiste la cámara pero NO detectaste ninguna cara ahora mismo. Dilo con franqueza."
             .into();
     }
-    let mut s = String::from("LO QUE RECONOCES AHORA POR LA CÁMARA (real, responde desde esto):\n");
+    let mut s = String::from(
+        "LO QUE RECONOCES AHORA POR LA CÁMARA (datos REALES de tu visión — responde SOLO desde \
+         esto, no inventes identidades):\n",
+    );
     for r in &rec {
         let label = r.get("label").and_then(|l| l.as_str()).unwrap_or("?");
         let known = r.get("known").and_then(|k| k.as_bool()).unwrap_or(false);
         if known {
-            s.push_str(&format!("- Reconozco a {label}.\n"));
+            s.push_str(&format!(
+                "- Es {label}: una persona que TIENES registrada y reconoces con seguridad. Salúdala por su nombre.\n"
+            ));
         } else {
             s.push_str(&format!(
-                "- Veo a alguien que aún no tengo nombrado ({label}). Si Ariel me dice quién es, lo recuerdo.\n"
+                "- Hay una persona que NO tienes registrada ({label}): no sabes su nombre y NO es ninguno de tus conocidos. Dilo con claridad («no te reconozco, no eres alguien que tenga registrado»). Si te dicen quién es, la recuerdas.\n"
             ));
         }
+    }
+    if rec.iter().any(|r| r.get("face_jpeg").is_some()) {
+        s.push_str(
+            "\nLa FOTO que acabas de capturar se está mostrando en el chat (no la describas como \
+             si no la vieras). Comenta con naturalidad y di quién es por su NOMBRE si lo reconoces, \
+             o que no lo conoces si es nuevo.\n",
+        );
     }
     s
 }
