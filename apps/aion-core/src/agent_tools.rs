@@ -169,9 +169,10 @@ impl Tool for NetTool {
         "net_scan"
     }
     fn description(&self) -> &str {
-        "Escanea TU red local y devuelve los equipos conectados con su IP y MAC \
-         (cuántos hay y cuáles son). Úsala para «cuántos equipos hay en la red», \
-         «qué dispositivos están conectados», «sus IPs». No necesita entrada."
+        "Escanea TU red local y devuelve los equipos conectados con su IP, MAC y FABRICANTE \
+         (la marca ya viene resuelta de una base OUI local fiable; NO necesitas buscarla fuera). \
+         Úsala para «cuántos equipos hay», «qué dispositivos/marcas están conectados», «sus IPs». \
+         Lo que salga 'fabricante desconocido' es real: NO lo inventes. No necesita entrada."
     }
     async fn run(&self, _input: &str) -> Result<String, String> {
         let my_ip = local_ipv4()
@@ -282,7 +283,14 @@ impl Tool for NetTool {
                 } else {
                     format!(" — {host}")
                 };
-                format!("{ip} [{mac}]{h}{tag}")
+                // FABRICANTE resuelto de la base OUI local (fiable, offline). Si no está,
+                // "fabricante desconocido" con franqueza — NUNCA inventar.
+                let vendor = match crate::oui::vendor(mac) {
+                    Some(v) => format!(" · {v}"),
+                    None if mac == "—" => String::new(),
+                    None => " · fabricante desconocido".to_string(),
+                };
+                format!("{ip} [{mac}]{vendor}{h}{tag}")
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -1649,6 +1657,48 @@ impl Tool for SearchTool {
     }
 }
 
+// ── 0c) Buscar en GitHub: repos + código (API; el código requiere token) ────
+
+/// Búsqueda en GitHub vía API: repositorios y, con token, ficheros de código.
+pub struct GithubSearchTool {
+    web: Arc<WebClient>,
+}
+
+impl GithubSearchTool {
+    pub fn new(web: Arc<WebClient>) -> Self {
+        Self { web }
+    }
+}
+
+#[async_trait]
+impl Tool for GithubSearchTool {
+    fn name(&self) -> &str {
+        "github_search"
+    }
+    fn description(&self) -> &str {
+        "Busca en GitHub usando su API: repositorios populares (por estrellas) y, si hay un token \
+         configurado en Ajustes \u{2192} APIs, tambi\u{e9}n DENTRO del c\u{f3}digo de los repos. \
+         \u{da}sala cuando el usuario pida buscar repos, proyectos, librer\u{ed}as o c\u{f3}digo en \
+         GitHub. Entrada: t\u{e9}rminos de b\u{fa}squeda. Devuelve t\u{ed}tulo, URL y datos; luego \
+         puedes leer una URL con web_fetch."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let results = self.web.github(input.trim(), 8).await;
+        if results.is_empty() {
+            return Err(
+                "GitHub no devolvi\u{f3} resultados; reformula la consulta o revisa el token en \
+                 Ajustes \u{2192} APIs"
+                    .into(),
+            );
+        }
+        Ok(results
+            .iter()
+            .map(|r| format!("\u{2022} {} \u{2014} {}\n  {}", r.title, r.url, r.snippet))
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+}
+
 // ── 0b) Clima en tiempo real (Open-Meteo, sin API key) ──────────────────────
 
 /// Temperatura y clima ACTUALES de un lugar. Es la herramienta correcta para
@@ -1680,12 +1730,37 @@ impl Tool for WeatherTool {
         let place = input
             .trim()
             .trim_matches(|c| c == '«' || c == '»' || c == '"');
-        if place.is_empty() {
-            // AUTONOMÍA: sin ciudad, AION se ubica solo (IP pública) y consulta ahí
-            // — no hace falta preguntarle al usuario dónde está.
-            return self.web.weather_auto().await.map_err(|e| e.to_string());
+        if !place.is_empty() {
+            // El usuario nombró un lugar explícito: tiene prioridad sobre todo.
+            return self.web.weather(place).await.map_err(|e| e.to_string());
         }
-        self.web.weather(place).await.map_err(|e| e.to_string())
+        // Sin lugar: usa la POSICIÓN PRECISA que el usuario fijó en «Conciencia de
+        // entorno» (lat/lon exactas) ANTES que la IP —que detrás de un proxy/VPN apunta
+        // al nodo de salida, no a él—. Orden: coords precisas → ciudad guardada → IP.
+        let cfg = crate::sensors::load();
+        if cfg.enabled {
+            if let (Some(lat), Some(lon)) = (cfg.lat, cfg.lon) {
+                let label = if cfg.place.is_empty() {
+                    "tu ubicación"
+                } else {
+                    cfg.place.as_str()
+                };
+                return self
+                    .web
+                    .weather_at(lat, lon, label)
+                    .await
+                    .map_err(|e| e.to_string());
+            }
+            if !cfg.place.is_empty() {
+                return self
+                    .web
+                    .weather(&cfg.place)
+                    .await
+                    .map_err(|e| e.to_string());
+            }
+        }
+        // Último recurso: sin ubicación configurada, AION se estima por IP pública.
+        self.web.weather_auto().await.map_err(|e| e.to_string())
     }
 }
 

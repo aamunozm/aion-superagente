@@ -60,7 +60,11 @@ pub async fn refresh_weather() {
         return;
     }
     let now = chrono::Utc::now().timestamp();
-    if let Some((ts, _)) = weather_cache().lock().unwrap().as_ref() {
+    if let Some((ts, _)) = weather_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
         if now - ts < WEATHER_TTL {
             return;
         }
@@ -83,7 +87,7 @@ pub async fn refresh_weather() {
     if let Some(t) = temp {
         let desc = weather_desc(code);
         let txt = format!("{desc}, {t:.0}°C");
-        *weather_cache().lock().unwrap() = Some((now, txt));
+        *weather_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some((now, txt));
     }
 }
 
@@ -93,8 +97,9 @@ pub fn note() -> String {
     note_from(&load())
 }
 
-/// Igual que `note()` pero a partir de una config explícita (sin tocar el disco): así es
-/// testeable de forma aislada, sin depender del `sensors.json` real de la máquina.
+/// Construye la nota a partir de una config DADA — función pura (no toca disco), para poder
+/// testear la lógica de forma aislada (antes el test leía `sensors.json` real del Mac y fallaba
+/// en la máquina de Ariel con los sensores activados).
 fn note_from(cfg: &SensorConfig) -> String {
     if !cfg.enabled {
         return String::new();
@@ -102,8 +107,18 @@ fn note_from(cfg: &SensorConfig) -> String {
     let mut b = String::new();
     if !cfg.place.is_empty() {
         b.push_str(&format!("DÓNDE ESTÁS: {}.", cfg.place));
+    } else if cfg.lat.is_some() && cfg.lon.is_some() {
+        // Solo coordenadas (sin etiqueta de ciudad): aun así AION SABE que tiene tu
+        // ubicación precisa — no debe pedirte la ciudad para el clima.
+        b.push_str(
+            "DÓNDE ESTÁS: tu ubicación precisa está configurada (úsala para el clima; no pidas la ciudad).",
+        );
     }
-    if let Some((_, w)) = weather_cache().lock().unwrap().as_ref() {
+    if let Some((_, w)) = weather_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
         b.push_str(&format!(" Tiempo ahora: {w}."));
     }
     if b.is_empty() {
@@ -348,7 +363,8 @@ mod tests {
 
     #[test]
     fn note_empty_when_disabled() {
-        // Desactivado => sin bloque (aislado del disco: no depende del sensors.json real).
+        // Lógica PURA (sin leer disco): desactivado => sin bloque. Antes esto llamaba a note(),
+        // que lee el sensors.json real → fallaba en el Mac de Ariel con los sensores activados.
         assert_eq!(note_from(&SensorConfig::default()), "");
         // Activado con lugar => sí hay bloque.
         let cfg = SensorConfig {

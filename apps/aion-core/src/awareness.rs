@@ -139,7 +139,7 @@ pub fn touch_user_presence() {
         if gap < 60 {
             return;
         }
-        *gap_cell().lock().unwrap() = Some((now, gap));
+        *gap_cell().lock().unwrap_or_else(|e| e.into_inner()) = Some((now, gap));
     }
     if let Some(p) = last_seen_path().parent() {
         let _ = std::fs::create_dir_all(p);
@@ -158,7 +158,7 @@ pub fn seconds_since_user() -> Option<i64> {
 /// cuánto lleva sin hablarle.
 pub fn presence_note() -> String {
     let now = chrono::Utc::now().timestamp();
-    let gap = match *gap_cell().lock().unwrap() {
+    let gap = match *gap_cell().lock().unwrap_or_else(|e| e.into_inner()) {
         Some((t, g)) if now - t < GAP_FRESH_SECS => Some(g),
         _ => read_last_seen().map(|t| now - t),
     };
@@ -206,7 +206,7 @@ fn self_model_guard() -> &'static Mutex<()> {
 /// Registra el resultado (éxito/fallo) de una tarea del agente y persiste la
 /// auto-estimación: así la «competencia percibida» sobrevive a los reinicios.
 pub fn record_outcome(success: bool) {
-    let _g = self_model_guard().lock().unwrap();
+    let _g = self_model_guard().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = load_self_model();
     m.observe(success);
     let s = SelfState {

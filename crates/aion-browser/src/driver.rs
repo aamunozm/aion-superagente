@@ -170,9 +170,13 @@ async fn page_view(page: &Page) -> Result<PageView> {
         .and_then(|r| r.into_value::<String>().ok())
         .unwrap_or_default();
     let mut text = text;
-    // Recorte por CARACTERES (no bytes): `truncate` panica si corta un carácter UTF-8
-    // multibyte —innerText real trae acentos/emojis a diario—. Ver `cap_chars`.
-    crate::cap_chars(&mut text, MAX_TEXT, "\n…(texto truncado)");
+    // Truncar por CARACTERES, no por bytes: `String::truncate(n)` panica si el byte n cae en
+    // mitad de un carácter UTF-8, y el innerText de una web está lleno de acentos/emojis → el
+    // navegador del agente (browser_open) crasheaba. Mismo arreglo que en web_fetch (fetch_text).
+    if text.chars().count() > MAX_TEXT {
+        text = text.chars().take(MAX_TEXT).collect();
+        text.push_str("\n…(texto truncado)");
+    }
     Ok(PageView { title, url, text })
 }
 

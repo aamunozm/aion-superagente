@@ -41,3 +41,10 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tokio-stream = "0.1"
 futures-util = "0.3"
+mdns-sd = "0.20.0"
+nusb = "0.2.3"
+# Percepción del computador (Anillo 2, solo lectura): NSWorkspace.runningApplications.
+# objc2 gatea cada clase por feature; activamos solo las que usamos.
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = ["NSWorkspace", "NSRunningApplication", "NSApplication"] }
+objc2-foundation = { version = "0.2", features = ["NSArray", "NSString"] }

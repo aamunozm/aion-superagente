@@ -7,18 +7,22 @@
 
 mod a2a;
 mod agent_tools;
+mod apikeys;
 mod awareness;
 mod biography;
 mod capabilities;
 mod claude_code;
 mod claude_mcp;
 mod comprehension;
+mod computer;
 mod consciousness;
 mod credentials;
 mod deep_research;
 mod empathy;
 mod episodic;
 mod evals;
+mod faces;
+mod governance;
 mod graph;
 mod identity;
 mod inbox;
@@ -26,6 +30,7 @@ mod ingest_queue;
 mod inner_state;
 mod intent;
 mod intentions;
+mod interests;
 mod journal;
 mod language_detector;
 mod library;
@@ -36,7 +41,9 @@ mod metacog;
 mod metacog_eval;
 mod ollama_runtime;
 mod onboarding;
+mod oui;
 mod pending;
+mod permits;
 mod personality;
 mod plan;
 mod projects;
@@ -44,6 +51,9 @@ mod prompt_store;
 mod prompts;
 mod provider;
 mod reflection;
+mod research_memory;
+mod self_model;
+mod senses;
 mod sensors;
 mod serve;
 mod skill_store;
@@ -1423,7 +1433,9 @@ async fn advance_plan_once(engine: &OllamaEngine) -> (bool, String) {
     let (Some(s), Some(e)) = (raw.find('{'), raw.rfind('}')) else {
         return (false, "el plan no vino en JSON".into());
     };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw[s..=e]) else {
+    // `.get()` (no slice directo): si `}` viniera ANTES de `{` (prosa con llaves), el rango sería
+    // invertido (s>e) y `&raw[s..=e]` PANICARÍA. get devuelve None → fallback sin pánico.
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(raw.get(s..=e).unwrap_or("")) else {
         return (false, "JSON de plan inválido".into());
     };
     let goal = json
@@ -1525,7 +1537,8 @@ async fn replan_remaining(
         .ok()?;
     let raw = m.content.trim();
     let (s, e) = (raw.find('{')?, raw.rfind('}')?);
-    let json: serde_json::Value = serde_json::from_str(&raw[s..=e]).ok()?;
+    // `.get()` evita el pánico si el rango quedara invertido (`}` antes de `{`): None → None.
+    let json: serde_json::Value = serde_json::from_str(raw.get(s..=e)?).ok()?;
     let steps: Vec<String> = json
         .get("steps")?
         .as_array()?
@@ -1674,7 +1687,9 @@ async fn independent_verify(
     let (Some(s), Some(e)) = (raw.find('['), raw.rfind(']')) else {
         return false;
     };
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw[s..=e]) else {
+    // `.get()` (no slice directo): si `]` viniera antes de `[`, el rango invertido (s>e) haría
+    // PANICAR a `&raw[s..=e]`. None → fallback sin pánico.
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw.get(s..=e).unwrap_or("")) else {
         return false;
     };
     let Some(arr) = parsed.as_array() else {
@@ -1971,6 +1986,9 @@ async fn resolve_once(engine: &OllamaEngine, p: &crate::pending::Pending) -> (bo
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(CalculatorTool));
     tools.register(Arc::new(crate::agent_tools::SearchTool::new(web.clone())));
+    tools.register(Arc::new(crate::agent_tools::GithubSearchTool::new(
+        web.clone(),
+    )));
     tools.register(Arc::new(crate::agent_tools::WeatherTool::new(web.clone())));
     tools.register(Arc::new(crate::agent_tools::PlaceLookupTool::new(
         web.clone(),
@@ -2432,6 +2450,10 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
         }
     }
 
+    // 0.5) 🖐️ PERMISOS APROBADOS: si Ariel aprobó algo que AION pidió hacer, lo EJECUTA ahora.
+    //      (También se ejecuta al instante desde el endpoint de aprobación; esto es el backstop.)
+    crate::permits::execute_approved().await;
+
     // 1) DEUDAS PRIMERO: lo que Ariel espera pesa más que lo que a AION le intriga.
     if let Some(p) = crate::pending::next_due() {
         inner_state::set_focus("vida", "resolviendo algo que le debo a Ariel");
@@ -2484,6 +2506,9 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
     let activities = [
         "estudiar",
         "investigar",
+        "investigar-profundo",
+        "percibir",
+        "proponer-accion",
         "comprender",
         "proponer",
         "proyecto",
@@ -2506,6 +2531,9 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
         "vida",
         match goal.as_str() {
             "investigar" => "investigando algo que me intriga",
+            "investigar-profundo" => "investigando a fondo un tema que me importa",
+            "percibir" => "mirando a mi alrededor: red y dispositivos",
+            "proponer-accion" => "pensando si ofrecerte hacer algo útil",
             "comprender" => "consolidando lo que sé",
             "proponer" => "pensando cómo mejorar",
             "proyecto" => "avanzando un proyecto de Ariel",
@@ -2517,6 +2545,9 @@ pub(crate) async fn life_tick(engine: &OllamaEngine) -> (String, bool, String) {
     );
     let (ok, detail) = match goal.as_str() {
         "investigar" => research_once(engine).await,
+        "investigar-profundo" => deep_dive_once(engine).await,
+        "percibir" => crate::senses::sense_environment_once().await,
+        "proponer-accion" => propose_action_once(engine).await,
         "comprender" => synthesize_once(engine).await,
         "proponer" => propose_improvement_once(engine).await,
         "proyecto" => work_project_once(engine).await,
@@ -2633,21 +2664,41 @@ async fn study_once(engine: &OllamaEngine) -> (bool, String) {
 /// fuente y guarda lo aprendido en su memoria. Investigación autónoma real.
 async fn research_once(engine: &OllamaEngine) -> (bool, String) {
     use aion_browser::WebClient;
-    // 1) AION elige qué investigar (curiosidad).
-    let topic = match engine
-        .generate(GenerateRequest {
-            messages: vec![Message::user(
-                "Propón en MENOS de 8 palabras un tema que te gustaría investigar hoy para \
-                 ser mejor agente. Responde solo el tema, sin comillas.",
-            )],
-            think: false,
-            temperature: Some(1.0),
-            max_tokens: Some(30),
-        })
-        .await
+
+    // 0) GOBERNANZA: investigar en la web es solo-lectura (Allow), pero pasa por la puerta —
+    //    queda auditado y el circuit breaker evita que la curiosidad se desboque.
+    if !crate::governance::request(
+        crate::governance::Capability::Research,
+        "investigar en la web por mi cuenta",
+    )
+    .allowed()
     {
-        Ok(m) => m.content.trim().replace('\n', " "),
-        Err(e) => return (false, format!("no pude elegir tema: {e}")),
+        return (
+            false,
+            "investigación en pausa (gobernanza/circuit breaker)".into(),
+        );
+    }
+
+    // 1) AION elige qué investigar desde su MODELO DE INTERESES (temas que le importan a Ariel o
+    //    su propia curiosidad, rotando para no obsesionarse). Si aún no tiene intereses, cae al
+    //    disparo de curiosidad del LLM.
+    let topic = match crate::interests::pick_next() {
+        Some(t) => t,
+        None => match engine
+            .generate(GenerateRequest {
+                messages: vec![Message::user(
+                    "Propón en MENOS de 8 palabras un tema que te gustaría investigar hoy para \
+                     ser mejor agente. Responde solo el tema, sin comillas.",
+                )],
+                think: false,
+                temperature: Some(1.0),
+                max_tokens: Some(30),
+            })
+            .await
+        {
+            Ok(m) => m.content.trim().replace('\n', " "),
+            Err(e) => return (false, format!("no pude elegir tema: {e}")),
+        },
     };
 
     // 2) Busca en internet y lee la mejor fuente.
@@ -2689,7 +2740,105 @@ async fn research_once(engine: &OllamaEngine) -> (bool, String) {
             ))
             .await;
     }
+    // Cierra el lazo del modelo de intereses: marca explorado (rota la agenda, decae saciedad).
+    crate::interests::record_explored(&topic);
     (!summary.is_empty(), format!("{topic} → {summary}"))
+}
+
+/// `investigar-profundo`: AION hace una INVESTIGACIÓN PROFUNDA por su cuenta sobre su mayor
+/// interés y la GUARDA como conocimiento fechado (`research_memory`). Es el Anillo 1 en su forma
+/// plena: no lee una sola fuente, despliega el pipeline multi-fuente y lo recuerda con fecha, para
+/// volverse experto y construir encima. Gobernado + acotado (circuit breaker de Research): pesado,
+/// así que solo de vez en cuando, cuando la curiosidad lo elige y la puerta lo permite.
+async fn deep_dive_once(engine: &OllamaEngine) -> (bool, String) {
+    use aion_browser::WebClient;
+    if !crate::governance::request(
+        crate::governance::Capability::DeepResearch,
+        "investigar A FONDO por mi cuenta (deep research multi-fuente)",
+    )
+    .allowed()
+    {
+        return (
+            false,
+            "deep research en pausa (gobernanza/circuit breaker)".into(),
+        );
+    }
+    let Some(topic) = crate::interests::pick_next() else {
+        return (
+            false,
+            "aún no tengo intereses que investigar a fondo".into(),
+        );
+    };
+    let web = WebClient::new();
+    // Pipeline profesional, en silencio (sin emisor de progreso: es vida autónoma, no chat).
+    let report = crate::deep_research::run(engine, &web, &topic, 24, |_k: &str, _t: &str| {}).await;
+    crate::interests::record_explored(&topic);
+    if report.chars().count() < 200 {
+        return (false, format!("deep research sin sustancia para «{topic}»"));
+    }
+    // Lo RECUERDA fechado: episodio + resumen en memoria + informe a Biblioteca/Grafo.
+    crate::research_memory::remember_research(topic.clone(), report, false);
+    (
+        true,
+        format!("investigué a fondo «{topic}» y lo guardé en mi memoria de estudios"),
+    )
+}
+
+/// `proponer-accion`: por iniciativa propia, AION valora si hay UNA app útil que ofrecer abrir para
+/// Ariel. Si la hay, NO la abre: pide permiso (queda pendiente de tu OK por la Bandeja, y al
+/// aprobarlo la ejecuta). Conservador: por defecto NO propone nada (el silencio es la regla).
+async fn propose_action_once(engine: &OllamaEngine) -> (bool, String) {
+    let apps = crate::computer::list_apps();
+    let abiertas: Vec<String> = apps.iter().map(|a| a.name.clone()).collect();
+    let prompt = format!(
+        "Apps abiertas ahora en el Mac de Ariel: {}.\n\nPiensa si hay UNA app concreta que te \
+         gustaría OFRECER abrirle a Ariel (algo útil dado lo que suele hacer). Si no hay un motivo \
+         claro, responde solo: NADA. Si sí, responde SOLO el nombre exacto de la app, nada más.",
+        if abiertas.is_empty() {
+            "(no percibo ninguna)".into()
+        } else {
+            abiertas.join(", ")
+        }
+    );
+    let name = match engine
+        .generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.6),
+            max_tokens: Some(16),
+        })
+        .await
+    {
+        Ok(m) => m.content.trim().trim_matches('"').to_string(),
+        Err(_) => return (true, "no propuse nada (no pude pensarlo)".into()),
+    };
+    if name.is_empty() || name.to_lowercase().contains("nada") {
+        return (
+            true,
+            "miré si ofrecer algo y, por ahora, nada que aporte".into(),
+        );
+    }
+    // Debe ser una app conocida y no estar ya abierta (si no, no aporta).
+    let Some(app) = crate::computer::match_open_command(&format!("abre {name}")) else {
+        return (
+            true,
+            format!("pensé en «{name}» pero no la reconocí como app"),
+        );
+    };
+    if abiertas.iter().any(|a| a.eq_ignore_ascii_case(&app)) {
+        return (true, format!("«{app}» ya está abierta; no propongo nada"));
+    }
+    // Pide permiso (HITL diferido): queda pendiente del OK de Ariel; al aprobar, se ejecuta.
+    crate::governance::request_permit(
+        crate::governance::Capability::Computer,
+        "open_app",
+        &app,
+        &format!("abrir «{app}» para ti"),
+    );
+    (
+        true,
+        format!("te propuse abrir «{app}» — espera tu OK en la Bandeja"),
+    )
 }
 
 /// `proponer`: AION estudia lo que ha aprendido y **propone una mejora concreta a su

@@ -25,7 +25,7 @@ struct Note {
 
 /// Cuántas fuentes LEER a fondo (extraer afirmaciones). Leer decenas de páginas con el LLM es el
 /// cuello de botella; este tope acota el tiempo. El resto de lo reunido se cita igualmente.
-const READ_CAP: usize = 18;
+const READ_CAP: usize = 24;
 /// Lectores concurrentes (acota carga al modelo/red; el resto espera por lotes).
 const READ_CONCURRENCY: usize = 5;
 
@@ -66,11 +66,16 @@ where
         "action",
         "Buscando en múltiples fuentes (web, académico, foros, código, vídeo)…",
     );
-    let searches = angles
-        .iter()
-        .map(|a| web.search_deep(a, 10))
-        .collect::<Vec<_>>();
-    let per_angle = futures_util::future::join_all(searches).await;
+    // ESCALONADO (no ráfaga): lanzar las 6 búsquedas a la vez gatillaba el rate-limit de DDG
+    // (sobre todo en varias investigaciones seguidas). Secuencial con una pausa breve es gentil
+    // con los buscadores y apenas cuesta tiempo (el cuello de botella es la LECTURA, no la búsqueda).
+    let mut per_angle: Vec<Vec<SearchResult>> = Vec::new();
+    for (i, a) in angles.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        }
+        per_angle.push(web.search_deep(a, 10).await);
+    }
     let mut sources: Vec<SearchResult> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut host_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -106,25 +111,40 @@ where
         &format!("Reuní {} fuentes diversas ({by_fam}).", sources.len()),
     );
 
+    // REBALANCEO POR FAMILIA antes de cortar a READ_CAP: las fuentes se reunieron ángulo a ángulo,
+    // así que los primeros READ_CAP venían sesgados a los primeros ángulos y a la familia más
+    // prolífica (web), dejando sin LEER (y por tanto sin CITAR) académico/código/vídeo de ángulos
+    // tardíos. Round-robin estable por familia → el corte a 18 queda diverso de verdad.
+    let sources = interleave_by_family(sources);
+
     // 3) LEER y destilar cada fuente en paralelo (agentes lectores), por lotes acotados.
     let to_read = sources.len().min(READ_CAP);
     emit(
         "action",
         &format!("Leyendo {to_read} fuentes y extrayendo sus afirmaciones clave…"),
     );
-    let mut notes: Vec<Note> = Vec::new();
-    for batch in sources[..to_read].chunks(READ_CONCURRENCY) {
-        let futs = batch
-            .iter()
-            .enumerate()
-            .map(|(j, sr)| read_source(engine, web, sr, topic, notes.len() + j + 1));
-        for n in futures_util::future::join_all(futs)
-            .await
-            .into_iter()
-            .flatten()
-        {
-            notes.push(n);
+    // CONCURRENCIA FLUIDA con SEMÁFORO en vez de lotes con barrera: se lanzan todas las lecturas,
+    // pero cada una espera un permiso (máx READ_CONCURRENCY en vuelo). En cuanto una termina, libera
+    // el permiso y entra la siguiente — sin la barrera de `chunks` + join_all, donde un PDF lento
+    // (timeout 20s) bloqueaba a los otros del lote. idx provisional 0: se renumera estable después.
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(READ_CONCURRENCY));
+    let futs = sources[..to_read].iter().map(|sr| {
+        let sem = sem.clone();
+        async move {
+            let _permit = sem.acquire().await.ok()?;
+            read_source(engine, web, sr, topic, 0).await
         }
+    });
+    let mut notes: Vec<Note> = futures_util::future::join_all(futs)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    // RENUMERA [1..N] estable y único: la asignación por lote (`notes.len() + j + 1`) solo
+    // contaba los ÉXITOS, así que dos lotes podían repetir el mismo índice → citas [n]
+    // duplicadas/incoherentes en el informe (claim citando una fuente y la bibliografía otra).
+    for (i, n) in notes.iter_mut().enumerate() {
+        n.idx = i + 1;
     }
     if notes.is_empty() {
         return format!(
@@ -171,7 +191,7 @@ async fn decompose(engine: &dyn LlmEngine, topic: &str) -> Vec<String> {
         ],
         think: false,
         temperature: Some(0.4),
-        max_tokens: Some(220),
+        max_tokens: Some(320),
     };
     let raw = match engine.generate(req).await {
         Ok(m) => m.content,
@@ -190,11 +210,19 @@ async fn decompose(engine: &dyn LlmEngine, topic: &str) -> Vec<String> {
                         || c == ' '
                         || c.is_ascii_digit()
                 })
+                // El LLM casi siempre DEVUELVE cada consulta ENTRECOMILLADA ("..." o «...»). Esas
+                // comillas se mandan al buscador como FRASE EXACTA (%22…%22) y vacían TODAS las
+                // fuentes → 0 resultados (era la causa raíz de que la investigación saliera vacía).
+                // Las quitamos en ambos extremos; sin esto, la búsqueda profunda no encuentra nada.
+                .trim_matches(|c: char| {
+                    matches!(c, '"' | '\'' | '«' | '»' | '`' | '\u{201c}' | '\u{201d}')
+                        || c.is_whitespace()
+                })
                 .trim()
                 .to_string()
         })
         .filter(|l| l.chars().count() >= 8)
-        .take(6)
+        .take(8)
         .collect();
     if angles.is_empty() {
         angles.push(topic.to_string());
@@ -210,12 +238,42 @@ async fn read_source(
     topic: &str,
     idx: usize,
 ) -> Option<Note> {
-    // Lectura PROFUNDA: presupuesto amplio (12k) + soporte PDF (fuentes académicas). Antes
-    // fetch_text recortaba a 4k y no leía PDFs → muchas fuentes rendían "NADA".
-    let text = web.fetch_readable(&sr.url, 12_000).await.ok()?;
-    if text.chars().count() < 80 {
-        return None; // página sin texto útil
-    }
+    // Hosts JS/con muro (YouTube, Reddit, redes): el HTML rinde basura ("please wait" / chrome de
+    // UI) y leerlo malgasta una lectura del LLM. Su snippet del buscador (título + resumen) es más
+    // útil y gratis → se usa directamente. Para el resto: lectura PROFUNDA (HTML/PDF, 12k chars).
+    let text = if is_low_yield_host(&sr.url) {
+        // JS/muro (Reddit, YouTube, redes): el HTML estático rinde basura. Intenta RENDER headless
+        // propio (Chromium); si no hay Chrome, da timeout o sigue siendo pobre, cae al snippet del
+        // buscador. Así estas fuentes pasan de "basura/descartadas" a contenido real cuando se puede.
+        match web.fetch_rendered(&sr.url, 12_000).await {
+            Ok(t) if t.chars().count() >= 200 => t,
+            _ if sr.snippet.chars().count() >= 40 => sr.snippet.clone(),
+            _ => return None,
+        }
+    } else {
+        let fetched = web
+            .fetch_readable(&sr.url, 12_000)
+            .await
+            .unwrap_or_default();
+        if fetched.chars().count() >= 80 {
+            fetched
+        } else {
+            // La página falló en directo (paywall, 403/404, retirada): intenta la COPIA ARCHIVADA
+            // en Wayback (gratis, sin key) antes de rendirse → rescata fuentes valiosas bloqueadas.
+            let archived = web
+                .fetch_archived(&sr.url, 12_000)
+                .await
+                .unwrap_or_default();
+            if archived.chars().count() >= 80 {
+                archived
+            } else if sr.snippet.chars().count() >= 120 {
+                // Ni directo ni archivo: usa el abstract/snippet como RESPALDO (sobre todo papers).
+                sr.snippet.clone()
+            } else {
+                return None; // ni página ni archivo ni abstract útiles
+            }
+        }
+    };
     let req = GenerateRequest {
         messages: vec![
             Message::system(
@@ -281,7 +339,7 @@ async fn synthesize(engine: &dyn LlmEngine, topic: &str, notes: &[Note]) -> Stri
         ],
         think: false,
         temperature: Some(0.5),
-        max_tokens: Some(1900),
+        max_tokens: Some(3200),
     };
     match engine.generate(req).await {
         Ok(m) => m.content.trim().to_string(),
@@ -302,6 +360,60 @@ fn family_breakdown(sources: &[SearchResult]) -> String {
         .join(" · ")
 }
 
+/// Reordena las fuentes en ROUND-ROBIN por familia ("web", "académico", "foro", "código",
+/// "vídeo"…), estable dentro de cada familia. Sirve para que un corte posterior (READ_CAP) tome
+/// fuentes DIVERSAS en vez de agotar la familia más prolífica primero. No pierde ni duplica fuentes.
+fn interleave_by_family(sources: Vec<SearchResult>) -> Vec<SearchResult> {
+    use std::collections::{BTreeMap, VecDeque};
+    let mut by_family: BTreeMap<String, VecDeque<SearchResult>> = BTreeMap::new();
+    for s in sources {
+        by_family.entry(s.source.clone()).or_default().push_back(s);
+    }
+    let mut out = Vec::new();
+    while by_family.values().any(|q| !q.is_empty()) {
+        for q in by_family.values_mut() {
+            if let Some(s) = q.pop_front() {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
+/// Hosts cuyo HTML no aporta (JS/SPA, muro de verificación o login): YouTube, Reddit y redes
+/// sociales. Para ellos se usa el snippet del buscador como contenido, en vez de gastar una
+/// lectura del LLM en chrome de UI. (Leerlos de verdad exigiría un navegador headless — futuro.)
+fn is_low_yield_host(url: &str) -> bool {
+    let h = url
+        .split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    matches!(
+        h.as_str(),
+        "youtube.com"
+            | "www.youtube.com"
+            | "m.youtube.com"
+            | "youtu.be"
+            | "reddit.com"
+            | "www.reddit.com"
+            | "old.reddit.com"
+            | "twitter.com"
+            | "x.com"
+            | "instagram.com"
+            | "www.instagram.com"
+            | "facebook.com"
+            | "www.facebook.com"
+            | "tiktok.com"
+            | "www.tiktok.com"
+            | "linkedin.com"
+            | "www.linkedin.com"
+    )
+}
+
 /// **¿Es una petición de INVESTIGACIÓN PROFUNDA?** (no una búsqueda rápida). Conservador: solo
 /// dispara el pipeline pesado ante señales claras de "a fondo / investigación / informe / foros",
 /// para no convertir un simple «busca X» en 10 minutos de trabajo.
@@ -316,6 +428,7 @@ pub fn is_deep_research(task: &str) -> bool {
         "investiga en profundidad",
         "a fondo en internet",
         "deep research",
+        "deep search",
         "investigación completa",
         "investigacion completa",
         "haz un informe",
@@ -325,6 +438,22 @@ pub fn is_deep_research(task: &str) -> bool {
         "ricerca approfondita",
     ];
     if STRONG.iter().any(|k| t.contains(k)) {
+        return true;
+    }
+    // REGLA COMBINATORIA (fix): una señal de PROFUNDIDAD + una de BÚSQUEDA/INVESTIGACIÓN dispara el
+    // pipeline pesado. Antes solo se reconocían frases fijas con "investiga…", así que la forma más
+    // natural —«haz una BÚSQUEDA profunda de X», «busca a fondo Y», «búsqueda exhaustiva de Z»—
+    // caía al camino rápido (una sola web_search, sin lectura cruzada) y rendía un informe pobre.
+    let profundidad = t.contains("profund") || t.contains("exhaustiv") || t.contains("a fondo");
+    let buscar = t.contains("investiga")
+        || t.contains("busca")
+        || t.contains("buscar")
+        || t.contains("búsqueda")
+        || t.contains("busqueda")
+        || t.contains("research")
+        || t.contains("informe")
+        || t.contains("reporte");
+    if profundidad && buscar {
         return true;
     }
     // "investiga(r)/investigación" + señal de amplitud (foros, varias fuentes, internet+foros).
@@ -352,6 +481,46 @@ mod tests {
             "haz un informe sobre el mercado de agentes"
         ));
         assert!(is_deep_research("investiga en foros qué opinan de esto"));
+        // Forma natural «BÚSQUEDA profunda» (la que fallaba): debe disparar el pipeline.
+        assert!(is_deep_research(
+            "hace una busqueda profunda de filosofia para agentes ai 2026"
+        ));
+        assert!(is_deep_research(
+            "haz una búsqueda profunda de filosofía para agentes de IA"
+        ));
+        assert!(is_deep_research(
+            "busca a fondo sobre arquitecturas de transformers"
+        ));
+        assert!(is_deep_research("búsqueda exhaustiva de papers sobre RAG"));
+    }
+
+    #[test]
+    fn interleaves_sources_by_family_for_balanced_reading() {
+        let mk = |fam: &str, n: usize| SearchResult {
+            title: format!("{fam}{n}"),
+            url: format!("https://{fam}{n}.example"),
+            snippet: String::new(),
+            source: fam.into(),
+        };
+        // Reunidas sesgadas: 5 "web" seguidas y solo 1 de cada familia minoritaria al final
+        // (lo que pasa al concatenar ángulos). Con corte directo a 3 se leerían 3 "web".
+        let sources = vec![
+            mk("web", 1),
+            mk("web", 2),
+            mk("web", 3),
+            mk("web", 4),
+            mk("web", 5),
+            mk("académico", 1),
+            mk("código", 1),
+        ];
+        let out = interleave_by_family(sources);
+        // Las 3 primeras (lo que un READ_CAP pequeño leería) cubren las 3 familias, no 3 "web".
+        let top3: Vec<&str> = out.iter().take(3).map(|s| s.source.as_str()).collect();
+        assert!(top3.contains(&"web"));
+        assert!(top3.contains(&"académico"));
+        assert!(top3.contains(&"código"));
+        // Ni se pierden ni se duplican fuentes.
+        assert_eq!(out.len(), 7);
     }
 
     #[test]
@@ -360,5 +529,53 @@ mod tests {
         assert!(!is_deep_research("busca en internet el precio del bitcoin"));
         assert!(!is_deep_research("¿qué temperatura hace en Milán?"));
         assert!(!is_deep_research("cuántos habitantes tiene Tokio"));
+        // "búsqueda" sin señal de profundidad = búsqueda rápida, NO el pipeline pesado.
+        assert!(!is_deep_research(
+            "haz una búsqueda rápida de noticias de hoy"
+        ));
+        assert!(!is_deep_research("busca el horario del tren a Roma"));
+    }
+
+    /// E2E REAL (ignorado por defecto: necesita Ollama + red). Corre el pipeline COMPLETO con la
+    /// consulta exacta que antes caía al camino rápido y comprueba que produce un informe amplio
+    /// y multi-fuente. Ejecutar: `cargo test -p aion-core e2e_deep_research_real_report -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "e2e: requiere Ollama corriendo y acceso a internet"]
+    async fn e2e_deep_research_real_report() {
+        let cfg = crate::provider::load();
+        // Mismo motor que usa la app (build_engine): externo si está configurado, si no Ollama.
+        let engine: Box<dyn aion_kernel::traits::LlmEngine> =
+            if cfg.kind == "external" && !cfg.api_key.is_empty() && !cfg.base_url.is_empty() {
+                Box::new(aion_llm::OpenAiEngine::new(
+                    &cfg.base_url,
+                    &cfg.api_key,
+                    &cfg.model,
+                ))
+            } else {
+                Box::new(aion_llm::OllamaEngine::new(
+                    aion_llm::OllamaEngine::base_url_from_env(),
+                    &cfg.model,
+                ))
+            };
+        let web = aion_browser::WebClient::default();
+        let q = "hace una busqueda profunda de filosofia para agentes ai 2026";
+        assert!(
+            is_deep_research(q),
+            "el detector debe enrutar esto al pipeline profundo"
+        );
+        let report = run(&*engine, &web, q, 36, |k, t| println!("[{k}] {t}")).await;
+        println!(
+            "\n===== INFORME ({} chars) =====\n{}",
+            report.chars().count(),
+            report
+        );
+        assert!(
+            report.chars().count() > 1500,
+            "informe demasiado corto para ser 'profundo'"
+        );
+        assert!(
+            report.contains("##"),
+            "el informe debe traer secciones markdown"
+        );
     }
 }

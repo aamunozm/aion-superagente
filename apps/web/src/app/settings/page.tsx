@@ -8,6 +8,8 @@ import {
   credentialsList,
   credentialRemove,
   credentialSet,
+  apiKeysList,
+  apiKeySet,
   modelsInstalled,
   modelsPull,
   modelsRemove,
@@ -33,6 +35,7 @@ import {
   type AionIdentity,
   type A2aConfig,
   type CredMeta,
+  type ApiKeyMeta,
   type InstalledModel,
   type ModelOption,
   type ProviderState,
@@ -321,6 +324,43 @@ export default function SettingsPage() {
   const [cUser, setCUser] = useState("");
   const [cPass, setCPass] = useState("");
   const [cBusy, setCBusy] = useState(false);
+  const [apiKeys, setApiKeys] = useState<ApiKeyMeta[]>([]);
+  const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
+  const [keyBusy, setKeyBusy] = useState("");
+  const [keyMsg, setKeyMsg] = useState("");
+
+  async function refreshApiKeys() {
+    try {
+      setApiKeys(await apiKeysList());
+    } catch {
+      /* vacío */
+    }
+  }
+  async function saveApiKey(provider: string) {
+    const val = (keyDrafts[provider] ?? "").trim();
+    if (!val || keyBusy) return;
+    setKeyBusy(provider);
+    setKeyMsg("");
+    try {
+      await apiKeySet(provider, val);
+      setKeyDrafts({ ...keyDrafts, [provider]: "" });
+      setKeyMsg("✅ Guardada");
+      await refreshApiKeys();
+    } catch (e) {
+      setKeyMsg(`⚠️ ${e instanceof Error ? e.message : "error"}`);
+    } finally {
+      setKeyBusy("");
+    }
+  }
+  async function removeApiKey(provider: string) {
+    setKeyBusy(provider);
+    try {
+      await apiKeySet(provider, "");
+      await refreshApiKeys();
+    } finally {
+      setKeyBusy("");
+    }
+  }
 
   async function refreshCreds() {
     try {
@@ -351,6 +391,7 @@ export default function SettingsPage() {
       .catch(() => {});
     refreshModels();
     refreshCreds();
+    refreshApiKeys();
   }, []);
 
   function toggleTheme() {
@@ -681,6 +722,62 @@ export default function SettingsPage() {
           )}
           <p className="text-xs mt-3" style={{ color: "var(--text-3)" }}>
             🔒 {t("settings.credSecurity")}
+          </p>
+        </div>
+
+        {/* ── APIs e integraciones (claves opcionales y gratuitas) ── */}
+        <div className="card">
+          <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
+            <Icon name="code" size={16} /> APIs e integraciones
+          </h2>
+          <p className="text-sm mb-3" style={{ color: "var(--text-3)" }}>
+            Claves opcionales y gratuitas para reforzar la investigación. AION funciona sin ellas;
+            añadir una solo mejora esa fuente. Se guardan cifradas en tu equipo y nunca se muestran.
+          </p>
+          <div className="flex flex-col gap-2">
+            {apiKeys.map((k) => (
+              <div key={k.provider} className="rounded-lg px-3 py-3" style={{ background: "var(--surface-1)" }}>
+                <div className="flex items-center gap-2 mb-1">
+                  <Icon name="code" size={14} />
+                  <span className="text-sm font-medium flex-1">{k.label}</span>
+                  <span className="text-xs" style={{ color: k.set ? "var(--accent)" : "var(--text-3)" }}>
+                    {k.set ? "✓ configurada" : "sin configurar"}
+                  </span>
+                </div>
+                <p className="text-xs mb-2" style={{ color: "var(--text-3)" }}>{k.help}</p>
+                <div className="flex gap-2">
+                  <input
+                    className="input"
+                    type="password"
+                    placeholder={k.set ? "•••••••• (escribe para reemplazar)" : "Pega aquí tu token"}
+                    value={keyDrafts[k.provider] ?? ""}
+                    onChange={(e) => setKeyDrafts({ ...keyDrafts, [k.provider]: e.target.value })}
+                    autoComplete="new-password"
+                  />
+                  <button
+                    className="btn shrink-0"
+                    disabled={keyBusy === k.provider || !(keyDrafts[k.provider] ?? "").trim()}
+                    onClick={() => saveApiKey(k.provider)}
+                  >
+                    {keyBusy === k.provider ? "Guardando…" : "Guardar"}
+                  </button>
+                  {k.set && (
+                    <button
+                      className="text-xs shrink-0 opacity-60 hover:opacity-100"
+                      style={{ color: "#ef4444" }}
+                      onClick={() => removeApiKey(k.provider)}
+                      title="Quitar"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+          {keyMsg && <p className="mt-3 text-sm" style={{ color: "var(--accent)" }}>{keyMsg}</p>}
+          <p className="text-xs mt-3" style={{ color: "var(--text-3)" }}>
+            🔒 Local-first: las claves viven cifradas en tu equipo (0600) y solo se usan contra su propio servicio.
           </p>
         </div>
 

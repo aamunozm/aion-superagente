@@ -148,7 +148,6 @@ export default function ProjectWorkspace() {
     srcRefs.current[s.id]?.scrollIntoView({ behavior: "smooth", block: "center" });
     setTimeout(() => setHighlightSrc((h) => (h === s.id ? null : h)), 2000);
   }
-  /** Renderiza un texto convirtiendo las citas «...» en chips clicables. */
   async function toggleSource(s: ProjectSource) {
     setSources((arr) => arr.map((x) => (x.id === s.id ? { ...x, active: !x.active } : x)));
     await projectSourceToggle(id, s.id, !s.active);
@@ -412,9 +411,14 @@ export default function ProjectWorkspace() {
               </div>
             )}
             {messages.map((m, i) => (
-              <div key={i} className={m.role === "user" ? "self-end max-w-[80%]" : "self-start max-w-[85%]"}>
+              <div
+                key={i}
+                className={m.role === "user" ? "self-end max-w-[80%] min-w-0" : "self-start max-w-[85%] min-w-0"}
+              >
                 <div
-                  className={`rounded-2xl px-4 py-2.5 text-sm${m.role === "user" ? " whitespace-pre-wrap" : ""}`}
+                  className={`rounded-2xl px-4 py-2.5 text-sm overflow-hidden ${
+                    m.role === "assistant" ? "" : "whitespace-pre-wrap"
+                  }`}
                   style={{
                     background: m.role === "user" ? "var(--ink)" : "var(--surface-1)",
                     color: m.role === "user" ? "#fff" : "var(--text-1)",
@@ -422,7 +426,10 @@ export default function ProjectWorkspace() {
                   }}
                 >
                   {m.role === "assistant" && m.text ? (
-                    <Markdown citations={sources.map((s) => s.title)} onCitation={jumpToSource}>
+                    <Markdown
+                      onCitation={jumpToSource}
+                      isCitation={(title) => sources.some((s) => s.title.trim() === title.trim())}
+                    >
                       {m.text}
                     </Markdown>
                   ) : (

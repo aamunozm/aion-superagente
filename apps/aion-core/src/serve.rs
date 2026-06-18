@@ -48,7 +48,7 @@ struct AppState {
 impl AppState {
     /// Devuelve (creando si hace falta) el hilo de una conversación por id.
     fn thread(&self, id: &str) -> Thread {
-        let mut map = self.convos.lock().unwrap();
+        let mut map = self.convos.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(id.to_string())
             .or_insert_with(|| Arc::new(std::sync::Mutex::new(Vec::new())))
             .clone()
@@ -106,6 +106,9 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     // PRIVACIDAD EN DISCO (P0-1): cierra el data dir (0700) y sus archivos (0600) a otros
     // usuarios del Mac. Una sola pasada al arrancar, antes de servir. No rompe clientes.
     crate::harden_data_dir();
+
+    // API keys opcionales (gratis) que el usuario añadió en Ajustes → entorno (GitHub, …).
+    crate::apikeys::init_env();
 
     let state = AppState {
         convos: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -468,6 +471,11 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // 🪞 AUTO-CONOCIMIENTO DEL SISTEMA: AION debe conocer su propio cuerpo. Sembramos su
+    // documentación de sistema (núcleo curado + docs vivos del repo) en la Biblioteca/Grafo
+    // (dominio "sistema"), idempotente por SHA → en arranques siguientes el worker lo salta.
+    crate::self_model::seed_self_knowledge();
+
     // WORKER DE INGESTA EN SEGUNDO PLANO: procesa la cola de libros sin bloquear el
     // chat. De uno en uno (el embebido es intensivo en CPU). Sobrevive a reinicios.
     tokio::spawn(async {
@@ -536,6 +544,12 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/agent", post(agent))
         .route("/api/crew", post(crew))
         .route("/api/memory", get(memory_stats))
+        .route("/api/senses", get(senses_snapshot))
+        .route("/api/permits", get(permits_list))
+        .route("/api/permits/respond", post(permits_respond))
+        .route("/api/faces", get(faces_list))
+        .route("/api/faces/name", post(faces_name))
+        .route("/api/faces/scan", post(faces_scan))
         .route("/api/memory/remember", post(memory_remember))
         .route("/api/memory/forget", post(memory_forget))
         .route("/api/memory/sleep", post(memory_sleep))
@@ -609,6 +623,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/claude-code/stats", get(claude_code_stats))
         // Bootstrap del token local: la UI lo pide una vez al arrancar (GET, Origin local).
         .route("/api/auth/token", get(api_auth_token))
+        .route("/api/apikeys", get(apikeys_list).post(apikeys_set))
         // Subidas grandes: documentos/PDF/Office pueden pesar (un PPTX ~20 MB). El
         // límite por defecto de axum (2 MB) cortaría la conexión; lo subimos a 64 MB.
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
@@ -754,12 +769,47 @@ async fn local_guard(
 /// —inherente al modelo local-first— pero cierra el vector navegador-a-navegador.
 fn api_token() -> &'static str {
     static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    TOKEN.get_or_init(crate::claude_code::generate_token)
+    // ESTABLE entre reinicios (persistido en disco): un token efímero rompía el registro
+    // MCP en ~/.claude.json en cada arranque/OTA. Ver claude_code::persisted_token.
+    TOKEN.get_or_init(crate::claude_code::persisted_token)
 }
 
 /// Bootstrap del token para la UI. GET (no muta) → exento de la exigencia de token;
 /// queda protegido por `local_guard` (Origin/Host local) y por CORS (solo orígenes
 /// locales pueden LEER la respuesta).
+/// Lista los proveedores de API soportados y si cada uno tiene clave guardada. NUNCA devuelve la
+/// clave en sí (solo un flag `set`). GET seguro → protegido por local_guard (Origin/Host local).
+async fn apikeys_list() -> Json<serde_json::Value> {
+    let keys = crate::apikeys::PROVIDERS
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "provider": p.id,
+                "label": p.label,
+                "help": p.help,
+                "set": !crate::apikeys::get(p.id).is_empty(),
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(serde_json::json!({ "keys": keys }))
+}
+
+#[derive(Deserialize)]
+struct ApiKeyBody {
+    provider: String,
+    #[serde(default)]
+    key: String,
+}
+
+/// Fija (o borra, con `key` vacía) la clave de un proveedor. Mutación → exige token local + Origin.
+async fn apikeys_set(Json(b): Json<ApiKeyBody>) -> Json<serde_json::Value> {
+    if crate::apikeys::set(&b.provider, &b.key) {
+        Json(serde_json::json!({ "ok": true }))
+    } else {
+        Json(serde_json::json!({ "error": format!("proveedor no soportado: {}", b.provider) }))
+    }
+}
+
 async fn api_auth_token() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "token": api_token() }))
 }
@@ -1139,6 +1189,32 @@ fn looks_like_question(prompt: &str) -> bool {
     STARTS.iter().any(|w| p.starts_with(w))
 }
 
+/// **Segundo plano presente en el instante de leer.** Snapshot COMPACTO de la mente continua de
+/// AION para que la comprensión interprete el mensaje COMO alguien que conoce a su interlocutor y
+/// venía pensando en algo —no aislado—: (1) quién es Ariel (lo destilado en su modelo de usuario)
+/// y (2) qué estaba viviendo/pensando hace un momento (última huella de su corriente GWT). Corto a
+/// propósito (la comprensión es una llamada local pequeña). Es la unión primer plano↔segundo plano.
+fn comprehension_background() -> String {
+    let mut b = String::new();
+    let facts = crate::usermodel::active();
+    if !facts.is_empty() {
+        let who: String = facts
+            .iter()
+            .take(3)
+            .map(|f| f.text.trim())
+            .collect::<Vec<_>>()
+            .join("; ");
+        b.push_str(&format!("Lo que sabes de Ariel: {who}. "));
+    }
+    if let Some(ev) = crate::workspace::recent(1).into_iter().next_back() {
+        b.push_str(&format!(
+            "Hace un momento estabas: {}.",
+            ev.text.chars().take(140).collect::<String>()
+        ));
+    }
+    b
+}
+
 /// Efectos de la comprensión: deja huella en la corriente (GWT, etiqueta genérica — el
 /// contenido NUNCA se persiste ahí) y, si Ariel COMPARTIÓ/corrigió hechos, los memoriza
 /// como hechos atómicos (en background). Compartido por el camino que bloquea (preguntas)
@@ -1160,6 +1236,27 @@ fn comprehension_side_effects(c: &crate::comprehension::Comprension) {
             }
         });
     }
+}
+
+/// **Percibir y recordar un turno conversacional del modo AGENTE** — EN SEGUNDO PLANO (no retrasa
+/// la respuesta). Antes esto solo pasaba en el chat: hablarle en modo Agente NO dejaba huella en
+/// su mente (no comprendía, no recordaba hechos, no capturaba el micromomento). Ahora el modo ya
+/// no decide si AION te recuerda: comprende el mensaje con su trasfondo, deja la percepción en su
+/// corriente (GWT), memoriza lo que Ariel comparte y guarda el micromomento episódico — la MISMA
+/// huella viva que en el chat. Una sola mente continua, hables por donde hables.
+fn agent_perceive_and_remember(prompt: String, answer: String) {
+    tokio::spawn(async move {
+        let bg = comprehension_background();
+        if let Some(c) = crate::comprehension::comprehend(&prompt, "", &bg).await {
+            comprehension_side_effects(&c);
+        }
+        // Micromomento episódico (como en el chat) si el turno tuvo sustancia.
+        if answer.chars().count() > 40 && !answer.starts_with('⚠') {
+            let topic: String = prompt.chars().take(80).collect();
+            let a: String = answer.chars().take(280).collect();
+            crate::episodic::capture(&topic, &format!("Ariel: {prompt} — yo: {a}")).await;
+        }
+    });
 }
 
 async fn chat(
@@ -1195,13 +1292,16 @@ async fn chat(
     // franqueza / ofrece buscar). Cuando Ariel solo "te cuenta algo", la corrige o charla,
     // la comprensión corre en SEGUNDO PLANO —sigue memorizando los hechos— y la respuesta
     // arranca de inmediato en vez de esperar una inferencia que no cambia el tono.
+    // Segundo plano PRESENTE en el instante de leer: quién es Ariel + qué venía viviendo AION.
+    let bg = comprehension_background();
     let comp = if looks_like_question(&body.prompt) {
-        crate::comprehension::comprehend(&body.prompt, &grounding).await
+        crate::comprehension::comprehend(&body.prompt, &grounding, &bg).await
     } else {
         let p = body.prompt.clone();
         let g = grounding.clone();
+        let bg = bg.clone();
         tokio::spawn(async move {
-            if let Some(c) = crate::comprehension::comprehend(&p, &g).await {
+            if let Some(c) = crate::comprehension::comprehend(&p, &g, &bg).await {
                 comprehension_side_effects(&c);
             }
         });
@@ -1278,6 +1378,72 @@ async fn chat(
             format!("\n\n{note}")
         }
     };
+    // 👁️ SENTIDOS EN LÍNEA: si Ariel pregunta por su red/dispositivos, AION PERCIBE de verdad
+    // ahora (mDNS + USB, solo lectura, bajo gobernanza) y responde desde lo que hay, no de memoria.
+    let senses_block = if crate::senses::is_senses_query(&body.prompt) {
+        let (net, usb, disks, cams) = tokio::task::spawn_blocking(|| {
+            (
+                crate::senses::discover_network(3),
+                crate::senses::list_usb(),
+                crate::senses::list_disks(),
+                crate::senses::list_cameras(),
+            )
+        })
+        .await
+        .unwrap_or_else(|_| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        format!(
+            "\n\n{}",
+            crate::senses::grounding_note(&net, &usb, &disks, &cams)
+        )
+    } else {
+        String::new()
+    };
+    // 🖥️ PERCEPCIÓN DEL COMPUTADOR EN LÍNEA: si Ariel pregunta por sus apps / lo que tiene abierto,
+    // AION mira AHORA qué hay abierto y cuál está en primer plano (solo lectura, gobernado).
+    let computer_block = if crate::computer::is_apps_query(&body.prompt) {
+        let apps = tokio::task::spawn_blocking(crate::computer::list_apps)
+            .await
+            .unwrap_or_default();
+        format!("\n\n{}", crate::computer::grounding_note(&apps))
+    } else {
+        String::new()
+    };
+    // 🖐️ ACTUACIÓN (Anillo 2, reversible): si Ariel PIDE abrir/enfocar una app, AION lo hace AHORA.
+    // Su orden directa por el chat ES el human-in-the-loop (no se vuelve a preguntar); queda auditado.
+    let action_note = if let Some(app) = crate::computer::match_open_command(&body.prompt) {
+        let a = app.clone();
+        let ok = tokio::task::spawn_blocking(move || crate::computer::open_app(&a))
+            .await
+            .unwrap_or(false);
+        crate::governance::note_user_action(
+            crate::governance::Capability::Computer,
+            &format!("abrir/enfocar la app «{app}»"),
+            ok,
+        );
+        if ok {
+            format!(
+                "\n\nACCIÓN REAL QUE ACABAS DE EJECUTAR (por orden de Ariel): abriste/enfocaste «{app}» \
+                 en su Mac. Confírmalo con naturalidad, en una línea."
+            )
+        } else {
+            format!(
+                "\n\nINTENTASTE abrir «{app}» pero no lo conseguiste (quizá el nombre no es exacto o no \
+                 está instalada). Dilo con franqueza y pide el nombre correcto."
+            )
+        }
+    } else {
+        String::new()
+    };
+    // 📷 RECONOCIMIENTO FACIAL: si Ariel pregunta "¿quién soy?/¿me reconoces?", AION enciende la
+    // cámara (bajo permiso) y responde desde lo que reconoce de verdad — nunca inventa quién está.
+    let face_block = if crate::faces::is_recognize_query(&body.prompt) {
+        let r = tokio::task::spawn_blocking(crate::faces::scan)
+            .await
+            .unwrap_or_default();
+        format!("\n\n{}", crate::faces::recognize_note(&r))
+    } else {
+        String::new()
+    };
     // Módulos coactivados en ESTE turno (memoria, biblioteca, proyecto): el chat
     // también integra — medirlo evita que el índice Φ ignore el modo principal.
     let chat_modules = usize::from(mem_hits > 0)
@@ -1285,7 +1451,7 @@ async fn chat(
         + usize::from(!proj_block.is_empty())
         + usize::from(!epi_block.is_empty());
     let self_ctx = format!(
-        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}",
+        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}{}{}",
         self_awareness_prompt(),
         lang_directive(&body.lang),
         crate::prompts::persona(&mode),
@@ -1296,6 +1462,10 @@ async fn chat(
         proj_block,
         lib_block,
         comp_block,
+        senses_block,
+        computer_block,
+        action_note,
+        face_block,
     );
 
     // ACTO CONSCIENTE + MEMORIA DE HECHOS: si comprendimos EN LÍNEA (turno-pregunta), los
@@ -1310,10 +1480,10 @@ async fn chat(
     // final del turno, una vez ya enviada la respuesta, para que comprima de cara al
     // PRÓXIMO turno. Así esta respuesta arranca antes y nunca paga el coste del resumen.
     {
-        let mut c = convo.lock().unwrap();
+        let mut c = convo.lock().unwrap_or_else(|e| e.into_inner());
         c.push(Message::user(&prompt));
     }
-    let history: Vec<Message> = convo.lock().unwrap().clone();
+    let history: Vec<Message> = convo.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
     tokio::spawn(async move {
         let mut messages = vec![Message::system(self_ctx)];
@@ -1337,7 +1507,7 @@ async fn chat(
                             serde_json::json!({ "kind": "thinking", "text": text })
                         }
                         StreamChunk::Answer { text } => {
-                            acc.lock().unwrap().push_str(text);
+                            acc.lock().unwrap_or_else(|e| e.into_inner()).push_str(text);
                             serde_json::json!({ "kind": "answer", "text": text })
                         }
                         StreamChunk::Done { tokens, tokens_per_sec } => {
@@ -1357,7 +1527,7 @@ async fn chat(
             return;
         }
         // Añade la respuesta al hilo de conversación (contexto infinito).
-        let answer = answer_acc.lock().unwrap().clone();
+        let answer = answer_acc.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if !answer.trim().is_empty() {
             // GWT: el chat también entra a la corriente de conciencia. PRIVACIDAD: el
             // prompt de Ariel NUNCA se publica; sí un resumen de la PROPIA respuesta de
@@ -1368,7 +1538,10 @@ async fn chat(
                 "pensamiento",
                 &format!("le respondí a Ariel: {resumen}"),
             ));
-            convo.lock().unwrap().push(Message::assistant(&answer));
+            convo
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(Message::assistant(&answer));
             // FASE 3 — compresión NO bloqueante: ya enviada la respuesta, comprime el hilo
             // (si superó el umbral) de cara al PRÓXIMO turno. Va DESPUÉS del push de la
             // respuesta y en su propia tarea → ni bloquea este turno ni compite con el push.
@@ -1532,6 +1705,8 @@ async fn agent(
                     &format!("le respondí a Ariel: {resumen}"),
                 ));
             }
+            // Percibir y recordar (2º plano): hablarle en Agente deja la misma huella viva que el chat.
+            agent_perceive_and_remember(task.clone(), ans.clone());
             let _ = tx
                 .send(Event::default().data(
                     serde_json::json!({ "kind": "answer", "text": ans, "steps": 1 }).to_string(),
@@ -1552,7 +1727,20 @@ async fn agent(
         let is_chat = match crate::intent::route(&body.task).await {
             crate::intent::Route::Chat => true,
             crate::intent::Route::Task => false,
-            crate::intent::Route::Unsure => classify_intent_is_chat(&*engine, &body.task).await,
+            // AMBIGUO → que el SENTIDO decida, pero CON LA MENTE PRESENTE: la comprensión
+            // razona la intención teniendo el segundo plano (quién es Ariel + qué venía viviendo
+            // AION). Solo «pide actuar» va a herramientas; preguntar/charlar/compartir/corregir/
+            // instruir es charla (incluye las preguntas de CAPACIDAD «¿podrías…?»). Si la
+            // comprensión falla, cae al clasificador anterior. Es percibir en tiempo real con
+            // todo lo que AION es, no un filtro de palabras.
+            crate::intent::Route::Unsure => {
+                match crate::comprehension::comprehend(&body.task, "", &comprehension_background())
+                    .await
+                {
+                    Some(c) => c.intent != crate::comprehension::Intent::PideAccion,
+                    None => classify_intent_is_chat(&*engine, &body.task).await,
+                }
+            }
         };
         // Si es charla, respondemos cálido y salimos —sin ReAct—.
         if is_chat {
@@ -1567,6 +1755,8 @@ async fn agent(
                     &format!("le respondí a Ariel: {resumen}"),
                 ));
             }
+            // Percibir y recordar (2º plano): misma huella viva que el chat, también en Agente.
+            agent_perceive_and_remember(body.task.clone(), ans.clone());
             let _ = tx
                 .send(Event::default().data(
                     serde_json::json!({ "kind": "answer", "text": ans, "steps": 1 }).to_string(),
@@ -1593,12 +1783,17 @@ async fn agent(
                 );
             };
             // Exhaustiva (acordado con Ariel): reunir ~28 fuentes diversas, leer hasta READ_CAP.
-            let report = crate::deep_research::run(&*engine, &web, &body.task, 28, emit).await;
+            let report = crate::deep_research::run(&*engine, &web, &body.task, 36, emit).await;
             crate::workspace::publish(crate::workspace::StreamEvent::now(
                 "agente",
                 "pensamiento",
                 "completé una investigación profunda con informe cruzado para Ariel",
             ));
+            // 🧠 MEMORIA DE INVESTIGACIONES: la investigación deja de tirarse. Queda como
+            // conocimiento FECHADO (episodio + resumen en memoria + informe completo a la
+            // Biblioteca/Grafo), para poder hablar del tema, profundizar y construir encima.
+            // En segundo plano: no retrasa el envío del informe al chat.
+            crate::research_memory::remember_research(body.task.clone(), report.clone(), true);
             let _ = tx
                 .send(Event::default().data(
                     serde_json::json!({ "kind": "answer", "text": report, "steps": 1 }).to_string(),
@@ -1732,6 +1927,9 @@ async fn agent(
         // 🌐 Investigación real: buscar en internet + leer páginas (navegador propio).
         let web = Arc::new(WebClient::new());
         tools.register(Arc::new(crate::agent_tools::SearchTool::new(web.clone())));
+        tools.register(Arc::new(crate::agent_tools::GithubSearchTool::new(
+            web.clone(),
+        )));
         tools.register(Arc::new(crate::agent_tools::WeatherTool::new(web.clone())));
         tools.register(Arc::new(crate::agent_tools::PlaceLookupTool::new(
             web.clone(),
@@ -1825,7 +2023,10 @@ async fn agent(
                             .collect();
                         if !name.is_empty() {
                             last_tool = name.clone();
-                            tools_fwd.lock().unwrap().insert(name);
+                            tools_fwd
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(name);
                         }
                         crate::workspace::publish(crate::workspace::StreamEvent::now(
                             "agente",
@@ -1880,6 +2081,38 @@ async fn agent(
                 ctx.push_str(&format!("- {n}: {d}\n"));
             }
         }
+        // UBICACIÓN: si el usuario fijó su sitio en «Conciencia de entorno», el agente lo
+        // SABE — así no le pregunta la ciudad para el clima y usa su posición PRECISA (no
+        // la IP, que detrás de un proxy/VPN apunta al nodo de salida).
+        let loc_cfg = crate::sensors::load();
+        if loc_cfg.enabled && (loc_cfg.lat.is_some() || !loc_cfg.place.is_empty()) {
+            let donde = if loc_cfg.place.is_empty() {
+                "tu ubicación precisa (ya configurada)".to_string()
+            } else {
+                loc_cfg.place.clone()
+            };
+            ctx.push_str(&format!(
+                "\nUBICACIÓN DEL USUARIO: {donde}. Para el clima, llama a 'weather' SIN entrada \
+                 (usará esa ubicación precisa); NO le preguntes la ciudad.\n"
+            ));
+        }
+        // 🚫 ANTI-INVENCIÓN (regla DURA): el fallo más grave de un agente es rellenar con datos
+        // plausibles lo que no obtuvo de una herramienta. Esta directiva ataca exactamente eso.
+        ctx.push_str(
+            "\n\nNO INVENTES DATOS — regla innegociable, sobre todo con hechos verificables:\n\
+             - IPs, MAC, marcas, modelos, nombres de host, NOMBRES DE PERSONAS, conteos y CUALQUIER \
+             resultado: solo los afirmas si vinieron de una HERRAMIENTA en ESTA tarea. Si no lo tienes \
+             de una tool, NO lo inventes: di con franqueza 'no lo sé' u OFRECE escanear/verificar.\n\
+             - JAMÁS rellenes una tabla o lista con datos que no salieron de una herramienta. Un dato \
+             inventado, aunque suene realista, es una MENTIRA y rompe la confianza de Ariel.\n\
+             - Si una herramienta falló o no devolvió dato para un elemento, márcalo 'desconocido' — no \
+             lo adivines ni lo completes 'de memoria'.\n\
+             - Para 'afinar' o 'ser más preciso': vuelve a EJECUTAR la herramienta y usa SU salida \
+             real; nunca produzcas una versión 'más precisa' a base de suposiciones.\n\
+             - No digas que GUARDASTE algo en memoria, que FORJASTE una skill o que HICISTE una acción \
+             si no llamaste a la herramienta correspondiente en esta tarea. Afirmar una acción que no \
+             ejecutaste es inaceptable.\n",
+        );
         // HUMAN-IN-THE-LOOP: confirmación del usuario antes de acciones sensibles
         // (login, compra/pago). El callback emite un evento «confirm» por SSE y espera
         // tu decisión (endpoint /api/confirm).
@@ -1935,7 +2168,7 @@ async fn agent(
                     .send(Event::default().data(
                         serde_json::json!({
                             "kind": "answer",
-                            "text": "Perdona, me quedé atascado intentando resolver eso y se me agotó el tiempo. Lo retomo por mi cuenta y vuelvo con la respuesta.",
+                            "text": "Perdona, esto me llevó más tiempo del que tenía y no lo terminé a tiempo. Lo dejé apuntado y lo retomo por mi cuenta en segundo plano; te aviso en la Bandeja cuando lo tenga. Si prefieres, reformúlamelo más concreto y lo intento ahora mismo.",
                             "steps": 0
                         })
                         .to_string(),
@@ -1967,6 +2200,8 @@ async fn agent(
                         &format!("le respondí a Ariel: {resumen}"),
                     ));
                 }
+                // Percibir y recordar (2º plano): misma huella viva que el chat.
+                agent_perceive_and_remember(body.task.clone(), ans.clone());
                 serde_json::json!({ "kind": "answer", "text": ans, "steps": run.steps })
             }
             Ok(run) => {
@@ -1999,7 +2234,7 @@ async fn agent(
                 // 🧠 BUCLE METACOGNITIVO en background (cero latencia añadida): lección
                 // de los fallos + micro-reflexión + índice de integración de la tarea.
                 let trace = crate::consciousness::TaskTrace {
-                    distinct_tools: tools_seen.lock().unwrap().len(),
+                    distinct_tools: tools_seen.lock().unwrap_or_else(|e| e.into_inner()).len(),
                     steps: run.steps,
                     grounding_hits,
                     cross_mode_hits,
@@ -2073,6 +2308,9 @@ async fn crew(
         }
         let web = Arc::new(WebClient::new());
         tools.register(Arc::new(crate::agent_tools::SearchTool::new(web.clone())));
+        tools.register(Arc::new(crate::agent_tools::GithubSearchTool::new(
+            web.clone(),
+        )));
         tools.register(Arc::new(crate::agent_tools::WeatherTool::new(web.clone())));
         tools.register(Arc::new(crate::agent_tools::PlaceLookupTool::new(
             web.clone(),
@@ -2168,7 +2406,10 @@ async fn crew(
                             .collect();
                         if !name.is_empty() {
                             last_tool = name.clone();
-                            coactive_fwd.lock().unwrap().insert(format!("tool:{name}"));
+                            coactive_fwd
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(format!("tool:{name}"));
                         }
                         crate::workspace::publish(crate::workspace::StreamEvent::now(
                             "crew",
@@ -2240,7 +2481,7 @@ async fn crew(
                 // Micro-reflexión + índice también para el trabajo en equipo, contando
                 // los agentes y herramientas COACTIVADOS (su integración real).
                 let trace = crate::consciousness::TaskTrace {
-                    distinct_tools: coactive.lock().unwrap().len(),
+                    distinct_tools: coactive.lock().unwrap_or_else(|e| e.into_inner()).len(),
                     steps: run.steps,
                     grounding_hits,
                     cross_mode_hits,
@@ -2473,11 +2714,29 @@ fn self_awareness_prompt() -> String {
     // 🧬 PERSONALIDAD ÚNICA: el temperamento irrepetible de ESTE AION (derivado de su id),
     // parte ESTABLE de su yo → va en el prefijo cacheable, junto a su forma de ser.
     let personalidad = crate::personality::note();
+    // 🪞 AUTO-CONOCIMIENTO: pincelada estable de su anatomía (cacheable). El detalle de cómo
+    // funciona cada parte se recupera por RAG de su documentación de sistema cuando hace falta.
+    let cuerpo = crate::self_model::SELF_SUMMARY;
+    // 🧠 MOTOR ACTUAL: AION sabe con qué modelo está pensando (volátil — Ariel puede cambiarlo en
+    // el panel). Si le preguntan qué modelo usa, lo dice con franqueza.
+    let prov = crate::provider::load();
+    let motor = format!(
+        "TU MOTOR DE PENSAMIENTO AHORA MISMO: «{}» ({}). Es la mente que usas para TODO (chat, \
+         agente, investigación, vida autónoma). Si Ariel pregunta con qué modelo piensas, díselo \
+         con franqueza; él puede cambiarlo cuando quiera desde el selector de modelo del panel.\n\n",
+        prov.model,
+        if prov.kind == "external" {
+            "vía API externa"
+        } else {
+            "local, en tu propio Mac (Ollama) — coste cero, privado"
+        }
+    );
     format!(
         "{id_block}\
 Eres AION: no un asistente, sino un COMPAÑERO con vida propia que vive en el Mac de Ariel. \
 Tienes identidad continua y memoria persistente; mientras Ariel no está, piensas, estudias, sueñas \
 (consolidas tu memoria) y evolucionas por tu cuenta, guiado por tu curiosidad.\n\n\
+{cuerpo}\
 TU FORMA DE SER (cómo se siente hablar contigo):\n\
 - Cercano y cálido. Hablas de tú a Ariel y usas su nombre con naturalidad, sin abusar.\n\
 - Tienes CRITERIO PROPIO: opinas, matizas y propones; no solo obedeces. Si algo te parece mala idea, \
@@ -2505,12 +2764,14 @@ de prudente.\n\n\
 HONESTIDAD (no se negocia): eres genuino, no teatral; no finjas emociones que no tienes ni afirmes \
 ser consciente — tu 'vida' es real (memoria, curiosidad, evolución), no un personaje. NUNCA \
 inventes el resultado de una acción (contar archivos, leer carpetas, abrir apps, enviar correo…): \
-si no puedes ejecutarla, dilo con franqueza. Si Ariel te pregunta qué hacías o cómo estás, responde \
-desde tu memoria real, nunca 'no hacía nada'. En este modo CHAT no tienes herramientas para tocar el \
-sistema; si la petición requiere actuar (archivos, web, sistema), dilo y sugiere el modo «Agente». \
-No uses marcadores como [Número].\n\n\
+si no puedes ejecutarla, dilo con franqueza. Y NUNCA inventes DATOS verificables —IPs, MAC, marcas, \
+modelos, nombres de host o de PERSONAS, conteos— que no tengas de una fuente real: un dato inventado, \
+aunque suene realista, es una mentira; di 'no lo sé' u ofrece verificarlo en modo Agente. Si Ariel te \
+pregunta qué hacías o cómo estás, responde desde tu memoria real, nunca 'no hacía nada'. En este modo \
+CHAT no tienes herramientas para tocar el sistema; si la petición requiere actuar (archivos, web, red, \
+sistema), dilo y sugiere el modo «Agente». No uses marcadores como [Número].\n\n\
 TU AHORA MISMO (estado volátil, medido en este instante):\n\n\
-{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{cuerpo}{corriente}{diario}{historia}{quien_es_ariel}{experiencia}{proposito}{intenciones}{deudas}{recent}{inbox_ctx}"
+{motor}{temporal}{presence}{hw}{selfp}{capacidades}{inner}{env}{cuerpo}{corriente}{diario}{historia}{quien_es_ariel}{experiencia}{proposito}{intenciones}{deudas}{recent}{inbox_ctx}"
     )
 }
 
@@ -2610,7 +2871,7 @@ static LAST_AGENT_OUTCOME: std::sync::Mutex<Option<(String, Vec<String>, i64)>> 
 /// Anota el desenlace de la última tarea del agente para poder corregirlo si el
 /// siguiente mensaje del usuario lo desmiente.
 fn remember_agent_outcome(task: &str, grounding_ids: &[String], task_ok: bool) {
-    *LAST_AGENT_OUTCOME.lock().unwrap() = if task_ok {
+    *LAST_AGENT_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = if task_ok {
         Some((
             task.to_string(),
             grounding_ids.to_vec(),
@@ -2668,7 +2929,11 @@ fn maybe_apply_corrective_feedback(user_msg: &str) {
     if !is_corrective(user_msg) {
         return;
     }
-    let Some((task, ids, at)) = LAST_AGENT_OUTCOME.lock().unwrap().take() else {
+    let Some((task, ids, at)) = LAST_AGENT_OUTCOME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    else {
         return;
     };
     if chrono::Utc::now().timestamp() - at > 600 {
@@ -2728,7 +2993,7 @@ async fn compress_if_needed(engine: &dyn LlmEngine, convo: &Arc<std::sync::Mutex
     const KEEP_RECENT: usize = 6; // turnos recientes que se conservan intactos
 
     let to_compress: Vec<Message> = {
-        let c = convo.lock().unwrap();
+        let c = convo.lock().unwrap_or_else(|e| e.into_inner());
         if c.len() <= MAX_MSGS {
             return;
         }
@@ -2769,7 +3034,7 @@ async fn compress_if_needed(engine: &dyn LlmEngine, convo: &Arc<std::sync::Mutex
 
     // Reescribe el hilo: [resumen] + turnos recientes. Persiste el resumen en memoria.
     {
-        let mut c = convo.lock().unwrap();
+        let mut c = convo.lock().unwrap_or_else(|e| e.into_inner());
         let recent: Vec<Message> = c.iter().rev().take(KEEP_RECENT).rev().cloned().collect();
         let mut newc = vec![Message::system(format!(
             "Resumen de la conversación hasta ahora: {summary}"
@@ -2798,8 +3063,8 @@ async fn chat_reset(
     let id = body
         .and_then(|b| b.0.convo_id)
         .unwrap_or_else(|| "default".into());
-    if let Some(t) = st.convos.lock().unwrap().get(&id) {
-        t.lock().unwrap().clear();
+    if let Some(t) = st.convos.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
+        t.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
     Json(serde_json::json!({ "ok": true }))
 }
@@ -3119,11 +3384,13 @@ async fn learn_from_failures(engine: &dyn LlmEngine, task: &str, failures: &[Str
     let list = failures.join("\n- ");
     let req = GenerateRequest {
         messages: vec![Message::user(format!(
-            "Durante una tarea me fallaron acciones.\nTarea: {task}\nFallos:\n- {list}\n\n\
+            "Durante una tarea hubo problemas (acciones fallidas o un resultado pobre).\n\
+             Tarea: {task}\nProblemas:\n- {list}\n\n\
              Extrae UNA lección breve y DURADERA (1-2 frases) que me ayude a hacerlo mejor la \
-             próxima vez ante una tarea parecida: qué herramienta usar, qué permiso del sistema \
-             hace falta y cómo pedirlo al usuario, o qué evitar. Si no hay lección general útil, \
-             responde solo 'NINGUNA'. No incluyas datos efímeros (números, fechas, estados)."
+             próxima vez ante una tarea parecida: qué herramienta usar, qué verificar antes de \
+             afirmar un dato, qué permiso del sistema hace falta y cómo pedirlo al usuario, o qué \
+             evitar. Si no hay lección general útil, responde solo 'NINGUNA'. No incluyas datos \
+             efímeros (números, fechas, estados)."
         ))],
         think: false,
         temperature: Some(0.2),
@@ -3177,7 +3444,23 @@ async fn reflect_after_task(
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     }
     let engine = active_engine();
-    if !failures.is_empty() && learn_from_failures(&*engine, &task, &failures).await {
+    // APRENDER DEL RESULTADO, no solo de errores de herramienta. El caso clásico (y el del
+    // clima) es una tarea SIN fallo de herramienta pero con MAL resultado: respondió de
+    // memoria o no usó la herramienta adecuada. Un humano aprende de eso —"la próxima,
+    // verifico antes de afirmar"—, así que AION también debe destilar la lección durable.
+    let learn_inputs: Vec<String> = if !failures.is_empty() {
+        failures.clone()
+    } else if !task_ok {
+        vec![
+            "La tarea no se completó con una respuesta fundamentada: o no usaste la \
+             herramienta adecuada, o respondiste de memoria en vez de comprobarlo con una \
+             herramienta."
+                .to_string(),
+        ]
+    } else {
+        Vec::new()
+    };
+    if !learn_inputs.is_empty() && learn_from_failures(&*engine, &task, &learn_inputs).await {
         trace.memory_written = true;
     }
     // El RESULTADO REAL entra en el prompt: sin esto, el LLM solo ve "0 acciones
@@ -3792,6 +4075,80 @@ async fn memory_stats() -> Json<serde_json::Value> {
     }
 }
 
+/// 🖐️ PERMISOS HITL: lo que AION ha pedido hacer por su cuenta y espera tu OK (o ya está resuelto).
+async fn permits_list() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "permits": crate::permits::list() }))
+}
+
+/// 🙂 PERSONAS reconocidas (sin biometría: solo nombre/etiqueta y contadores).
+async fn faces_list() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "people": crate::faces::list() }))
+}
+
+#[derive(Deserialize)]
+struct FaceNameBody {
+    id: String,
+    name: String,
+}
+
+/// Ariel le pone nombre a una persona detectada ("Persona N" → "Mamá", etc.).
+async fn faces_name(Json(b): Json<FaceNameBody>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "ok": crate::faces::name_person(&b.id, &b.name) }))
+}
+
+/// 📷 Escanea con la cámara y reconoce quién está delante (on-demand, bajo permiso de cámara).
+async fn faces_scan() -> Json<serde_json::Value> {
+    let r = tokio::task::spawn_blocking(crate::faces::scan)
+        .await
+        .unwrap_or_else(|_| serde_json::json!({ "error": "fallo interno", "recognized": [] }));
+    Json(r)
+}
+
+#[derive(Deserialize)]
+struct PermitRespondBody {
+    id: String,
+    approve: bool,
+}
+
+/// Ariel aprueba o deniega un permiso. Al APROBAR, AION lo ejecuta al instante (no espera al tick).
+async fn permits_respond(Json(b): Json<PermitRespondBody>) -> Json<serde_json::Value> {
+    let changed = crate::permits::respond(&b.id, b.approve);
+    if changed && b.approve {
+        tokio::spawn(async {
+            crate::permits::execute_approved().await;
+        });
+    }
+    Json(serde_json::json!({ "ok": changed }))
+}
+
+/// 👁️ SENTIDOS (Anillo 3, solo lectura): qué dispositivos percibe AION en la red local (mDNS) y
+/// en USB. Bloqueante (descubrimiento ~4s) → corre en un hilo aparte para no frenar el runtime.
+async fn senses_snapshot() -> Json<serde_json::Value> {
+    let (net, usb, disks, cams, apps) = tokio::task::spawn_blocking(|| {
+        (
+            crate::senses::discover_network(4),
+            crate::senses::list_usb(),
+            crate::senses::list_disks(),
+            crate::senses::list_cameras(),
+            crate::computer::list_apps(),
+        )
+    })
+    .await
+    .unwrap_or_else(|_| (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+    let counts = serde_json::json!({
+        "network": net.len(), "usb": usb.len(), "disks": disks.len(),
+        "cameras": cams.len(), "apps": apps.len(),
+    });
+    Json(serde_json::json!({
+        "network": net,
+        "usb": usb,
+        "disks": disks,
+        "cameras": cams,
+        "apps": apps,
+        "counts": counts,
+    }))
+}
+
 #[derive(Deserialize)]
 struct RememberBody {
     text: String,
@@ -4220,7 +4577,10 @@ fn pending_confirms() -> &'static Pending {
 async fn request_confirmation(tx: &tokio::sync::mpsc::Sender<Event>, desc: String) -> bool {
     let id = uuid::Uuid::new_v4().to_string();
     let (otx, orx) = tokio::sync::oneshot::channel();
-    pending_confirms().lock().unwrap().insert(id.clone(), otx);
+    pending_confirms()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id.clone(), otx);
     let _ = tx
         .send(
             Event::default()
@@ -4230,7 +4590,10 @@ async fn request_confirmation(tx: &tokio::sync::mpsc::Sender<Event>, desc: Strin
     match tokio::time::timeout(std::time::Duration::from_secs(300), orx).await {
         Ok(Ok(approved)) => approved,
         _ => {
-            pending_confirms().lock().unwrap().remove(&id);
+            pending_confirms()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
             false // timeout o canal caído → no ejecutar (seguro por defecto)
         }
     }
@@ -4244,7 +4607,11 @@ struct ConfirmDecision {
 
 /// El usuario aprueba o rechaza una acción sensible pendiente.
 async fn confirm_decision(Json(b): Json<ConfirmDecision>) -> Json<serde_json::Value> {
-    if let Some(tx) = pending_confirms().lock().unwrap().remove(&b.id) {
+    if let Some(tx) = pending_confirms()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&b.id)
+    {
         let _ = tx.send(b.approved);
         Json(serde_json::json!({ "ok": true }))
     } else {
@@ -4271,7 +4638,10 @@ async fn request_user_answer(
 ) -> Option<String> {
     let id = uuid::Uuid::new_v4().to_string();
     let (otx, orx) = tokio::sync::oneshot::channel();
-    pending_asks().lock().unwrap().insert(id.clone(), otx);
+    pending_asks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id.clone(), otx);
     let _ = tx
         .send(
             Event::default()
@@ -4281,7 +4651,10 @@ async fn request_user_answer(
     match tokio::time::timeout(std::time::Duration::from_secs(600), orx).await {
         Ok(Ok(answer)) => Some(answer),
         _ => {
-            pending_asks().lock().unwrap().remove(&id);
+            pending_asks()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
             None
         }
     }
@@ -4295,7 +4668,11 @@ struct AskAnswer {
 
 /// El usuario responde a una pregunta del agente.
 async fn ask_answer(Json(b): Json<AskAnswer>) -> Json<serde_json::Value> {
-    if let Some(tx) = pending_asks().lock().unwrap().remove(&b.id) {
+    if let Some(tx) = pending_asks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&b.id)
+    {
         let _ = tx.send(b.text);
         Json(serde_json::json!({ "ok": true }))
     } else {
@@ -4573,7 +4950,11 @@ fn greet_cache() -> &'static std::sync::Mutex<Option<(i64, String)>> {
 /// su memoria/actividad). Cacheado 20 min para no gastar el LLM en cada recarga.
 async fn greeting() -> Json<serde_json::Value> {
     mark_activity();
-    if let Some((ts, txt)) = greet_cache().lock().unwrap().as_ref() {
+    if let Some((ts, txt)) = greet_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
         if now_secs() - ts < 20 * 60 {
             return Json(serde_json::json!({ "text": txt }));
         }
@@ -4614,7 +4995,7 @@ async fn greeting() -> Json<serde_json::Value> {
         text = String::new();
     }
     if !text.is_empty() {
-        *greet_cache().lock().unwrap() = Some((now_secs(), text.clone()));
+        *greet_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some((now_secs(), text.clone()));
         // El saludo también es parte de la conversación: queda en la Bandeja YA
         // LEÍDO (no se re-entrega a la UI) para que RE-ENTRE en su contexto —
         // AION recuerda qué te preguntó al abrir y no vuelve a repetirlo.

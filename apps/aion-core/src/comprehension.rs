@@ -162,7 +162,7 @@ impl Comprension {
 /// Comprende el turno con el modelo LOCAL. `grounding` es lo recuperado de memoria
 /// (para que la comprensión sepa si ya tiene contexto). Devuelve `None` si falla
 /// (fail-open) o si el turno es claramente trivial (saludo) — ahí no hace falta razonar.
-pub async fn comprehend(prompt: &str, grounding: &str) -> Option<Comprension> {
+pub async fn comprehend(prompt: &str, grounding: &str, background: &str) -> Option<Comprension> {
     let trimmed = prompt.trim();
     if trimmed.is_empty() {
         return None;
@@ -228,10 +228,21 @@ pub async fn comprehend(prompt: &str, grounding: &str) -> Option<Comprension> {
         Ejemplo 4 — Mensaje: \"no, ya no vivo en Sesto, ahora estoy en Milano\"\n\
         {\"intent\":\"correccion\",\"confidence\":0.9,\"needs_grounding\":false,\"facts\":[\"Ariel ahora vive/trabaja en Milano (ya no en Sesto San Giovanni)\"],\"directive\":\"Acepta la corrección y confirma el dato nuevo\"}";
 
+    // SEGUNDO PLANO PRESENTE EN EL INSTANTE: lo que AION está viviendo + quién es Ariel, para
+    // interpretar su intención COMO alguien que lo conoce y venía pensando en algo —no aislado—.
+    // Es contexto para LEER mejor el sentido, nunca para inventar hechos que Ariel no dijo.
+    let bg = if background.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nTu trasfondo AHORA (tenlo presente al interpretar; NO inventes con esto):\n{}",
+            background.chars().take(500).collect::<String>()
+        )
+    };
     let req = GenerateRequest {
         messages: vec![
             Message::system(sys),
-            Message::user(format!("Mensaje de Ariel: \"{trimmed}\"{ctx}\n\nJSON:")),
+            Message::user(format!("Mensaje de Ariel: \"{trimmed}\"{ctx}{bg}\n\nJSON:")),
         ],
         think: false,
         temperature: Some(0.0),

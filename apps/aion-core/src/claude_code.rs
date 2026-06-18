@@ -67,6 +67,24 @@ pub fn generate_token() -> String {
     )
 }
 
+/// **Token LOCAL del API, ESTABLE entre reinicios.** Se lee de `app_data_dir/api_token`
+/// o, la primera vez, se genera y se persiste (0600). Antes el token era EFÍMERO (un UUID
+/// nuevo en cada arranque), de modo que cada reinicio —y cada actualización OTA— dejaba
+/// `~/.claude.json` con el token viejo y ROMPÍA la conexión MCP Claude Code↔AION hasta
+/// re-registrar. Persistirlo mantiene la conexión viva entre reinicios sin re-sincronizar.
+pub fn persisted_token() -> String {
+    let p = crate::app_data_dir().join("api_token");
+    if let Ok(t) = std::fs::read_to_string(&p) {
+        let t = t.trim().to_string();
+        if t.len() >= 32 {
+            return t;
+        }
+    }
+    let t = generate_token();
+    crate::write_atomic_secret(&p, &t);
+    t
+}
+
 fn home_dir() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
@@ -187,7 +205,7 @@ pub fn is_registered() -> bool {
 pub async fn build_brief() -> String {
     static CACHE: OnceLock<Mutex<Option<(Instant, String)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
-    if let Some((t, s)) = cache.lock().unwrap().as_ref() {
+    if let Some((t, s)) = cache.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         if t.elapsed().as_secs() < 300 {
             return s.clone();
         }
@@ -285,7 +303,7 @@ pub async fn build_brief() -> String {
     if out.chars().count() > 1800 {
         out = out.chars().take(1800).collect();
     }
-    *cache.lock().unwrap() = Some((Instant::now(), out.clone()));
+    *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), out.clone()));
     out
 }
 

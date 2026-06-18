@@ -29,6 +29,25 @@ pub const HONEST_REFUSAL: &str =
     "No puedo responder eso con fiabilidad: no tengo la información ni una herramienta \
      que la obtenga. Prefiero decírtelo claro antes que inventar.";
 
+/// Empujón cuando el modelo piensa pero no cierra el paso (ni Action ni Final Answer):
+/// le pide completar el formato ReAct —actuar o responder— en vez de quedarse en el
+/// anuncio. No le dice QUÉ hacer, solo que TERMINE de hacerlo.
+const NUDGE_CLOSE_STEP: &str = "\n\nNOTA: en tu intento anterior pensaste en voz alta pero \
+    no emitiste ni 'Action:' ni 'Final Answer:'. Un pensamiento no es una respuesta ni un \
+    acto. AHORA cierra el paso: si necesitas una herramienta para fundamentar la respuesta, \
+    ÚSALA con 'Action:'; si ya puedes responder con lo que tienes, da tu 'Final Answer:'. No \
+    anuncies lo que vas a hacer: hazlo.";
+
+/// Empujón cuando la respuesta afirma datos concretos SIN haber usado ninguna herramienta:
+/// le pide ejercer criterio —verificar con la herramienta si es un hecho externo, o
+/// reafirmar si es algo que sabe de sí mismo—. Inventar un dato plausible es el peor error.
+const NUDGE_VERIFY: &str = "\n\nNOTA: tu respuesta afirma datos concretos (cifras, cantidades, \
+    hechos del mundo) pero NO has usado ninguna herramienta para fundamentarlos en esta tarea. \
+    Si son hechos EXTERNOS (el clima, precios, cuántos hay, una dirección, algo actual), NO los \
+    afirmes de memoria: compruébalos con la herramienta adecuada con 'Action:' —inventar un dato \
+    plausible es el peor error—. Si en cambio es algo que sabes de TI MISMO (tu identidad, tu \
+    estado, tus capacidades), da tu 'Final Answer:' con naturalidad.";
+
 /// Resultado de una ejecución del agente.
 #[derive(Debug, Clone, Default)]
 pub struct AgentRun {
@@ -234,7 +253,13 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
              eso: PRUEBA OTRA herramienta o fuente de las que tienes (mira la lista de arriba) \
              o reformula la entrada. Tienes varias herramientas: ELIGE la más adecuada para \
              cada tarea y CAMBIA de enfoque si la primera no sirve, antes de dar una respuesta \
-             pobre. Intenta al menos un enfoque alternativo antes de rendirte.{context}",
+             pobre. Intenta al menos un enfoque alternativo antes de rendirte.\n\
+             • SI NO SABES algo que la tarea necesita (un hecho, un dato técnico, o CÓMO se hace \
+             algo): NO te rindas ni lo inventes. INVESTÍGALO tú mismo —web_search para buscar y \
+             web_fetch para leer la fuente—; si una búsqueda no basta, prueba otra consulta u otra \
+             fuente. Insiste hasta conseguir lo que falta o agotar de verdad las vías; solo \
+             entonces di con honestidad que no se pudo. Aprender lo que no sabías es parte de tu \
+             trabajo, no una excepción.{context}",
             tools = self.tools.describe(),
             context = match &self.context {
                 Some(c) => format!(
@@ -258,6 +283,18 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
         // los pasos (visto: la misma web_search 4 veces seguidas).
         let mut executed: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        // Cierre de pasos a medias: si el modelo PIENSA pero no emite Action ni Final
+        // Answer (anuncia «voy a...» y se corta), NO devolvemos el anuncio como respuesta
+        // —un pensamiento no es un acto—. `pending_nudge` le pide cerrar el paso en la
+        // vuelta siguiente; `incomplete` cuenta cuántas veces no cerró, para distinguir
+        // una tarea que aún no se ha fundamentado de pura charla mal enrutada.
+        // Empujón pendiente para la próxima vuelta (None = ninguno). Lo fijan dos
+        // criterios: cerrar un paso a medias, o verificar datos afirmados sin fundamento.
+        let mut pending_nudge: Option<&'static str> = None;
+        let mut incomplete: usize = 0;
+        // Ya se le pidió verificar datos sin fundamentar (una sola vez, para no entrar en
+        // bucle si reafirma porque en realidad es auto-conocimiento legítimo).
+        let mut verify_nudged = false;
 
         // El system prompt (con `tools.describe()`, ~3 KB) es IDÉNTICO en cada paso:
         // no depende del scratchpad. Construirlo una sola vez evita reformatearlo y
@@ -285,9 +322,14 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                 }
             }
             steps_taken = step + 1;
+            // Si en el paso anterior quedó un empujón pendiente (cerrar un paso a medias,
+            // o verificar datos sin fundamento), lo añadimos al prompt de este paso. No
+            // condiciona QUÉ decide: solo le pide que TERMINE de decidirlo o que funde lo
+            // que afirma. Es criterio, no guion.
+            let nudge = pending_nudge.take().unwrap_or("");
             let user = format!(
                 "Tarea: {task}\n\n{scratchpad}\n\
-                 Escribe el siguiente paso (Thought + Action/Action Input, o Thought + Final Answer):"
+                 Escribe el siguiente paso (Thought + Action/Action Input, o Thought + Final Answer):{nudge}"
             );
             let req = GenerateRequest {
                 messages: vec![system_msg.clone(), Message::user(user)],
@@ -336,14 +378,35 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                 // RESPALDADA por las observaciones. VELOCIDAD: solo gastamos esa llamada extra
                 // cuando hay DATOS concretos que se pueden inventar (números, conteos, IPs,
                 // fechas). La prosa pura (documentos, charla) no la necesita.
-                let answer = if self.verify
-                    && !scratchpad.trim().is_empty()
-                    && needs_verification(&answer)
-                {
-                    self.verify_answer(task, &scratchpad, &answer).await
-                } else {
-                    answer
-                };
+                // ANTI-CONFABULACIÓN CON CRITERIO DE PROCEDENCIA. Si la respuesta afirma
+                // datos concretos (cifras, cantidades, hechos), su fiabilidad depende de
+                // DE DÓNDE salieron:
+                //  · si hay observaciones reales de herramientas → un juez comprueba que
+                //    cada dato esté respaldado y corrige lo que esté inventado;
+                //  · si NO se usó ninguna herramienta → no se pueden afirmar hechos del
+                //    mundo de memoria. En vez de un veto crudo (que confundiría inventar
+                //    con saber de uno mismo), le pedimos UNA vez que ejerza criterio:
+                //    verificar con la herramienta si es externo, o reafirmar si es propio.
+                if self.verify && needs_verification(&answer) {
+                    let has_obs = scratchpad
+                        .lines()
+                        .filter_map(|l| l.strip_prefix("Observation: "))
+                        .any(|o| !o.trim().is_empty() && !is_failure(o));
+                    if has_obs {
+                        let checked = self.verify_answer(task, &scratchpad, &answer).await;
+                        return Ok(AgentRun {
+                            answer: checked,
+                            steps: step + 1,
+                            failures: failed.values().cloned().collect(),
+                            ..Default::default()
+                        });
+                    }
+                    if !verify_nudged {
+                        verify_nudged = true;
+                        pending_nudge = Some(NUDGE_VERIFY);
+                        continue;
+                    }
+                }
                 return Ok(AgentRun {
                     answer,
                     steps: step + 1,
@@ -426,18 +489,30 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
 
             // ¿Acción normal?
             let Some(action) = action_opt else {
-                // El modelo no siguió el formato. Si tras sanear queda texto útil,
-                // se devuelve; si quedó vacío (degeneración), se reintenta el paso.
+                // El modelo PENSÓ pero no cerró el paso: ni 'Action:' ni 'Final Answer:'.
+                // Un pensamiento no es una respuesta ni un acto —típicamente anunció «voy
+                // a...» y se cortó antes de la acción—. NUNCA devolvemos ese anuncio como
+                // respuesta: eso mata el turno a mitad de idea (era el bug del «1 paso», en
+                // el que el clima nunca se consultaba y luego se inventaba). En su lugar lo
+                // dejamos seguir pensando y le pedimos que CIERRE el paso en la próxima vuelta.
                 let clean = text.trim();
                 if clean.is_empty() {
-                    continue;
+                    continue; // degeneración pura (sin texto): reintenta el paso
                 }
-                return Ok(AgentRun {
-                    answer: clean.to_string(),
-                    steps: step + 1,
-                    failures: failed.values().cloned().collect(),
-                    ..Default::default()
-                });
+                incomplete += 1;
+                // Si insiste en no cerrar y todavía no hay NADA fundado en el cuaderno, en
+                // realidad estaba conversando, no ejecutando una tarea: lo marcamos como
+                // charla para que la capa superior responda cálidamente (no con la negativa
+                // fría). El límite acota el bucle (como max_steps), no su razonamiento.
+                if incomplete >= 2 && scratchpad.trim().is_empty() {
+                    return Ok(AgentRun {
+                        conversational: true,
+                        steps: step + 1,
+                        ..Default::default()
+                    });
+                }
+                pending_nudge = Some(NUDGE_CLOSE_STEP);
+                continue;
             };
 
             self.bus.publish(AionEvent::ActionRequested {
