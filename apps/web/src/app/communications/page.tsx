@@ -4,8 +4,6 @@ import { useEffect, useState } from "react";
 import {
   AppShell,
   Icon,
-  IconChip,
-  Badge,
   Button,
   Input,
   Avatar,
@@ -104,31 +102,37 @@ export default function CommunicationsPage() {
 
   return (
     <AppShell title="Comunicaciones">
-      <div className="max-w-6xl mx-auto px-3 py-6">
-        <p className="text-[15px] mb-6 max-w-2xl" style={{ color: "var(--text-2)" }}>
-          Decide <strong>con quién</strong> y <strong>por qué canal</strong> puede comunicarse AION
-          (Mensajes, WhatsApp), y deja que mire tu <strong>agenda</strong> y tus{" "}
-          <strong>contactos</strong>. Por privacidad, todo está desactivado hasta que lo enciendas.
-          Enviar siempre te pedirá confirmación.
-        </p>
-
+      <div className="max-w-6xl mx-auto px-3 py-6 flex flex-col gap-6">
         {err && (
-          <div className="card text-sm" style={{ color: "var(--text-2)" }}>
+          <div className="card text-sm" style={{ color: "var(--text-2)", boxShadow: "var(--shadow-elevated)" }}>
             No pude leer la configuración. ¿Está AION en marcha (puerto 8765)?
           </div>
         )}
 
         {pol && (
-          <div className="flex flex-col gap-4">
-            {/* Interruptor maestro */}
-            <div className="card flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <IconChip icon="message" tint={pol.enabled ? "mint" : "gold"} />
-                <div>
-                  <h2 className="t-section" style={{ color: "var(--text-2)" }}>
+          <div className="flex flex-col gap-6">
+            {/* ── CABECERA + interruptor maestro (patrón de Mente) ── */}
+            <div
+              className="card flex flex-wrap items-center justify-between gap-4"
+              style={{ boxShadow: "var(--shadow-elevated)" }}
+            >
+              <div className="flex items-center gap-4 min-w-0">
+                <span
+                  className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0"
+                  style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}
+                >
+                  <Icon name="message" size={24} />
+                </span>
+                <div className="min-w-0">
+                  <div className="font-display text-xl font-bold" style={{ color: "var(--text-1)" }}>
                     Comunicaciones
-                  </h2>
-                  <p className="text-xs mt-0.5 flex items-center gap-1.5" style={{ color: "var(--text-3)" }}>
+                  </div>
+                  <p className="text-sm mt-0.5 max-w-xl" style={{ color: "var(--text-3)" }}>
+                    Decide <strong style={{ color: "var(--text-2)" }}>con quién</strong> y{" "}
+                    <strong style={{ color: "var(--text-2)" }}>por qué canal</strong> puede hablar AION.
+                    Todo está desactivado hasta que lo enciendas; enviar siempre te pide confirmación.
+                  </p>
+                  <p className="text-xs mt-1.5 flex items-center gap-1.5" style={{ color: "var(--text-3)" }}>
                     <StatusDot color={pol.enabled ? "var(--on-mint)" : "var(--text-3)"} />
                     {pol.enabled ? "Activadas" : "Desactivadas"} · calendario y contactos incluidos
                   </p>

@@ -103,24 +103,53 @@ export default function WorkflowsPage() {
 
   return (
     <AppShell title="Flujos de trabajo">
-      <div className="max-w-6xl mx-auto px-3 py-6">
-        <div className="flex items-start justify-between gap-4 mb-6">
-          <p className="text-[15px] max-w-xl" style={{ color: "var(--text-2)" }}>
-            Encadena herramientas de AION en automatizaciones (estilo n8n). La salida de un paso
-            alimenta al siguiente con <code>{"{{prev}}"}</code>. Por seguridad, los flujos solo usan
-            herramientas de lectura/cálculo: nunca disparan acciones irreversibles sin tu OK.
-          </p>
-          {!draft && (
-            <Button variant="gold" onClick={() => setDraft(blankWorkflow())} className="shrink-0">
-              <span className="inline-flex items-center gap-1.5">
-                <Icon name="plus" size={15} /> Nuevo flujo
-              </span>
-            </Button>
-          )}
+      <div className="max-w-6xl mx-auto px-3 py-6 flex flex-col gap-6">
+        {/* ── CABECERA: qué son + recuento + crear (patrón de Mente) ── */}
+        <div
+          className="card flex flex-wrap items-center justify-between gap-4"
+          style={{ boxShadow: "var(--shadow-elevated)" }}
+        >
+          <div className="flex items-center gap-4 min-w-0">
+            <span
+              className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0"
+              style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}
+            >
+              <Icon name="network" size={24} />
+            </span>
+            <div className="min-w-0">
+              <div className="font-display text-xl font-bold" style={{ color: "var(--text-1)" }}>
+                Flujos de trabajo
+              </div>
+              <p className="text-sm mt-0.5 max-w-xl" style={{ color: "var(--text-3)" }}>
+                Encadena herramientas de AION (estilo n8n): la salida de un paso alimenta al siguiente
+                con <code>{"{{prev}}"}</code>. Solo usan herramientas de lectura/cálculo: nunca disparan
+                acciones irreversibles sin tu OK.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-5">
+            {list.length > 0 && (
+              <div className="min-w-0 text-right">
+                <div className="font-display text-2xl font-bold leading-tight" style={{ color: "var(--text-1)" }}>
+                  {list.length}
+                </div>
+                <div className="text-xs" style={{ color: "var(--text-2)" }}>
+                  {list.length === 1 ? "flujo" : "flujos"}
+                </div>
+              </div>
+            )}
+            {!draft && (
+              <Button variant="gold" onClick={() => setDraft(blankWorkflow())} className="shrink-0">
+                <span className="inline-flex items-center gap-1.5">
+                  <Icon name="plus" size={15} /> Nuevo flujo
+                </span>
+              </Button>
+            )}
+          </div>
         </div>
 
         {err && (
-          <div className="card text-sm" style={{ color: "var(--text-2)" }}>
+          <div className="card text-sm" style={{ color: "var(--text-2)", boxShadow: "var(--shadow-elevated)" }}>
             No pude leer los flujos. ¿Está AION en marcha (puerto 8765)?
           </div>
         )}
