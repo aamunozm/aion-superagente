@@ -808,8 +808,9 @@ export default function ChatPage() {
           onMic={onMic}
           onToggleHandsFree={toggleHandsFree}
         />
-        {/* Modo voz inmersivo: conversación hablada a pantalla completa. */}
-        {(dictation.supported || speech.supported) && (
+        {/* Modo voz inmersivo: conversación hablada a pantalla completa.
+            Solo si hay reconocimiento de voz (si no, no podría oírte → no se ofrece). */}
+        {dictation.supported && (
           <button
             type="button"
             onClick={openVoiceMode}
