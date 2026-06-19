@@ -605,6 +605,46 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // 🎙️ SIDECAR DE VOZ CLONADA (Chatterbox): voz firma clonada de un clip, en su
+    // propio venv con PyTorch (venv-cb). Proceso aparte en :8767; el sidecar Kokoro
+    // le enruta engine=chatterbox. Carga perezosa (modelo solo al primer uso). Sin
+    // venv-cb → la UI usa Piper/Kokoro.
+    tokio::spawn(async {
+        let dir = crate::app_data_dir().join("tts");
+        let _ = std::fs::create_dir_all(&dir);
+        let script = dir.join("tts_chatterbox.py");
+        let _ = std::fs::write(&script, include_str!("../../tts-sidecar/tts_chatterbox.py"));
+        let py = dir.join("venv-cb/bin/python");
+        if !py.exists() {
+            tracing::info!(
+                "sidecar de voz clonada no instalado (sin venv-cb) → se usa Piper/Kokoro"
+            );
+            return;
+        }
+        loop {
+            let up = reqwest::Client::new()
+                .get("http://127.0.0.1:8767/health")
+                .timeout(std::time::Duration::from_millis(800))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if !up {
+                tracing::info!("arrancando sidecar de voz clonada (Chatterbox)");
+                let mut cmd = tokio::process::Command::new(&py);
+                cmd.arg(&script).kill_on_drop(true);
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        let _ = child.wait().await;
+                        tracing::warn!("sidecar de voz clonada terminó; reintento en 5s");
+                    }
+                    Err(e) => tracing::warn!("no pude arrancar el sidecar de voz clonada: {e}"),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+
     // CORS restringido a orígenes LOCALES (web :3000 en dev, Tauri en producción):
     // antes era `Any`, lo que permitía a CUALQUIER web abierta en el navegador leer
     // las respuestas del puente (memoria, auditoría, credenciales). Ahora el navegador
@@ -627,6 +667,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/provider/toggle", post(provider_toggle))
         // Voz de AION (TTS local): proxy al sidecar Python (Kokoro/Chatterbox).
         .route("/api/tts", post(tts_speak))
+        // Clonación de voz: subir un clip de referencia + listar/eliminar voces clonadas.
+        .route("/api/tts/voices", get(tts_voices))
+        .route("/api/tts/clone", post(tts_clone))
+        .route("/api/tts/clone/remove", post(tts_clone_remove))
         // Catálogo REAL de herramientas del agente (para el dashboard, sin desincronizar).
         .route("/api/tools", get(tools_list))
         // Flujos de trabajo (estilo n8n): CRUD + ejecución.
@@ -6251,7 +6295,9 @@ async fn tts_speak(Json(req): Json<TtsReq>) -> axum::response::Response {
     match reqwest::Client::new()
         .post("http://127.0.0.1:8766/tts")
         .json(&body)
-        .timeout(std::time::Duration::from_secs(30))
+        // 300s: la voz clonada (Chatterbox) es lenta (~3× tiempo real); kokoro/piper
+        // responden al instante, así que un techo alto no les afecta.
+        .timeout(std::time::Duration::from_secs(300))
         .send()
         .await
     {
@@ -6283,6 +6329,113 @@ async fn tts_speak(Json(req): Json<TtsReq>) -> axum::response::Response {
         )
             .into_response(),
     }
+}
+
+/// Carpeta de clips de referencia para clonación de voz.
+fn voices_clone_dir() -> std::path::PathBuf {
+    crate::app_data_dir().join("tts").join("voices-clone")
+}
+
+/// Slug seguro para el nombre de una voz clonada (solo a-z0-9-_).
+fn voice_slug(name: &str) -> String {
+    let s: String = name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let s = s.trim_matches('-').to_string();
+    if s.is_empty() {
+        "voz".to_string()
+    } else {
+        s
+    }
+}
+
+/// Lista las voces clonadas disponibles (nombres de clip en voices-clone/).
+async fn tts_voices() -> impl axum::response::IntoResponse {
+    let mut cloned: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(voices_clone_dir()) {
+        for e in rd.flatten() {
+            let f = e.file_name().to_string_lossy().to_string();
+            let fl = f.to_lowercase();
+            if fl.ends_with(".norm.wav") {
+                continue;
+            }
+            if [".wav", ".mp3", ".flac", ".m4a", ".ogg"]
+                .iter()
+                .any(|x| fl.ends_with(x))
+            {
+                if let Some(stem) = std::path::Path::new(&f).file_stem() {
+                    cloned.push(stem.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    cloned.sort();
+    cloned.dedup();
+    Json(serde_json::json!({ "cloned": cloned }))
+}
+
+#[derive(Deserialize)]
+struct CloneReq {
+    name: String,
+    /// extensión del archivo original (wav/mp3/m4a…), para guardarlo bien.
+    #[serde(default)]
+    ext: String,
+    /// audio en base64 (la UI lo lee con FileReader).
+    content_b64: String,
+}
+
+/// Sube un clip de referencia y lo guarda como voz clonable. Devuelve el slug.
+async fn tts_clone(Json(req): Json<CloneReq>) -> impl axum::response::IntoResponse {
+    use base64::Engine;
+    let slug = voice_slug(&req.name);
+    let ext = {
+        let e = req.ext.trim().trim_start_matches('.').to_lowercase();
+        if ["wav", "mp3", "flac", "m4a", "ogg"].contains(&e.as_str()) {
+            e
+        } else {
+            "wav".into()
+        }
+    };
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(req.content_b64.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => {
+            return Json(
+                serde_json::json!({ "ok": false, "error": format!("base64 inválido: {e}") }),
+            )
+        }
+    };
+    if bytes.len() < 2000 {
+        return Json(serde_json::json!({ "ok": false, "error": "clip demasiado corto o vacío" }));
+    }
+    let dir = voices_clone_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    // Limpia variantes previas del mismo slug (otra extensión + normalizado caché).
+    for x in ["wav", "mp3", "flac", "m4a", "ogg", "norm.wav"] {
+        let _ = std::fs::remove_file(dir.join(format!("{slug}.{x}")));
+    }
+    let path = dir.join(format!("{slug}.{ext}"));
+    if let Err(e) = std::fs::write(&path, &bytes) {
+        return Json(serde_json::json!({ "ok": false, "error": format!("no pude guardar: {e}") }));
+    }
+    Json(serde_json::json!({ "ok": true, "voice": slug }))
+}
+
+#[derive(Deserialize)]
+struct CloneRemoveReq {
+    name: String,
+}
+
+/// Elimina una voz clonada (y su caché normalizada).
+async fn tts_clone_remove(Json(req): Json<CloneRemoveReq>) -> impl axum::response::IntoResponse {
+    let slug = voice_slug(&req.name);
+    let dir = voices_clone_dir();
+    for x in ["wav", "mp3", "flac", "m4a", "ogg", "norm.wav"] {
+        let _ = std::fs::remove_file(dir.join(format!("{slug}.{x}")));
+    }
+    Json(serde_json::json!({ "ok": true }))
 }
 
 async fn project_audio(Query(q): Query<AudioQuery>) -> axum::response::Response {

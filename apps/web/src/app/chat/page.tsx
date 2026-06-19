@@ -483,9 +483,15 @@ export default function ChatPage() {
     if (!last.answer || last.answer.startsWith("⚠️")) return;
     if (i === lastSpokenRef.current) return;
     lastSpokenRef.current = i;
-    speech.speak(`turn-${i}`, last.answer, lang, () => {
-      if (handsFree && !voiceMode && dictation.supported && !busy) dictation.start();
-    });
+    speech.speak(
+      `turn-${i}`,
+      last.answer,
+      lang,
+      () => {
+        if (handsFree && !voiceMode && dictation.supported && !busy) dictation.start();
+      },
+      { live: true },
+    );
     // speech/dictation son estables (useCallback); el disparador real es turns/busy.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turns, busy, handsFree, voiceMode, lang]);

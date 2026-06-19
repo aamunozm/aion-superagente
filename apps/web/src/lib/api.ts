@@ -66,6 +66,44 @@ export async function ttsSpeak(
   return res.blob();
 }
 
+/** Voces clonadas disponibles (clips de referencia subidos por el usuario). */
+export async function ttsVoices(): Promise<{ cloned: string[] }> {
+  try {
+    return await fetch(`${BRIDGE_URL}/api/tts/voices`).then((r) => r.json());
+  } catch {
+    return { cloned: [] };
+  }
+}
+
+/** Sube un clip de referencia y lo registra como voz clonable (Chatterbox). */
+export async function ttsCloneUpload(
+  name: string,
+  file: File,
+): Promise<{ ok: boolean; voice?: string; error?: string }> {
+  const b64 = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
+    r.onerror = () => reject(new Error("no pude leer el archivo"));
+    r.readAsDataURL(file);
+  });
+  const ext = (file.name.split(".").pop() || "wav").toLowerCase();
+  return fetch(`${BRIDGE_URL}/api/tts/clone`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, ext, content_b64: b64 }),
+  }).then((r) => r.json());
+}
+
+export async function ttsCloneRemove(name: string): Promise<{ ok: boolean }> {
+  return fetch(`${BRIDGE_URL}/api/tts/clone/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  })
+    .then((r) => r.json())
+    .catch(() => ({ ok: false }));
+}
+
 export type AuthResult = {
   id: string;
   email: string;

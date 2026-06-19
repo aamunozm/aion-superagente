@@ -191,7 +191,7 @@ export function useSpeech() {
   );
 
   const speak = useCallback(
-    (id: string, text: string, lang: Lang, onEnd?: () => void) => {
+    (id: string, text: string, lang: Lang, onEnd?: () => void, opts?: { live?: boolean }) => {
       const clean = stripMarkdownForSpeech(text);
       if (!clean) return;
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
@@ -210,9 +210,16 @@ export function useSpeech() {
       const ls = (k: string) =>
         typeof localStorage !== "undefined" ? localStorage.getItem(k) : null;
       // Por defecto en español: voz latina mexicana (Piper) — natural y con acento real.
-      const voiceName = ls("aion.voice.name") || (lang === "es" ? "es_MX-claude-high" : "");
-      const engine = ls("aion.voice.engine") || (lang === "es" ? "piper" : "");
+      let voiceName = ls("aion.voice.name") || (lang === "es" ? "es_MX-claude-high" : "");
+      let engine = ls("aion.voice.engine") || (lang === "es" ? "piper" : "");
       const speed = parseFloat(ls("aion.voice.speed") || "1") || 1;
+      // HÍBRIDO: la voz clonada (Chatterbox) es ~2.5× tiempo real → demasiado lenta
+      // para conversar EN VIVO. En modo voz / lectura automática usamos Piper mexicano
+      // (instantáneo); la clonada queda para el botón Escuchar (a demanda).
+      if (opts?.live && engine === "chatterbox") {
+        engine = "piper";
+        voiceName = "es_MX-claude-high";
+      }
       // Voz propia de AION (Piper latino / Kokoro / Chatterbox vía núcleo). Si el
       // sidecar no está o falla, cae a la voz del sistema sin romper la conversación.
       ttsSpeak(clean, lang, { voice: voiceName, engine, speed })

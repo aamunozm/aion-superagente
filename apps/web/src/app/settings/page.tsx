@@ -1,12 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
 import { LANGS, useT } from "@/lib/i18n";
 import { playTtsBlob } from "@/lib/voice";
 import {
   ttsSpeak,
+  ttsVoices,
+  ttsCloneUpload,
+  ttsCloneRemove,
   credentialsList,
   credentialRemove,
   credentialSet,
@@ -85,8 +88,10 @@ const DEEPSEEK_MODELS: { id: string; label: string; desc: string }[] = [
 
 // Voces locales disponibles, con su motor. Las latinas (Piper) son las más
 // naturales y con acento real → primeras y por defecto.
+// Voces de catálogo (Piper latino natural + Kokoro). Las clonadas se añaden
+// dinámicamente desde el backend (motor chatterbox).
 const VOICES: { id: string; engine: string; label: string }[] = [
-  { id: "es_MX-claude-high", engine: "piper", label: "Español (México) · natural ★" },
+  { id: "es_MX-claude-high", engine: "piper", label: "Español (México) · natural" },
   { id: "es_AR-daniela-high", engine: "piper", label: "Español (Argentina) · natural" },
   { id: "ef_dora", engine: "kokoro", label: "Español · Dora (Kokoro)" },
   { id: "em_alex", engine: "kokoro", label: "Español · Alex (Kokoro, m)" },
@@ -96,7 +101,6 @@ const VOICES: { id: string; engine: string; label: string }[] = [
   { id: "am_michael", engine: "kokoro", label: "English · Michael (m)" },
 ];
 const DEFAULT_VOICE_ID = "es_MX-claude-high";
-const engineOf = (id: string) => VOICES.find((v) => v.id === id)?.engine || "kokoro";
 
 /** Todo lo que Ariel puede cambiar de la voz de AION: motor, voz, velocidad + prueba. */
 function VoiceCard() {
@@ -106,21 +110,59 @@ function VoiceCard() {
   const [speed, setSpeed] = useState(1);
   const [testing, setTesting] = useState(false);
   const [testMsg, setTestMsg] = useState<string | null>(null);
+  // Voces clonadas (motor chatterbox), cargadas del backend.
+  const [cloned, setCloned] = useState<string[]>([]);
+  const [cloneName, setCloneName] = useState("");
+  const [cloning, setCloning] = useState(false);
+  const [cloneMsg, setCloneMsg] = useState<string | null>(null);
+  const cloneFile = useRef<HTMLInputElement>(null);
 
+  const refreshCloned = () => ttsVoices().then((r) => setCloned(r.cloned || [])).catch(() => {});
   useEffect(() => {
     if (typeof localStorage === "undefined") return;
     if (localStorage.getItem("aion.voice") === "system") setEngine("system");
     setVoice(localStorage.getItem("aion.voice.name") || DEFAULT_VOICE_ID);
     setSpeed(parseFloat(localStorage.getItem("aion.voice.speed") || "1") || 1);
+    refreshCloned();
   }, []);
 
   const save = (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* */ } };
-  // Al elegir voz, guarda también su motor (piper/kokoro) para que useSpeech lo use.
+  // El motor de una voz: clonada → chatterbox; si no, el del catálogo.
+  const voiceEngine = (id: string) =>
+    cloned.includes(id) ? "chatterbox" : VOICES.find((v) => v.id === id)?.engine || "kokoro";
   const chooseVoice = (id: string) => {
     setVoice(id);
     save("aion.voice.name", id);
-    save("aion.voice.engine", engineOf(id));
+    save("aion.voice.engine", voiceEngine(id));
   };
+
+  async function uploadClone(file: File) {
+    const name = cloneName.trim();
+    if (!name) { setCloneMsg("Ponle un nombre a la voz (p. ej. Chile)."); return; }
+    setCloning(true);
+    setCloneMsg(null);
+    try {
+      const r = await ttsCloneUpload(name, file);
+      if (r.ok && r.voice) {
+        await refreshCloned();
+        chooseVoice(r.voice);
+        setCloneName("");
+        setCloneMsg(`✅ Voz «${r.voice}» añadida. Pruébala con «Probar voz» (la 1ª vez tarda unos segundos).`);
+      } else {
+        setCloneMsg(`⚠️ ${r.error || "no pude añadir la voz"}`);
+      }
+    } catch (e) {
+      setCloneMsg(`⚠️ ${e instanceof Error ? e.message : "error"}`);
+    } finally {
+      setCloning(false);
+    }
+  }
+
+  async function removeClone(name: string) {
+    await ttsCloneRemove(name).catch(() => {});
+    if (voice === name) chooseVoice(DEFAULT_VOICE_ID);
+    await refreshCloned();
+  }
 
   async function test() {
     setTestMsg(null);
@@ -133,11 +175,15 @@ function VoiceCard() {
         window.speechSynthesis.cancel();
         window.speechSynthesis.speak(u);
       } else {
+        if (voiceEngine(voice) === "chatterbox") {
+          setTestMsg("Generando con tu voz clonada… (puede tardar unos segundos)");
+        }
         const blob = await ttsSpeak("Hola Ariel, soy AION. Así sueno con esta voz, más natural.", lang, {
           voice,
-          engine: engineOf(voice),
+          engine: voiceEngine(voice),
           speed,
         });
+        setTestMsg(null);
         await playTtsBlob(blob);
       }
     } catch (e) {
@@ -195,7 +241,16 @@ function VoiceCard() {
             onChange={(e) => chooseVoice(e.target.value)}
             style={{ background: "var(--surface-1)", color: "var(--text-1)" }}
           >
-            {VOICES.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
+            {cloned.length > 0 && (
+              <optgroup label="Tus voces clonadas">
+                {cloned.map((c) => (
+                  <option key={`c-${c}`} value={c}>{`${c} · clonada ★`}</option>
+                ))}
+              </optgroup>
+            )}
+            <optgroup label="Voces de catálogo">
+              {VOICES.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
+            </optgroup>
           </select>
         </div>
         <div>
@@ -221,6 +276,63 @@ function VoiceCard() {
           <Icon name="play" size={15} /> {testing ? "Sonando…" : "Probar voz"}
         </button>
         {testMsg && <span className="text-xs" style={{ color: "var(--text-3)" }}>{testMsg}</span>}
+      </div>
+
+      {/* ── Clonar voz ─────────────────────────────────────────────────── */}
+      <div className="mt-5 pt-4" style={{ borderTop: "1px solid var(--border)" }}>
+        <h3 className="text-sm font-semibold mb-1" style={{ color: "var(--text-1)" }}>
+          Clonar una voz
+        </h3>
+        <p className="text-xs mb-3" style={{ color: "var(--text-3)" }}>
+          Sube un clip limpio de <strong>10-20&nbsp;s</strong> (voz sola, sin música ni ruido) y AION
+          la clona conservando acento y timbre. La voz clonada es muy realista pero <strong>más
+          lenta</strong> (se usa al pulsar «Escuchar»; en el modo voz en vivo se usa la rápida).
+        </p>
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input
+            className="input"
+            placeholder="Nombre (p. ej. Chile)"
+            value={cloneName}
+            onChange={(e) => setCloneName(e.target.value)}
+          />
+          <input
+            ref={cloneFile}
+            type="file"
+            accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg"
+            className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadClone(f); e.target.value = ""; }}
+          />
+          <button
+            className="btn shrink-0 inline-flex items-center gap-1.5"
+            disabled={cloning || !cloneName.trim()}
+            onClick={() => cloneFile.current?.click()}
+          >
+            <Icon name="upload" size={15} /> {cloning ? "Clonando…" : "Subir clip y clonar"}
+          </button>
+        </div>
+        {cloneMsg && <p className="text-xs mt-2" style={{ color: "var(--text-2)" }}>{cloneMsg}</p>}
+        {cloned.length > 0 && (
+          <div className="flex flex-wrap gap-2 mt-3">
+            {cloned.map((c) => (
+              <span
+                key={c}
+                className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full"
+                style={{ background: "var(--surface-2)", color: "var(--text-2)" }}
+              >
+                {c}
+                <button
+                  onClick={() => removeClone(c)}
+                  className="opacity-60 hover:opacity-100"
+                  style={{ color: "#ef4444" }}
+                  title="Eliminar voz clonada"
+                  aria-label={`Eliminar ${c}`}
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
