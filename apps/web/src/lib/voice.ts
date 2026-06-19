@@ -58,6 +58,81 @@ function pickVoice(bcp47: string): SpeechSynthesisVoice | null {
   );
 }
 
+// ── Reproducción de la voz propia (audio del núcleo) ─────────────────────────
+// El webview BLOQUEA el autoplay de audio sin un gesto del usuario. Como AION
+// habla SOLO (lee respuestas, modo voz), desbloqueamos un AudioContext en el
+// primer gesto y reproducimos por él. Mientras no haya gesto (p. ej. el saludo
+// al abrir), la capa de voz cae a la voz del sistema sin romperse.
+let _audioCtx: AudioContext | null = null;
+let _source: AudioBufferSourceNode | null = null;
+
+function audioContext(): AudioContext | null {
+  if (typeof window === "undefined") return null;
+  const w = window as unknown as {
+    AudioContext?: typeof AudioContext;
+    webkitAudioContext?: typeof AudioContext;
+  };
+  const Ctor = w.AudioContext || w.webkitAudioContext;
+  if (!Ctor) return null;
+  if (!_audioCtx) _audioCtx = new Ctor();
+  if (_audioCtx.state === "suspended") void _audioCtx.resume().catch(() => {});
+  return _audioCtx;
+}
+
+if (typeof window !== "undefined") {
+  const unlock = () => {
+    audioContext();
+  };
+  window.addEventListener("pointerdown", unlock);
+  window.addEventListener("keydown", unlock);
+  window.addEventListener("touchstart", unlock);
+}
+
+function stopPlayback() {
+  if (_source) {
+    try { _source.stop(); } catch { /* */ }
+    try { _source.disconnect(); } catch { /* */ }
+    _source = null;
+  }
+}
+
+/**
+ * Reproduce un WAV (Blob) por el AudioContext desbloqueado. Resuelve al terminar;
+ * RECHAZA si no se puede (contexto suspendido/sin decodificar) → el llamador cae
+ * a la voz del sistema. `onEnded` se invoca también al detener (barge-in).
+ */
+export function playTtsBlob(blob: Blob, onEnded?: () => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const ctx = audioContext();
+    if (!ctx || ctx.state !== "running") {
+      reject(new Error("audio bloqueado (sin gesto)"));
+      return;
+    }
+    blob
+      .arrayBuffer()
+      .then((buf) =>
+        ctx.decodeAudioData(
+          buf,
+          (audioBuf) => {
+            stopPlayback();
+            const src = ctx.createBufferSource();
+            src.buffer = audioBuf;
+            src.connect(ctx.destination);
+            src.onended = () => {
+              if (_source === src) _source = null;
+              onEnded?.();
+              resolve();
+            };
+            _source = src;
+            src.start();
+          },
+          () => reject(new Error("no pude decodificar el audio")),
+        ),
+      )
+      .catch(() => reject(new Error("no pude leer el audio")));
+  });
+}
+
 /**
  * Hook de SÍNTESIS (TTS). Un único controlador por página: pásalo a cada burbuja.
  * `speakingId` identifica qué mensaje se está leyendo (para alternar play/stop).
@@ -79,21 +154,11 @@ export function useSpeech() {
     return () => window.speechSynthesis.removeEventListener?.("voiceschanged", warm);
   }, [supported]);
 
-  // Reproductor de la voz propia (audio del núcleo) + invalidador de órdenes.
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const urlRef = useRef<string | null>(null);
-  const reqRef = useRef(0); // cada speak/stop incrementa: invalida síntesis en vuelo (barge-in)
+  // Invalidador de órdenes en vuelo (barge-in / nueva orden / stop).
+  const reqRef = useRef(0);
 
   const cleanupAudio = useCallback(() => {
-    if (audioRef.current) {
-      try { audioRef.current.pause(); } catch { /* */ }
-      audioRef.current.src = "";
-      audioRef.current = null;
-    }
-    if (urlRef.current) {
-      URL.revokeObjectURL(urlRef.current);
-      urlRef.current = null;
-    }
+    stopPlayback();
   }, []);
 
   const stop = useCallback(() => {
@@ -152,19 +217,18 @@ export function useSpeech() {
       ttsSpeak(clean, lang, { voice: voiceName, speed })
         .then((blob) => {
           if (my !== reqRef.current) return; // superada por otra orden / stop / barge-in
-          const url = URL.createObjectURL(blob);
-          urlRef.current = url;
-          const a = new Audio(url);
-          audioRef.current = a;
-          a.onended = () => {
-            cleanupAudio();
+          return playTtsBlob(blob, () => {
             setSpeakingId((cur) => (cur === id ? null : cur));
             onEnd?.();
-          };
-          a.onerror = () => { if (my === reqRef.current) speakSystem(id, clean, lang, onEnd); };
-          a.play().catch(() => { if (my === reqRef.current) speakSystem(id, clean, lang, onEnd); });
+          }).catch(() => {
+            // Audio bloqueado (sin gesto) o sin decodificar → voz del sistema.
+            if (my === reqRef.current) speakSystem(id, clean, lang, onEnd);
+          });
         })
-        .catch(() => { if (my === reqRef.current) speakSystem(id, clean, lang, onEnd); });
+        .catch(() => {
+          // Sidecar caído / error de red → voz del sistema.
+          if (my === reqRef.current) speakSystem(id, clean, lang, onEnd);
+        });
     },
     [cleanupAudio, speakSystem],
   );

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
 import { LANGS, useT } from "@/lib/i18n";
+import { playTtsBlob } from "@/lib/voice";
 import {
   ttsSpeak,
   credentialsList,
@@ -124,9 +125,7 @@ function VoiceCard() {
         window.speechSynthesis.speak(u);
       } else {
         const blob = await ttsSpeak("Hola Ariel, soy AION. Así sueno con esta voz.", lang, { voice, speed });
-        const a = new Audio(URL.createObjectURL(blob));
-        a.onerror = () => setTestMsg("No pude reproducir (¿sidecar de voz arrancado?).");
-        await a.play();
+        await playTtsBlob(blob);
       }
     } catch {
       setTestMsg("La voz propia no respondió — se usará la del sistema como respaldo.");
