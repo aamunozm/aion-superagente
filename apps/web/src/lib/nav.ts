@@ -21,6 +21,7 @@ export const NAV_GROUPS: NavGroup[] = [
     titleKey: "group.intelligence",
     items: [
       { href: "/tools", key: "nav.tools", icon: "tools" },
+      { href: "/workflows", key: "nav.workflows", icon: "network" },
       { href: "/memory", key: "nav.memory", icon: "memory" },
       { href: "/mind", key: "nav.mind", icon: "sparkle" },
       { href: "/claude-code", key: "nav.claudeCode", icon: "code" },
