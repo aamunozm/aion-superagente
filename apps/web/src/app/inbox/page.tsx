@@ -69,41 +69,66 @@ export default function InboxPage() {
   return (
     <LightboxProvider>
       <AppShell title="Bandeja">
-        <div className="max-w-6xl mx-auto px-3 py-6">
-          <div className="flex items-start justify-between gap-4 mb-5">
-            <p className="text-[15px] max-w-xl" style={{ color: "var(--text-2)" }}>
-              Lo que AION te ha escrito por su cuenta —ideas, preguntas, hallazgos, avisos—.
-              Aquí ves de qué trata cada notificación, aunque ya la hayas oído en el chat.
-            </p>
-            <button
-              onClick={toggleSound}
-              className="shrink-0 inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full"
-              style={{
-                background: sound ? "var(--accent-subtle)" : "var(--surface-2)",
-                color: sound ? "var(--gold-deep)" : "var(--text-3)",
-              }}
-              title={sound ? "Sonido activado" : "Sonido silenciado"}
-            >
-              <Icon name={sound ? "bell" : "bellOff"} size={14} />
-              {sound ? "Sonido" : "Silencio"}
-            </button>
+        <div className="max-w-6xl mx-auto px-3 py-6 flex flex-col gap-6">
+          {/* ── CABECERA: qué es + nº sin leer + sonido (patrón de Mente) ── */}
+          <div
+            className="card flex flex-wrap items-center justify-between gap-4"
+            style={{ boxShadow: "var(--shadow-elevated)" }}
+          >
+            <div className="flex items-center gap-4 min-w-0">
+              <span
+                className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0"
+                style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}
+              >
+                <Icon name="bell" size={24} />
+              </span>
+              <div className="min-w-0">
+                <div className="font-display text-xl font-bold" style={{ color: "var(--text-1)" }}>
+                  Bandeja
+                </div>
+                <p className="text-sm mt-0.5 max-w-xl" style={{ color: "var(--text-3)" }}>
+                  Lo que AION te ha escrito por su cuenta —ideas, preguntas, hallazgos, avisos—.
+                  Ves de qué trata cada aviso, aunque ya lo hayas oído en el chat.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-5">
+              <div className="min-w-0 text-right">
+                <div className="font-display text-2xl font-bold leading-tight" style={{ color: "var(--text-1)" }}>
+                  {unread}
+                </div>
+                <div className="text-xs" style={{ color: "var(--text-2)" }}>
+                  {unread === 1 ? "sin leer" : unread === 0 ? "todo al día" : "sin leer"}
+                </div>
+              </div>
+              <button
+                onClick={toggleSound}
+                className="shrink-0 inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full"
+                style={{
+                  background: sound ? "var(--accent-subtle)" : "var(--surface-2)",
+                  color: sound ? "var(--gold-deep)" : "var(--text-3)",
+                }}
+                title={sound ? "Sonido activado" : "Sonido silenciado"}
+              >
+                <Icon name={sound ? "bell" : "bellOff"} size={14} />
+                {sound ? "Sonido" : "Silencio"}
+              </button>
+            </div>
           </div>
 
-          <div className="flex items-center gap-2 mb-4">
-            <Badge tone={unread > 0 ? "accent" : "muted"}>
-              {unread > 0 ? `${unread} sin leer` : "todo al día"}
-            </Badge>
-            {unread > 0 && (
+          {unread > 0 && (
+            <div className="flex items-center gap-2 -mt-2">
+              <Badge tone="accent">{`${unread} sin leer`}</Badge>
               <Button size="sm" variant="subtle" onClick={markAll}>
                 <span className="inline-flex items-center gap-1.5">
                   <Icon name="check" size={14} /> Marcar todo leído
                 </span>
               </Button>
-            )}
-          </div>
+            </div>
+          )}
 
           {loaded && msgs.length === 0 && (
-            <div className="card text-sm text-center" style={{ color: "var(--text-3)" }}>
+            <div className="card text-sm text-center" style={{ color: "var(--text-3)", boxShadow: "var(--shadow-elevated)" }}>
               <div className="flex justify-center mb-2">
                 <IconChip icon="bell" tint="gold" />
               </div>
