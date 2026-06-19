@@ -6,9 +6,11 @@ Motores intercambiables tras un mismo contrato HTTP:
   · chatterbox → expresivo + voz clonada (se añade en Fase 3; degrada a kokoro).
 
 Carga el modelo UNA vez y queda residente. Escucha SOLO en 127.0.0.1 (local).
+Devuelve **MP3** (el WKWebView de Tauri reproduce MP3 de forma fiable; WAV en
+<audio> da NotSupportedError). Si falta el codificador MP3, cae a WAV.
 Contrato:
   GET  /health                      → {"ok": true, "engines": [...]}
-  POST /tts {text, voice, lang, engine, speed} → audio/wav (16-bit PCM)
+  POST /tts {text, voice, lang, engine, speed} → audio/mpeg (o audio/wav)
 """
 import io
 import json
@@ -47,17 +49,39 @@ def synth_kokoro(text: str, voice: str, lang: str, speed: float):
     return np.asarray(samples, dtype=np.float32), sr
 
 
+def _pcm16(samples: np.ndarray) -> bytes:
+    return (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+
+
 def to_wav_bytes(samples: np.ndarray, sr: int) -> bytes:
-    """float32 [-1,1] → WAV PCM16 en memoria."""
-    clipped = np.clip(samples, -1.0, 1.0)
-    pcm16 = (clipped * 32767.0).astype("<i2")
+    """float32 [-1,1] → WAV PCM16 en memoria (fallback)."""
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(sr)
-        w.writeframes(pcm16.tobytes())
+        w.writeframes(_pcm16(samples))
     return buf.getvalue()
+
+
+def to_mp3_bytes(samples: np.ndarray, sr: int) -> bytes:
+    """float32 → MP3 (lameenc). Lanza si lameenc no está → do_POST cae a WAV."""
+    import lameenc
+
+    enc = lameenc.Encoder()
+    enc.set_bit_rate(128)
+    enc.set_in_sample_rate(int(sr))
+    enc.set_channels(1)
+    enc.set_quality(2)
+    return enc.encode(_pcm16(samples)) + enc.flush()
+
+
+def encode(samples: np.ndarray, sr: int):
+    """Devuelve (bytes, content_type). MP3 si se puede; si no, WAV."""
+    try:
+        return to_mp3_bytes(samples, sr), "audio/mpeg"
+    except Exception:  # noqa: BLE001
+        return to_wav_bytes(samples, sr), "audio/wav"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -106,14 +130,14 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("texto vacío")
             # Chatterbox aún no disponible → cae a kokoro (honesto, sin romper).
             samples, sr = synth_kokoro(text, voice, lang, speed)
-            wav = to_wav_bytes(samples, sr)
+            audio, ctype = encode(samples, sr)
             self.send_response(200)
-            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Type", ctype)
             self.send_header("X-AION-TTS-Engine", engine if engine == "kokoro" else f"{engine}->kokoro")
             self._cors()
-            self.send_header("Content-Length", str(len(wav)))
+            self.send_header("Content-Length", str(len(audio)))
             self.end_headers()
-            self.wfile.write(wav)
+            self.wfile.write(audio)
         except Exception as e:  # noqa: BLE001
             body = json.dumps({"ok": False, "error": str(e)}).encode()
             self.send_response(500)

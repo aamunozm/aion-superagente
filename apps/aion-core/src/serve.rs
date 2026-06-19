@@ -6255,17 +6255,27 @@ async fn tts_speak(Json(req): Json<TtsReq>) -> axum::response::Response {
         .send()
         .await
     {
-        Ok(r) if r.status().is_success() => match r.bytes().await {
-            Ok(bytes) => (
-                [
-                    (header::CONTENT_TYPE, "audio/wav"),
-                    (header::CACHE_CONTROL, "no-store"),
-                ],
-                bytes,
-            )
-                .into_response(),
-            Err(_) => (StatusCode::BAD_GATEWAY, "tts: no pude leer el audio").into_response(),
-        },
+        Ok(r) if r.status().is_success() => {
+            // Reenvía el formato real que produjo el sidecar (MP3 normalmente; WAV si
+            // no hay codificador). WKWebView reproduce MP3 fiable; WAV en <audio> falla.
+            let ct = r
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("audio/mpeg")
+                .to_string();
+            match r.bytes().await {
+                Ok(bytes) => (
+                    [
+                        (header::CONTENT_TYPE, ct),
+                        (header::CACHE_CONTROL, "no-store".to_string()),
+                    ],
+                    bytes,
+                )
+                    .into_response(),
+                Err(_) => (StatusCode::BAD_GATEWAY, "tts: no pude leer el audio").into_response(),
+            }
+        }
         Ok(_) => (StatusCode::BAD_GATEWAY, "tts: el motor de voz falló").into_response(),
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
