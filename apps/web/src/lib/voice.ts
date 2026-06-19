@@ -116,15 +116,21 @@ export function playTtsBlob(blob: Blob, onEnded?: () => void): Promise<void> {
       reject(new Error("sin elemento de audio"));
       return;
     }
-    const url = URL.createObjectURL(blob);
-    const done = () => { try { URL.revokeObjectURL(url); } catch { /* */ } };
-    a.onended = () => { done(); onEnded?.(); resolve(); };
-    a.onerror = () => { done(); reject(new Error(`medio (código ${a.error?.code ?? "?"})`)); };
-    a.src = url;
-    const p = a.play();
-    if (p && typeof p.catch === "function") {
-      p.catch((e: unknown) => { done(); reject(new Error(`play: ${(e as Error)?.name || String(e)}`)); });
-    }
+    // CLAVE WKWebView: un blob: URL no lleva MIME → el <audio> no sabe el formato y
+    // da NotSupportedError. Un data: URL lleva el MIME explícito (audio/mpeg) y SÍ
+    // se reproduce. Leemos el blob como data URL.
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("no pude leer el audio"));
+    reader.onload = () => {
+      a.onended = () => { onEnded?.(); resolve(); };
+      a.onerror = () => reject(new Error(`medio (código ${a.error?.code ?? "?"})`));
+      a.src = reader.result as string;
+      const p = a.play();
+      if (p && typeof p.catch === "function") {
+        p.catch((e: unknown) => reject(new Error(`play: ${(e as Error)?.name || String(e)}`)));
+      }
+    };
+    reader.readAsDataURL(blob);
   });
 }
 
