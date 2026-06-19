@@ -353,6 +353,54 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // ⏰ PLANIFICADOR DE FLUJOS (tipo n8n, autónomo): cada minuto revisa los flujos con
+    // disparador por intervalo y ejecuta los que han vencido, SIN tocar el bucle de vida
+    // (el alma del agente). Gobernanza fail-closed: allow_sensitive=false, así un paso
+    // sensible pausa el flujo pidiendo tu OK en vez de actuar solo. El resultado entra en
+    // la Bandeja para que lo veas. Desactivable con AION_WORKFLOWS=0.
+    tokio::spawn(async {
+        if std::env::var("AION_WORKFLOWS").as_deref() == Ok("0") {
+            return;
+        }
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let now = crate::workflow::now_ms();
+            let mut list = crate::workflow::load();
+            let due: Vec<usize> = list
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| crate::workflow::is_due(w, now))
+                .map(|(i, _)| i)
+                .collect();
+            if due.is_empty() {
+                continue;
+            }
+            let tools = workflow_registry();
+            for i in due {
+                let wf = list[i].clone();
+                let run = crate::workflow::run(&wf, &tools, false).await;
+                list[i].last_run_ms = Some(crate::workflow::now_ms());
+                let summary = if run.stopped_for_approval {
+                    format!("El flujo «{}» se pausó: un paso necesita tu OK.", wf.name)
+                } else if run.ok {
+                    let last = run
+                        .steps
+                        .last()
+                        .map(|s| s.output.chars().take(200).collect::<String>())
+                        .unwrap_or_default();
+                    format!("Ejecuté tu flujo «{}». Resultado: {}", wf.name, last)
+                } else {
+                    format!("El flujo «{}» falló en uno de sus pasos.", wf.name)
+                };
+                if let Ok(ibx) = crate::inbox::Inbox::open(crate::inbox_path()) {
+                    let _ = ibx.push("idea", &summary);
+                }
+                tracing::info!(workflow = %wf.name, ok = run.ok, "flujo autónomo ejecutado");
+            }
+            let _ = crate::workflow::save(&list);
+        }
+    });
+
     // 🧭 LAZO DE REFLEXIÓN (etapa «Experience» de la memoria agéntica): cada
     // AION_REFLECT_MINS (def. 45) y SOLO con Ariel inactivo, AION mira VARIAS vivencias
     // a la vez y destila de ellas UNA heurística general reutilizable («cuando X, conviene

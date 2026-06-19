@@ -49,10 +49,39 @@ pub struct Workflow {
     pub steps: Vec<WorkflowStep>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Última ejecución (ms epoch). Lo usa el planificador para no repetir antes de tiempo.
+    #[serde(default)]
+    pub last_run_ms: Option<u64>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Milisegundos epoch ahora (helper sin pánico).
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// ¿Toca ejecutar este flujo por su disparador de intervalo? Solo aplica a `Interval`;
+/// `Manual`/`Event` nunca los dispara el planificador.
+pub fn is_due(wf: &Workflow, now: u64) -> bool {
+    if !wf.enabled {
+        return false;
+    }
+    match &wf.trigger {
+        Trigger::Interval { minutes } => {
+            let period = minutes.saturating_mul(60_000).max(60_000);
+            match wf.last_run_ms {
+                None => true, // nunca corrió → toca ya
+                Some(last) => now.saturating_sub(last) >= period,
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Resultado de ejecutar un paso.
@@ -205,6 +234,7 @@ mod tests {
             description: String::new(),
             trigger: Trigger::Manual,
             enabled: true,
+            last_run_ms: None,
             steps: vec![
                 WorkflowStep {
                     tool: "calculator".into(),
@@ -233,6 +263,7 @@ mod tests {
             description: String::new(),
             trigger: Trigger::Manual,
             enabled: true,
+            last_run_ms: None,
             steps: vec![WorkflowStep {
                 tool: "no_existe".into(),
                 input: "".into(),
@@ -244,6 +275,37 @@ mod tests {
     }
 
     #[test]
+    fn interval_due_logic() {
+        let mut wf = Workflow {
+            id: "i".into(),
+            name: "I".into(),
+            description: String::new(),
+            trigger: Trigger::Interval { minutes: 60 },
+            enabled: true,
+            last_run_ms: None,
+            steps: vec![],
+        };
+        // Nunca corrió → toca.
+        assert!(is_due(&wf, 10_000_000));
+        // Corrió hace 30 min → aún no (periodo 60 min).
+        wf.last_run_ms = Some(10_000_000 - 30 * 60_000);
+        assert!(!is_due(&wf, 10_000_000));
+        // Corrió hace 90 min → toca.
+        wf.last_run_ms = Some(10_000_000 - 90 * 60_000);
+        assert!(is_due(&wf, 10_000_000));
+        // Manual → el planificador no lo dispara (aunque esté vencido y activo).
+        let manual = Workflow {
+            trigger: Trigger::Manual,
+            last_run_ms: None,
+            ..wf.clone()
+        };
+        assert!(!is_due(&manual, 10_000_000));
+        // Desactivado → nunca.
+        wf.enabled = false;
+        assert!(!is_due(&wf, 10_000_000));
+    }
+
+    #[test]
     fn upsert_and_remove() {
         let wf = Workflow {
             id: "a".into(),
@@ -251,6 +313,7 @@ mod tests {
             description: String::new(),
             trigger: Trigger::Manual,
             enabled: true,
+            last_run_ms: None,
             steps: vec![],
         };
         let list = upsert(Vec::new(), wf.clone());

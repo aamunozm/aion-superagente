@@ -730,6 +730,7 @@ export type Workflow = {
   trigger: WorkflowTrigger;
   steps: WorkflowStep[];
   enabled: boolean;
+  last_run_ms?: number | null;
 };
 export type StepResult = {
   tool: string;
