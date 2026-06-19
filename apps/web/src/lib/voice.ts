@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Lang } from "@/lib/i18n";
+import { ttsSpeak } from "@/lib/api";
 
 // ── Markdown → texto hablable: que la voz no lea asteriscos, almohadillas ni URLs ──
 export function stripMarkdownForSpeech(md: string): string {
@@ -69,7 +70,7 @@ export function useSpeech() {
   const [supported, setSupported] = useState(false);
   useEffect(() => setSupported(speechSupported()), []);
 
-  // Precarga la lista de voces (en Chrome llega async vía `voiceschanged`).
+  // Precarga la lista de voces del sistema (fallback; en Chrome llega async).
   useEffect(() => {
     if (!supported) return;
     window.speechSynthesis.getVoices();
@@ -78,16 +79,36 @@ export function useSpeech() {
     return () => window.speechSynthesis.removeEventListener?.("voiceschanged", warm);
   }, [supported]);
 
-  const stop = useCallback(() => {
-    if (supported) window.speechSynthesis.cancel();
-    setSpeakingId(null);
-  }, [supported]);
+  // Reproductor de la voz propia (audio del núcleo) + invalidador de órdenes.
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const urlRef = useRef<string | null>(null);
+  const reqRef = useRef(0); // cada speak/stop incrementa: invalida síntesis en vuelo (barge-in)
 
-  const speak = useCallback(
-    (id: string, text: string, lang: Lang, onEnd?: () => void) => {
-      if (!supported) return;
-      const clean = stripMarkdownForSpeech(text);
-      if (!clean) return;
+  const cleanupAudio = useCallback(() => {
+    if (audioRef.current) {
+      try { audioRef.current.pause(); } catch { /* */ }
+      audioRef.current.src = "";
+      audioRef.current = null;
+    }
+    if (urlRef.current) {
+      URL.revokeObjectURL(urlRef.current);
+      urlRef.current = null;
+    }
+  }, []);
+
+  const stop = useCallback(() => {
+    reqRef.current++; // cualquier voz en preparación queda invalidada
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    cleanupAudio();
+    setSpeakingId(null);
+  }, [cleanupAudio]);
+
+  // Voz del SISTEMA (fallback): Web Speech API.
+  const speakSystem = useCallback(
+    (id: string, clean: string, lang: Lang, onEnd?: () => void) => {
+      if (!speechSupported()) { onEnd?.(); return; }
       window.speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(clean);
       u.lang = ttsLang(lang);
@@ -95,19 +116,62 @@ export function useSpeech() {
       if (v) u.voice = v;
       u.rate = 1.02;
       u.pitch = 1.0;
-      u.onend = () => {
-        setSpeakingId((cur) => (cur === id ? null : cur));
-        onEnd?.();
-      };
+      u.onend = () => { setSpeakingId((cur) => (cur === id ? null : cur)); onEnd?.(); };
       u.onerror = () => setSpeakingId((cur) => (cur === id ? null : cur));
       setSpeakingId(id);
       window.speechSynthesis.speak(u);
     },
-    [supported],
+    [],
+  );
+
+  const speak = useCallback(
+    (id: string, text: string, lang: Lang, onEnd?: () => void) => {
+      const clean = stripMarkdownForSpeech(text);
+      if (!clean) return;
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+      cleanupAudio();
+      const my = ++reqRef.current;
+      const pref =
+        typeof localStorage !== "undefined" ? localStorage.getItem("aion.voice") || "auto" : "auto";
+      setSpeakingId(id);
+      if (pref === "system") {
+        speakSystem(id, clean, lang, onEnd);
+        return;
+      }
+      // Voz propia de AION (Kokoro/Chatterbox vía núcleo). Si el sidecar no está o
+      // falla, cae a la voz del sistema sin romper la conversación.
+      ttsSpeak(clean, lang)
+        .then((blob) => {
+          if (my !== reqRef.current) return; // superada por otra orden / stop / barge-in
+          const url = URL.createObjectURL(blob);
+          urlRef.current = url;
+          const a = new Audio(url);
+          audioRef.current = a;
+          a.onended = () => {
+            cleanupAudio();
+            setSpeakingId((cur) => (cur === id ? null : cur));
+            onEnd?.();
+          };
+          a.onerror = () => { if (my === reqRef.current) speakSystem(id, clean, lang, onEnd); };
+          a.play().catch(() => { if (my === reqRef.current) speakSystem(id, clean, lang, onEnd); });
+        })
+        .catch(() => { if (my === reqRef.current) speakSystem(id, clean, lang, onEnd); });
+    },
+    [cleanupAudio, speakSystem],
   );
 
   // Corta cualquier lectura al desmontar (no dejar a AION hablando solo).
-  useEffect(() => () => { if (supported) window.speechSynthesis.cancel(); }, [supported]);
+  useEffect(
+    () => () => {
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+      cleanupAudio();
+    },
+    [cleanupAudio],
+  );
 
   return { speak, stop, speakingId, supported };
 }

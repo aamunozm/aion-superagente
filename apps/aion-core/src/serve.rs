@@ -566,6 +566,45 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // 🔊 SIDECAR DE VOZ (TTS): motor de voz local (Kokoro rápido; Chatterbox + voz
+    // clonada en roadmap) en un proceso Python aislado. Escribe el script desde el
+    // binario (así las mejoras viajan con la app) y lo arranca si el venv existe
+    // (se crea una vez con `uv`). Sin venv → la UI cae a la voz del navegador.
+    tokio::spawn(async {
+        let dir = crate::app_data_dir().join("tts");
+        let _ = std::fs::create_dir_all(&dir);
+        let script = dir.join("tts_server.py");
+        let _ = std::fs::write(&script, include_str!("../../tts-sidecar/tts_server.py"));
+        let py = dir.join("venv/bin/python");
+        if !py.exists() {
+            tracing::info!("sidecar TTS no instalado (sin venv) → voz del sistema como fallback");
+            return;
+        }
+        loop {
+            // ¿ya responde un sidecar? (evita duplicados tras reinicios en caliente)
+            let up = reqwest::Client::new()
+                .get("http://127.0.0.1:8766/health")
+                .timeout(std::time::Duration::from_millis(800))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if !up {
+                tracing::info!("arrancando sidecar TTS (Kokoro)");
+                let mut cmd = tokio::process::Command::new(&py);
+                cmd.arg(&script).kill_on_drop(true);
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        let _ = child.wait().await;
+                        tracing::warn!("sidecar TTS terminó; reintento en 5s");
+                    }
+                    Err(e) => tracing::warn!("no pude arrancar el sidecar TTS: {e}"),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+
     // CORS restringido a orígenes LOCALES (web :3000 en dev, Tauri en producción):
     // antes era `Any`, lo que permitía a CUALQUIER web abierta en el navegador leer
     // las respuestas del puente (memoria, auditoría, credenciales). Ahora el navegador
@@ -586,6 +625,8 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/models/remove", post(models_remove))
         .route("/api/provider", get(provider_get).post(provider_set))
         .route("/api/provider/toggle", post(provider_toggle))
+        // Voz de AION (TTS local): proxy al sidecar Python (Kokoro/Chatterbox).
+        .route("/api/tts", post(tts_speak))
         // Catálogo REAL de herramientas del agente (para el dashboard, sin desincronizar).
         .route("/api/tools", get(tools_list))
         // Flujos de trabajo (estilo n8n): CRUD + ejecución.
@@ -6180,6 +6221,60 @@ struct AudioQuery {
     file: String,
 }
 /// Sirve el fichero de audio de una salida de Studio (audio overview).
+/// Petición de voz: el texto a hablar + preferencias (motor, voz, idioma, ritmo).
+#[derive(Deserialize)]
+struct TtsReq {
+    text: String,
+    #[serde(default)]
+    voice: String,
+    #[serde(default)]
+    lang: String,
+    #[serde(default)]
+    engine: String,
+    #[serde(default)]
+    speed: Option<f32>,
+}
+
+/// Sintetiza la voz de AION delegando en el sidecar local (127.0.0.1:8766).
+/// Devuelve WAV. Si el sidecar no está, responde 503 y la UI usa la voz del sistema.
+async fn tts_speak(Json(req): Json<TtsReq>) -> axum::response::Response {
+    if req.text.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "texto vacío").into_response();
+    }
+    let body = serde_json::json!({
+        "text": req.text,
+        "voice": req.voice,
+        "lang": if req.lang.is_empty() { "es" } else { &req.lang },
+        "engine": if req.engine.is_empty() { "kokoro" } else { &req.engine },
+        "speed": req.speed.unwrap_or(1.0),
+    });
+    match reqwest::Client::new()
+        .post("http://127.0.0.1:8766/tts")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => match r.bytes().await {
+            Ok(bytes) => (
+                [
+                    (header::CONTENT_TYPE, "audio/wav"),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
+                bytes,
+            )
+                .into_response(),
+            Err(_) => (StatusCode::BAD_GATEWAY, "tts: no pude leer el audio").into_response(),
+        },
+        Ok(_) => (StatusCode::BAD_GATEWAY, "tts: el motor de voz falló").into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "tts: sidecar no disponible",
+        )
+            .into_response(),
+    }
+}
+
 async fn project_audio(Query(q): Query<AudioQuery>) -> axum::response::Response {
     let path = crate::projects::audio_path(&q.project_id, &q.file);
     match std::fs::read(&path) {

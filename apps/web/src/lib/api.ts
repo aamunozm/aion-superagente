@@ -41,6 +41,31 @@ if (typeof window !== "undefined" && !(window as unknown as { __aionPatched?: bo
   };
 }
 
+/**
+ * Voz de AION (TTS local). Pide el audio al núcleo (que delega en el sidecar
+ * Kokoro/Chatterbox) y devuelve el WAV como Blob. Lanza si el sidecar no está
+ * (la capa de voz cae entonces a la voz del sistema). El Bearer se inyecta solo.
+ */
+export async function ttsSpeak(
+  text: string,
+  lang: string,
+  opts?: { voice?: string; engine?: string; speed?: number },
+): Promise<Blob> {
+  const res = await fetch(`${BRIDGE_URL}/api/tts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text,
+      lang,
+      voice: opts?.voice ?? "",
+      engine: opts?.engine ?? "",
+      speed: opts?.speed ?? 1.0,
+    }),
+  });
+  if (!res.ok) throw new Error(`tts ${res.status}`);
+  return res.blob();
+}
+
 export type AuthResult = {
   id: string;
   email: string;

@@ -81,6 +81,54 @@ const DEEPSEEK_MODELS: { id: string; label: string; desc: string }[] = [
   { id: "__custom__",         label: "Otro (escribir ID)",   desc: "" },
 ];
 
+/** Selector de la voz de AION: propia (Kokoro/Chatterbox, vía núcleo) o del sistema. */
+function VoiceCard() {
+  const [pref, setPref] = useState<"auto" | "system">("auto");
+  useEffect(() => {
+    const v = typeof localStorage !== "undefined" ? localStorage.getItem("aion.voice") : null;
+    if (v === "system") setPref("system");
+  }, []);
+  function choose(p: "auto" | "system") {
+    setPref(p);
+    try { localStorage.setItem("aion.voice", p); } catch { /* */ }
+  }
+  const OPTS: { key: "auto" | "system"; label: string; note: string }[] = [
+    { key: "auto", label: "Voz propia de AION", note: "Natural y local (Kokoro). Cae a la del sistema si no está lista." },
+    { key: "system", label: "Voz del sistema", note: "La voz integrada del navegador/macOS. Instantánea." },
+  ];
+  return (
+    <div className="card">
+      <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
+        <Icon name="volume" size={16} /> Voz
+      </h2>
+      <p className="text-sm mb-3" style={{ color: "var(--text-3)" }}>
+        Cómo suena AION cuando lee sus respuestas y en el modo voz.
+      </p>
+      <div className="flex flex-col sm:flex-row gap-2">
+        {OPTS.map((o) => {
+          const active = pref === o.key;
+          return (
+            <button
+              key={o.key}
+              onClick={() => choose(o.key)}
+              className="flex-1 text-left px-4 py-3 rounded-xl transition-all"
+              style={{
+                background: active ? "var(--accent-subtle)" : "var(--surface-2)",
+                border: `1px solid ${active ? "var(--accent)" : "transparent"}`,
+              }}
+            >
+              <div className="text-sm font-semibold" style={{ color: active ? "var(--gold-deep)" : "var(--text-1)" }}>
+                {o.label}
+              </div>
+              <div className="text-xs mt-0.5" style={{ color: "var(--text-3)" }}>{o.note}</div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const { t, lang, setLang } = useT();
   const [email, setEmail] = useState<string | null>(null);
@@ -448,6 +496,8 @@ export default function SettingsPage() {
             {t("settings.localNote")}
           </p>
         </div>
+
+        <VoiceCard />
 
         {/* ── Idioma (ES / IT / EN) ── */}
         <div className="card">
