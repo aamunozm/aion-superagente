@@ -649,6 +649,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/projects", get(projects_list).post(projects_create))
         .route("/api/projects/remove", post(projects_remove))
         .route("/api/project/get", post(project_get))
+        .route("/api/project/update", post(project_update))
         .route("/api/project/source/add", post(project_source_add))
         .route("/api/project/source/upload", post(project_source_upload))
         .route("/api/project/source/toggle", post(project_source_toggle))
@@ -5781,6 +5782,24 @@ struct ProjId {
 async fn projects_remove(Json(b): Json<ProjId>) -> Json<serde_json::Value> {
     crate::projects::remove(&b.id);
     Json(serde_json::json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+struct ProjUpdate {
+    id: String,
+    name: String,
+    #[serde(default)]
+    desc: String,
+}
+/// Edita el nombre/descripción de un proyecto.
+async fn project_update(Json(b): Json<ProjUpdate>) -> Json<serde_json::Value> {
+    if b.name.trim().is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "el nombre no puede estar vacío" }));
+    }
+    match crate::projects::update(&b.id, &b.name, &b.desc) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "error": "proyecto no encontrado" })),
+    }
 }
 
 /// Carga TODO el workspace de un proyecto en una sola llamada.

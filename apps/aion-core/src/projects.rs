@@ -135,6 +135,22 @@ fn touch(id: &str) {
     }
 }
 
+/// Edita el nombre y/o la descripción de un proyecto. Devuelve el proyecto actualizado
+/// (o None si el id no existe). Un nombre vacío se ignora (se conserva el anterior).
+pub fn update(id: &str, name: &str, desc: &str) -> Option<Project> {
+    let mut all = list();
+    let found = all.iter_mut().find(|p| p.id == id)?;
+    let name = name.trim();
+    if !name.is_empty() {
+        found.name = name.to_string();
+    }
+    found.desc = desc.trim().to_string();
+    found.updated = now();
+    let updated = found.clone();
+    write_vec(&index_path(), &all);
+    Some(updated)
+}
+
 // ── Fuentes ─────────────────────────────────────────────────────────────────
 
 pub fn sources(pid: &str) -> Vec<Source> {

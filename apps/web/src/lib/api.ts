@@ -343,6 +343,8 @@ export async function projectsList(): Promise<Project[]> {
 export const projectCreate = (name: string, desc: string, icon: string) =>
   jpost<{ ok: boolean; project?: Project; error?: string }>("/api/projects", { name, desc, icon });
 export const projectRemove = (id: string) => jpost<{ ok: boolean }>("/api/projects/remove", { id });
+export const projectUpdate = (id: string, name: string, desc: string) =>
+  jpost<{ ok: boolean; project?: Project; error?: string }>("/api/project/update", { id, name, desc });
 export const projectGet = (id: string) =>
   jpost<{ ok: boolean; project?: Project; sources?: ProjectSource[]; outputs?: ProjectOutput[]; error?: string }>(
     "/api/project/get",
