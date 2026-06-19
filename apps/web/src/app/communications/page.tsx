@@ -104,7 +104,7 @@ export default function CommunicationsPage() {
 
   return (
     <AppShell title="Comunicaciones">
-      <div className="max-w-6xl mx-auto px-4 py-6">
+      <div className="max-w-6xl mx-auto px-3 py-6">
         <p className="text-[15px] mb-6 max-w-2xl" style={{ color: "var(--text-2)" }}>
           Decide <strong>con quién</strong> y <strong>por qué canal</strong> puede comunicarse AION
           (Mensajes, WhatsApp), y deja que mire tu <strong>agenda</strong> y tus{" "}

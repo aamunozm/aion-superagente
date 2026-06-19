@@ -69,7 +69,7 @@ export default function InboxPage() {
   return (
     <LightboxProvider>
       <AppShell title="Bandeja">
-        <div className="max-w-6xl mx-auto px-4 py-6">
+        <div className="max-w-6xl mx-auto px-3 py-6">
           <div className="flex items-start justify-between gap-4 mb-5">
             <p className="text-[15px] max-w-xl" style={{ color: "var(--text-2)" }}>
               Lo que AION te ha escrito por su cuenta —ideas, preguntas, hallazgos, avisos—.
