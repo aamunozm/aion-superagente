@@ -4,5 +4,9 @@
 <dict>
     <key>NSCameraUsageDescription</key>
     <string>AION usa la cámara, solo cuando se lo pides, para reconocer quién está delante (Ariel y las personas que registres). Las huellas faciales se guardan solo en este Mac y nunca salen.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>AION usa el micrófono, solo cuando activas el modo voz, para oír lo que le dices. El audio se procesa en este Mac y nunca sale.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>AION transcribe lo que le dictas en el modo voz usando el reconocimiento de voz de macOS, para poder responderte. La transcripción ocurre en este Mac.</string>
 </dict>
 </plist>
