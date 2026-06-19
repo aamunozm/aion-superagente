@@ -59,77 +59,70 @@ function pickVoice(bcp47: string): SpeechSynthesisVoice | null {
 }
 
 // ── Reproducción de la voz propia (audio del núcleo) ─────────────────────────
-// El webview BLOQUEA el autoplay de audio sin un gesto del usuario. Como AION
-// habla SOLO (lee respuestas, modo voz), desbloqueamos un AudioContext en el
-// primer gesto y reproducimos por él. Mientras no haya gesto (p. ej. el saludo
-// al abrir), la capa de voz cae a la voz del sistema sin romperse.
-let _audioCtx: AudioContext | null = null;
-let _source: AudioBufferSourceNode | null = null;
+// El WKWebView de Tauri deja la Web Audio API EN SILENCIO y bloquea el autoplay
+// sin gesto. Solución robusta: un <audio> HTML PERSISTENTE que se "desbloquea"
+// reproduciendo un silencio en el PRIMER gesto del usuario; después podemos
+// reproducir el WAV del núcleo de forma programática. Sin gesto aún (el saludo al
+// abrir) o si falla, la capa de voz cae a la voz del sistema sin romperse.
+const SILENT_WAV =
+  "data:audio/wav;base64,UklGRsQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+let _audioEl: HTMLAudioElement | null = null;
+let _unlocked = false;
 
-function audioContext(): AudioContext | null {
+function audioEl(): HTMLAudioElement | null {
   if (typeof window === "undefined") return null;
-  const w = window as unknown as {
-    AudioContext?: typeof AudioContext;
-    webkitAudioContext?: typeof AudioContext;
-  };
-  const Ctor = w.AudioContext || w.webkitAudioContext;
-  if (!Ctor) return null;
-  if (!_audioCtx) _audioCtx = new Ctor();
-  if (_audioCtx.state === "suspended") void _audioCtx.resume().catch(() => {});
-  return _audioCtx;
+  if (!_audioEl) {
+    _audioEl = new Audio();
+    _audioEl.preload = "auto";
+  }
+  return _audioEl;
+}
+
+function unlockAudio() {
+  const a = audioEl();
+  if (!a || _unlocked) return;
+  a.src = SILENT_WAV;
+  a.play()
+    .then(() => {
+      _unlocked = true;
+      try { a.pause(); a.currentTime = 0; } catch { /* */ }
+    })
+    .catch(() => { /* aún sin permiso; reintenta en el siguiente gesto */ });
 }
 
 if (typeof window !== "undefined") {
-  const unlock = () => {
-    audioContext();
-  };
-  window.addEventListener("pointerdown", unlock);
-  window.addEventListener("keydown", unlock);
-  window.addEventListener("touchstart", unlock);
+  ["pointerdown", "keydown", "touchstart"].forEach((ev) =>
+    window.addEventListener(ev, unlockAudio),
+  );
 }
 
 function stopPlayback() {
-  if (_source) {
-    try { _source.stop(); } catch { /* */ }
-    try { _source.disconnect(); } catch { /* */ }
-    _source = null;
+  if (_audioEl) {
+    try { _audioEl.pause(); } catch { /* */ }
   }
 }
 
 /**
- * Reproduce un WAV (Blob) por el AudioContext desbloqueado. Resuelve al terminar;
- * RECHAZA si no se puede (contexto suspendido/sin decodificar) → el llamador cae
- * a la voz del sistema. `onEnded` se invoca también al detener (barge-in).
+ * Reproduce un WAV (Blob) por el <audio> persistente desbloqueado. Resuelve al
+ * terminar; RECHAZA con el motivo si no puede (autoplay bloqueado / error de
+ * medio) → el llamador cae a la voz del sistema.
  */
 export function playTtsBlob(blob: Blob, onEnded?: () => void): Promise<void> {
   return new Promise((resolve, reject) => {
-    const ctx = audioContext();
-    if (!ctx || ctx.state !== "running") {
-      reject(new Error("audio bloqueado (sin gesto)"));
+    const a = audioEl();
+    if (!a) {
+      reject(new Error("sin elemento de audio"));
       return;
     }
-    blob
-      .arrayBuffer()
-      .then((buf) =>
-        ctx.decodeAudioData(
-          buf,
-          (audioBuf) => {
-            stopPlayback();
-            const src = ctx.createBufferSource();
-            src.buffer = audioBuf;
-            src.connect(ctx.destination);
-            src.onended = () => {
-              if (_source === src) _source = null;
-              onEnded?.();
-              resolve();
-            };
-            _source = src;
-            src.start();
-          },
-          () => reject(new Error("no pude decodificar el audio")),
-        ),
-      )
-      .catch(() => reject(new Error("no pude leer el audio")));
+    const url = URL.createObjectURL(blob);
+    const done = () => { try { URL.revokeObjectURL(url); } catch { /* */ } };
+    a.onended = () => { done(); onEnded?.(); resolve(); };
+    a.onerror = () => { done(); reject(new Error(`medio (código ${a.error?.code ?? "?"})`)); };
+    a.src = url;
+    const p = a.play();
+    if (p && typeof p.catch === "function") {
+      p.catch((e: unknown) => { done(); reject(new Error(`play: ${(e as Error)?.name || String(e)}`)); });
+    }
   });
 }
 

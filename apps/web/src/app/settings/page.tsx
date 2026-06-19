@@ -127,8 +127,8 @@ function VoiceCard() {
         const blob = await ttsSpeak("Hola Ariel, soy AION. Así sueno con esta voz.", lang, { voice, speed });
         await playTtsBlob(blob);
       }
-    } catch {
-      setTestMsg("La voz propia no respondió — se usará la del sistema como respaldo.");
+    } catch (e) {
+      setTestMsg(`No sonó (${e instanceof Error ? e.message : String(e)}). Se usará la voz del sistema.`);
     } finally {
       setTesting(false);
     }
