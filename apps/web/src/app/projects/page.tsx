@@ -178,8 +178,8 @@ export default function ProjectsPage() {
                         </p>
                       )}
                     </div>
-                    {/* Acciones: editar + eliminar (aparecen al pasar el ratón) */}
-                    <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {/* Acciones: editar + eliminar. Visibles tenues (descubribles) y nítidas al pasar el ratón. */}
+                    <div className="flex items-center gap-1 shrink-0 opacity-60 group-hover:opacity-100 transition-opacity">
                       <button
                         onClick={(e) => startEdit(e, p)}
                         className="p-1 rounded-md hover:bg-[var(--surface-2)]"
