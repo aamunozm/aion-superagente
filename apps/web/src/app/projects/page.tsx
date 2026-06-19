@@ -6,8 +6,17 @@ import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
 import { projectsList, projectCreate, projectRemove, projectUpdate, type Project } from "@/lib/api";
 
-/** Acentos suaves para diferenciar proyectos de un vistazo (rotan por índice). */
-const ACCENTS = ["var(--pastel-gold)", "var(--pastel-teal, #d7f0ee)", "var(--pastel-rose, #f3e0e4)", "var(--pastel-blue, #e0e7f3)"];
+// Cifra grande + etiqueta para la cabecera (mismo patrón que el tablero de Mente).
+function Stat({ value, label }: { value: React.ReactNode; label: string }) {
+  return (
+    <div className="min-w-0 text-right">
+      <div className="font-display text-2xl font-bold leading-tight" style={{ color: "var(--text-1)" }}>
+        {value}
+      </div>
+      <div className="text-xs truncate" style={{ color: "var(--text-2)" }}>{label}</div>
+    </div>
+  );
+}
 
 export default function ProjectsPage() {
   const router = useRouter();
@@ -71,17 +80,41 @@ export default function ProjectsPage() {
 
   return (
     <AppShell title="Proyectos">
-      <div className="max-w-6xl mx-auto px-3 py-6">
-        <p className="text-[15px] mb-7 max-w-2xl" style={{ color: "var(--text-2)" }}>
-          Cada proyecto es un espacio de trabajo: reúne <strong>fuentes</strong> (tu conocimiento),
-          un <strong>chat con foco</strong> en ellas y un <strong>Studio</strong> de salidas que AION
-          genera. Ábrelo para trabajar dentro.
-        </p>
+      <div className="max-w-6xl mx-auto px-3 py-6 flex flex-col gap-6">
+        {/* ── CABECERA: qué es esta área + recuento (mismo patrón que Mente) ── */}
+        <div
+          className="card flex flex-wrap items-center justify-between gap-4"
+          style={{ boxShadow: "var(--shadow-elevated)" }}
+        >
+          <div className="flex items-center gap-4 min-w-0">
+            <span
+              className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0"
+              style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}
+            >
+              <Icon name="folder" size={24} />
+            </span>
+            <div className="min-w-0">
+              <div className="font-display text-xl font-bold" style={{ color: "var(--text-1)" }}>
+                Proyectos
+              </div>
+              <p className="text-sm mt-0.5 max-w-xl" style={{ color: "var(--text-3)" }}>
+                Cada proyecto reúne <strong style={{ color: "var(--text-2)" }}>fuentes</strong>, un{" "}
+                <strong style={{ color: "var(--text-2)" }}>chat con foco</strong> y un{" "}
+                <strong style={{ color: "var(--text-2)" }}>Studio</strong> de salidas. Ábrelo para trabajar dentro.
+              </p>
+            </div>
+          </div>
+          <Stat value={projects.length} label={projects.length === 1 ? "espacio de trabajo" : "espacios de trabajo"} />
+        </div>
 
-        <div className="card mb-10 max-w-3xl">
-          <h2 className="t-section mb-4" style={{ color: "var(--text-3)" }}>
-            NUEVO PROYECTO
+        {/* ── NUEVO PROYECTO (panel, mismo estilo que los paneles de Mente) ── */}
+        <div className="card" style={{ boxShadow: "var(--shadow-elevated)" }}>
+          <h2 className="t-section mb-1" style={{ color: "var(--text-2)" }}>
+            Nuevo proyecto
           </h2>
+          <p className="text-xs mb-3" style={{ color: "var(--text-3)" }}>
+            Dale un nombre y, si quieres, un objetivo. Lo abrirás al instante para añadirle fuentes.
+          </p>
           <div className="grid md:grid-cols-2 gap-3 mb-3">
             <input
               className="input"
@@ -103,16 +136,20 @@ export default function ProjectsPage() {
           </button>
         </div>
 
+        {/* ── LISTA DE PROYECTOS ─────────────────────────────────────────── */}
         {projects.length === 0 ? (
           <div className="flex flex-col items-center text-center py-16" style={{ color: "var(--text-3)" }}>
-            <span className="icon-chip mb-3" style={{ width: 52, height: 52, background: "var(--pastel-gold)", color: "var(--on-gold)" }}>
-              <Icon name="folder" size={26} />
+            <span
+              className="w-12 h-12 rounded-2xl flex items-center justify-center mb-3"
+              style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}
+            >
+              <Icon name="folder" size={24} />
             </span>
             <p>Aún no tienes proyectos. Crea el primero arriba.</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-            {projects.map((p, i) => {
+            {projects.map((p) => {
               const editing = editingId === p.id;
               if (editing) {
                 // Tarjeta en modo edición: NO navega al abrir; edita nombre + descripción.
@@ -120,7 +157,7 @@ export default function ProjectsPage() {
                   <div key={p.id} className="card" style={{ boxShadow: "var(--shadow-elevated)", borderColor: "var(--accent)" }}>
                     <div className="flex items-center gap-2 mb-3" style={{ color: "var(--gold-deep)" }}>
                       <Icon name="pencil" size={15} />
-                      <span className="t-section" style={{ color: "var(--text-3)" }}>EDITAR PROYECTO</span>
+                      <span className="t-section" style={{ color: "var(--text-2)" }}>Editar proyecto</span>
                     </div>
                     <input
                       className="input mb-2"
@@ -165,8 +202,8 @@ export default function ProjectsPage() {
                 >
                   <div className="flex items-start gap-3">
                     <span
-                      className="icon-chip shrink-0"
-                      style={{ width: 40, height: 40, background: ACCENTS[i % ACCENTS.length], color: "var(--on-gold)" }}
+                      className="w-10 h-10 rounded-2xl flex items-center justify-center shrink-0"
+                      style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}
                     >
                       <Icon name="folder" size={20} />
                     </span>
