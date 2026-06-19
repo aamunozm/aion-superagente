@@ -418,6 +418,25 @@ export default function SettingsPage() {
   return (
     <AppShell title={t("nav.settings")}>
       <div className="max-w-6xl mx-auto px-3 py-6 flex flex-col gap-6">
+        {/* ── CABECERA (patrón de Mente) ── */}
+        <div className="card flex items-center gap-4" style={{ boxShadow: "var(--shadow-elevated)" }}>
+          <span
+            className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0"
+            style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}
+          >
+            <Icon name="settings" size={24} />
+          </span>
+          <div className="min-w-0">
+            <div className="font-display text-xl font-bold" style={{ color: "var(--text-1)" }}>
+              {t("nav.settings")}
+            </div>
+            <p className="text-sm mt-0.5 max-w-xl" style={{ color: "var(--text-3)" }}>
+              Personaliza AION: cuenta, idioma, motor de IA, voz y privacidad. Todo se guarda en
+              este dispositivo.
+            </p>
+          </div>
+        </div>
+
         <div className="card">
           <h2 className="t-section mb-3" style={{ color: "var(--text-2)" }}>
             {t("settings.account")}

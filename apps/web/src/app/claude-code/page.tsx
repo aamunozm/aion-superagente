@@ -229,12 +229,20 @@ export default function ClaudeCodePage() {
     <AppShell title={t("cc.title")}>
       <div className="max-w-6xl mx-auto px-3 py-6 flex flex-col gap-4">
 
-        {/* ── Estado + control ── */}
-        <div className="card">
-          <div className="flex items-center justify-between mb-1">
-            <h2 className="t-section flex items-center gap-2" style={{ color: "var(--text-2)" }}>
-              <Icon name="code" size={16} /> {t("cc.title")}
-            </h2>
+        {/* ── CABECERA: estado + control (patrón de Mente) ── */}
+        <div className="card" style={{ boxShadow: "var(--shadow-elevated)" }}>
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
+            <div className="flex items-center gap-3 min-w-0">
+              <span
+                className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0"
+                style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}
+              >
+                <Icon name="code" size={20} />
+              </span>
+              <div className="font-display text-lg font-bold" style={{ color: "var(--text-1)" }}>
+                {t("cc.title")}
+              </div>
+            </div>
             <span className="flex items-center gap-1.5 text-sm" style={{ color: connected ? "var(--accent)" : "var(--text-3)" }}>
               <span className="inline-block w-2 h-2 rounded-full" style={{ background: connected ? "var(--accent)" : "var(--text-3)" }} />
               {connected ? t("cc.connected") : t("cc.notConnected")}

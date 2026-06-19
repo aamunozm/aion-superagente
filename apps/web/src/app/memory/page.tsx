@@ -202,18 +202,38 @@ export default function MemoryPage() {
 
   return (
     <AppShell title="Memoria">
-      <div className="max-w-6xl mx-auto px-3 py-6">
+      <div className="max-w-6xl mx-auto px-3 py-6 flex flex-col gap-6">
+        {/* ── CABECERA: qué es + recuento real (patrón de Mente) ── */}
+        <div
+          className="card flex flex-wrap items-center justify-between gap-4"
+          style={{ boxShadow: "var(--shadow-elevated)" }}
+        >
+          <div className="flex items-center gap-4 min-w-0">
+            <span
+              className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0"
+              style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}
+            >
+              <Icon name="memory" size={24} />
+            </span>
+            <div className="min-w-0">
+              <div className="font-display text-xl font-bold" style={{ color: "var(--text-1)" }}>
+                Memoria
+              </div>
+              <p className="text-sm mt-0.5 max-w-xl" style={{ color: "var(--text-3)" }}>
+                Su memoria de largo plazo y su biblioteca: recuerdos, libros y documentos que
+                AION entiende, cita y consolida mientras «duerme».
+              </p>
+            </div>
+          </div>
+          <div className="min-w-0 text-right">
+            <div className="font-display text-2xl font-bold leading-tight" style={{ color: "var(--text-1)" }}>
+              {count ?? "—"}
+            </div>
+            <div className="text-xs" style={{ color: "var(--text-2)" }}>recuerdos</div>
+          </div>
+        </div>
 
-      <div className="card mb-6" style={{ boxShadow: "var(--shadow-elevated)" }}>
-        <p className="text-sm" style={{ color: "var(--text-3)" }}>
-          recuerdos en memoria de largo plazo
-        </p>
-        <p className="font-display text-5xl font-bold mt-1" style={{ color: "var(--accent)" }}>
-          {count ?? "—"}
-        </p>
-      </div>
-
-      <div className="card mb-6" style={{ boxShadow: "var(--shadow-elevated)" }}>
+      <div className="card" style={{ boxShadow: "var(--shadow-elevated)" }}>
         <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
           <Icon name="folder" size={16} /> Biblioteca — subir libros y documentos
         </h2>
@@ -326,7 +346,7 @@ export default function MemoryPage() {
         )}
       </div>
 
-      <div className="card mb-6">
+      <div className="card" style={{ boxShadow: "var(--shadow-elevated)" }}>
         <h2 className="t-section mb-3" style={{ color: "var(--text-2)" }}>
           Recordar algo nuevo
         </h2>
@@ -344,7 +364,7 @@ export default function MemoryPage() {
         </div>
       </div>
 
-      <div className="card mb-6">
+      <div className="card" style={{ boxShadow: "var(--shadow-elevated)" }}>
         <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
           <Icon name="refresh" size={16} /> Transferir memoria
         </h2>
@@ -382,7 +402,7 @@ export default function MemoryPage() {
         )}
       </div>
 
-      <div className="card">
+      <div className="card" style={{ boxShadow: "var(--shadow-elevated)" }}>
         <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
           <Icon name="moon" size={16} /> Sueño — consolidación darwiniana
         </h2>
