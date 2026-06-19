@@ -683,6 +683,89 @@ export const governanceSetup = (posture: string) =>
     body: JSON.stringify({ posture }),
   });
 
+// ── Catálogo REAL de herramientas del agente (dashboard sincronizado) ──
+export type ToolInfo = { name: string; description: string; sensitive: boolean };
+export type ToolGroup = { category: string; tools: ToolInfo[] };
+export const toolsList = () =>
+  jsonCall<{ count: number; groups: ToolGroup[] }>("/api/tools");
+
+// ── Comunicaciones: gobernanza por contacto y canal ──
+export type CommContact = {
+  id: string;
+  name: string;
+  handle: string;
+  channels: string[];
+  allow_read: boolean;
+  allow_send: boolean;
+  note: string;
+};
+export type CommsPolicy = {
+  enabled: boolean;
+  default_allow: boolean;
+  channels: string[];
+  contacts: CommContact[];
+};
+export const commsGet = () => jsonCall<CommsPolicy>("/api/comms");
+export const commsSet = (p: {
+  enabled: boolean;
+  default_allow: boolean;
+  contacts: CommContact[];
+}) =>
+  jsonCall<{ ok?: boolean; error?: string }>("/api/comms", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(p),
+  });
+
+// ── Flujos de trabajo (tipo n8n) ──
+export type WorkflowTrigger =
+  | { type: "manual" }
+  | { type: "interval"; minutes: number }
+  | { type: "event"; kind: string };
+export type WorkflowStep = { tool: string; input: string };
+export type Workflow = {
+  id: string;
+  name: string;
+  description: string;
+  trigger: WorkflowTrigger;
+  steps: WorkflowStep[];
+  enabled: boolean;
+  last_run_ms?: number | null;
+};
+export type StepResult = {
+  tool: string;
+  input: string;
+  output: string;
+  ok: boolean;
+  needs_approval: boolean;
+};
+export type WorkflowRun = {
+  workflow_id: string;
+  steps: StepResult[];
+  ok: boolean;
+  stopped_for_approval: boolean;
+};
+
+export const workflowsList = () => jsonCall<{ workflows: Workflow[] }>("/api/workflows");
+export const workflowsSet = (wf: Workflow) =>
+  jsonCall<{ ok?: boolean; count?: number; error?: string }>("/api/workflows", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(wf),
+  });
+export const workflowsRemove = (id: string) =>
+  jsonCall<{ ok?: boolean; error?: string }>("/api/workflows/remove", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+export const workflowsRun = (id: string) =>
+  jsonCall<WorkflowRun & { error?: string }>("/api/workflows/run", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+
 /// Descarga un modelo local con progreso (SSE).
 export type InstalledModel = { name: string; size_gb: number };
 

@@ -353,6 +353,54 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // ⏰ PLANIFICADOR DE FLUJOS (tipo n8n, autónomo): cada minuto revisa los flujos con
+    // disparador por intervalo y ejecuta los que han vencido, SIN tocar el bucle de vida
+    // (el alma del agente). Gobernanza fail-closed: allow_sensitive=false, así un paso
+    // sensible pausa el flujo pidiendo tu OK en vez de actuar solo. El resultado entra en
+    // la Bandeja para que lo veas. Desactivable con AION_WORKFLOWS=0.
+    tokio::spawn(async {
+        if std::env::var("AION_WORKFLOWS").as_deref() == Ok("0") {
+            return;
+        }
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let now = crate::workflow::now_ms();
+            let mut list = crate::workflow::load();
+            let due: Vec<usize> = list
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| crate::workflow::is_due(w, now))
+                .map(|(i, _)| i)
+                .collect();
+            if due.is_empty() {
+                continue;
+            }
+            let tools = workflow_registry();
+            for i in due {
+                let wf = list[i].clone();
+                let run = crate::workflow::run(&wf, &tools, false).await;
+                list[i].last_run_ms = Some(crate::workflow::now_ms());
+                let summary = if run.stopped_for_approval {
+                    format!("El flujo «{}» se pausó: un paso necesita tu OK.", wf.name)
+                } else if run.ok {
+                    let last = run
+                        .steps
+                        .last()
+                        .map(|s| s.output.chars().take(200).collect::<String>())
+                        .unwrap_or_default();
+                    format!("Ejecuté tu flujo «{}». Resultado: {}", wf.name, last)
+                } else {
+                    format!("El flujo «{}» falló en uno de sus pasos.", wf.name)
+                };
+                if let Ok(ibx) = crate::inbox::Inbox::open(crate::inbox_path()) {
+                    let _ = ibx.push("idea", &summary);
+                }
+                tracing::info!(workflow = %wf.name, ok = run.ok, "flujo autónomo ejecutado");
+            }
+            let _ = crate::workflow::save(&list);
+        }
+    });
+
     // 🧭 LAZO DE REFLEXIÓN (etapa «Experience» de la memoria agéntica): cada
     // AION_REFLECT_MINS (def. 45) y SOLO con Ariel inactivo, AION mira VARIAS vivencias
     // a la vez y destila de ellas UNA heurística general reutilizable («cuando X, conviene
@@ -538,6 +586,14 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/models/remove", post(models_remove))
         .route("/api/provider", get(provider_get).post(provider_set))
         .route("/api/provider/toggle", post(provider_toggle))
+        // Catálogo REAL de herramientas del agente (para el dashboard, sin desincronizar).
+        .route("/api/tools", get(tools_list))
+        // Flujos de trabajo (estilo n8n): CRUD + ejecución.
+        .route("/api/workflows", get(workflows_list).post(workflows_set))
+        .route("/api/workflows/remove", post(workflows_remove))
+        .route("/api/workflows/run", post(workflows_run))
+        // Gobernanza de comunicaciones: con quién y por qué canal puede hablar AION.
+        .route("/api/comms", get(comms_get).post(comms_set))
         .route("/api/governance/setup", post(governance_setup))
         .route("/api/chat", post(chat))
         .route("/api/chat/new", post(chat_reset))
@@ -1077,6 +1133,357 @@ async fn provider_toggle() -> Json<serde_json::Value> {
         })),
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
+}
+
+/// Catálogo CANÓNICO de herramientas del agente, agrupado por categoría. Es la
+/// fuente única para el dashboard (`/api/tools`) y refleja lo que `agent`/`crew`
+/// registran de verdad — así el panel no se desincroniza del backend.
+/// Tupla: (categoría, nombre, descripción corta, sensible/HITL).
+const TOOLS_CATALOG: &[(&str, &str, &str, bool)] = &[
+    (
+        "Cálculo",
+        "calculator",
+        "Aritmética exacta (delega el cálculo en código).",
+        false,
+    ),
+    (
+        "Memoria",
+        "memory_search",
+        "Busca en su memoria de largo plazo.",
+        false,
+    ),
+    (
+        "Memoria",
+        "remember",
+        "Guarda un hecho o aprendizaje duradero.",
+        false,
+    ),
+    (
+        "Memoria",
+        "episodic_recall",
+        "Recupera micromomentos de conversaciones pasadas.",
+        false,
+    ),
+    (
+        "Conocimiento",
+        "library_search",
+        "Pasajes de la biblioteca de documentos (con cita).",
+        false,
+    ),
+    (
+        "Conocimiento",
+        "graph_search",
+        "Conexiones multi-salto en el grafo de conocimiento.",
+        false,
+    ),
+    (
+        "Web e investigación",
+        "web_search",
+        "Busca en internet (multi-fuente).",
+        false,
+    ),
+    (
+        "Web e investigación",
+        "web_fetch",
+        "Lee el texto legible de una URL (rápido).",
+        false,
+    ),
+    (
+        "Web e investigación",
+        "github_search",
+        "Busca repos y código en GitHub.",
+        false,
+    ),
+    (
+        "Web e investigación",
+        "weather",
+        "Clima actual (Open-Meteo).",
+        false,
+    ),
+    (
+        "Web e investigación",
+        "place_lookup",
+        "Qué hay en una dirección (OpenStreetMap).",
+        false,
+    ),
+    (
+        "Navegador",
+        "browser_open",
+        "Abre una URL en navegador real (con JS).",
+        false,
+    ),
+    (
+        "Navegador",
+        "browser_read",
+        "Re-lee la página abierta.",
+        false,
+    ),
+    (
+        "Navegador",
+        "browser_click",
+        "Clic en un elemento por número/selector.",
+        false,
+    ),
+    (
+        "Navegador",
+        "browser_type",
+        "Escribe en un campo de la página.",
+        false,
+    ),
+    (
+        "Navegador",
+        "browser_see",
+        "Visión multimodal de la página.",
+        false,
+    ),
+    (
+        "Navegador",
+        "credential_login",
+        "Inicia sesión con credenciales del Llavero.",
+        true,
+    ),
+    (
+        "Archivos y sistema",
+        "files_list",
+        "Lista/cuenta archivos de una carpeta.",
+        false,
+    ),
+    (
+        "Archivos y sistema",
+        "file_read",
+        "Lee un archivo de texto (confinado).",
+        false,
+    ),
+    (
+        "Archivos y sistema",
+        "make_document",
+        "Crea y abre un documento en el Escritorio.",
+        false,
+    ),
+    (
+        "Archivos y sistema",
+        "make_note",
+        "Crea una nota en Apple Notes.",
+        false,
+    ),
+    (
+        "Archivos y sistema",
+        "run_command",
+        "Ejecuta un comando de shell (con confirmación).",
+        true,
+    ),
+    (
+        "Archivos y sistema",
+        "shell",
+        "Terminal: diagnóstico directo; mutaciones con HITL.",
+        true,
+    ),
+    (
+        "Red",
+        "net_scan",
+        "Escanea la red local (IP, MAC, fabricante).",
+        false,
+    ),
+    ("Red", "wifi_scan", "Lista redes WiFi al alcance.", false),
+    (
+        "Pantalla y control",
+        "screen_see",
+        "Captura y describe la pantalla.",
+        false,
+    ),
+    (
+        "Pantalla y control",
+        "screen_elements",
+        "Lista elementos de la ventana frontal.",
+        false,
+    ),
+    (
+        "Pantalla y control",
+        "pc_click",
+        "Clic del ratón en (x,y).",
+        true,
+    ),
+    (
+        "Pantalla y control",
+        "pc_type",
+        "Teclea texto en la app frontal.",
+        true,
+    ),
+    (
+        "Pantalla y control",
+        "pc_key",
+        "Pulsa una tecla o un atajo (cmd+s, cmd+c, cmd+shift+t…).",
+        true,
+    ),
+    (
+        "Reconocimiento facial",
+        "reconocer_cara",
+        "Enciende la cámara y reconoce quién está (local).",
+        true,
+    ),
+    (
+        "Comunicaciones",
+        "calendar_list",
+        "Mira la agenda: próximos eventos del Calendario.",
+        false,
+    ),
+    (
+        "Comunicaciones",
+        "calendar_create",
+        "Crea un evento en el Calendario (con confirmación).",
+        true,
+    ),
+    (
+        "Comunicaciones",
+        "contacts_search",
+        "Busca una persona en tus Contactos.",
+        false,
+    ),
+    (
+        "Comunicaciones",
+        "messages_read",
+        "Lee mensajes recientes (iMessage/SMS).",
+        false,
+    ),
+    (
+        "Comunicaciones",
+        "messages_send",
+        "Envía un iMessage/SMS (con confirmación).",
+        true,
+    ),
+    (
+        "Comunicaciones",
+        "whatsapp_open",
+        "Abre WhatsApp Web en una conversación.",
+        true,
+    ),
+    (
+        "Skills",
+        "skill_forge",
+        "Se escribe una skill nueva (validada en sandbox).",
+        false,
+    ),
+    (
+        "Skills",
+        "skill_invoke",
+        "Ejecuta una skill que ha forjado.",
+        false,
+    ),
+    (
+        "Confirmación",
+        "confirm_action",
+        "Pide tu OK antes de algo sensible/irreversible.",
+        true,
+    ),
+];
+
+/// Devuelve el catálogo de herramientas agrupado por categoría para el dashboard.
+async fn tools_list() -> Json<serde_json::Value> {
+    use std::collections::BTreeMap;
+    // Preserva el orden de aparición de las categorías en el catálogo.
+    let mut order: Vec<&str> = Vec::new();
+    let mut by_cat: BTreeMap<&str, Vec<serde_json::Value>> = BTreeMap::new();
+    for (cat, name, desc, sensitive) in TOOLS_CATALOG {
+        if !order.contains(cat) {
+            order.push(cat);
+        }
+        by_cat.entry(cat).or_default().push(serde_json::json!({
+            "name": name, "description": desc, "sensitive": sensitive,
+        }));
+    }
+    let groups: Vec<serde_json::Value> = order
+        .iter()
+        .map(|cat| serde_json::json!({ "category": cat, "tools": by_cat[cat] }))
+        .collect();
+    Json(serde_json::json!({ "count": TOOLS_CATALOG.len(), "groups": groups }))
+}
+
+/// Devuelve la política de comunicaciones (contactos permitidos y canales).
+async fn comms_get() -> Json<serde_json::Value> {
+    let p = crate::comms::load();
+    Json(serde_json::json!({
+        "enabled": p.enabled,
+        "default_allow": p.default_allow,
+        "channels": crate::comms::CHANNELS,
+        "contacts": p.contacts,
+    }))
+}
+
+/// Guarda la política de comunicaciones completa (desde el menú Comunicaciones).
+async fn comms_set(Json(p): Json<crate::comms::CommsPolicy>) -> Json<serde_json::Value> {
+    match crate::comms::save(&p) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+// ─── Flujos de trabajo (estilo n8n) ─────────────────────────────────────────
+
+/// Lista los flujos guardados.
+async fn workflows_list() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "workflows": crate::workflow::load() }))
+}
+
+/// Crea o actualiza un flujo (upsert por id) y persiste.
+async fn workflows_set(Json(wf): Json<crate::workflow::Workflow>) -> Json<serde_json::Value> {
+    let list = crate::workflow::upsert(crate::workflow::load(), wf);
+    match crate::workflow::save(&list) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "count": list.len() })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct WorkflowIdBody {
+    id: String,
+}
+
+/// Elimina un flujo por id.
+async fn workflows_remove(Json(b): Json<WorkflowIdBody>) -> Json<serde_json::Value> {
+    let list = crate::workflow::remove(crate::workflow::load(), &b.id);
+    match crate::workflow::save(&list) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// Construye un registro con las herramientas SEGURAS (lectura/cálculo/investigación)
+/// para ejecutar flujos. No incluye herramientas sensibles (envíos, control del ratón):
+/// un flujo no debe disparar acciones irreversibles sin el bucle HITL del agente.
+fn workflow_registry() -> ToolRegistry {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(CalculatorTool));
+    if let Ok(mem) = crate::shared_memory() {
+        tools.register(Arc::new(MemoryTool::new(mem.clone(), 3)));
+        tools.register(Arc::new(crate::agent_tools::RememberTool::new(mem)));
+    }
+    let web = Arc::new(WebClient::new());
+    tools.register(Arc::new(crate::agent_tools::SearchTool::new(web.clone())));
+    tools.register(Arc::new(crate::agent_tools::WeatherTool::new(web.clone())));
+    tools.register(Arc::new(WebTool::new(web.clone())));
+    tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
+    tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
+    tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
+    tools.register(Arc::new(crate::agent_tools::GraphSearchTool::new()));
+    // Comunicaciones de SOLO lectura (mirar agenda / contactos).
+    tools.register(Arc::new(crate::comms_tools::CalendarListTool::new()));
+    tools.register(Arc::new(crate::comms_tools::ContactsSearchTool::new()));
+    tools
+}
+
+/// Ejecuta un flujo por id (lanzado por Ariel desde la UI). Devuelve el resultado por paso.
+async fn workflows_run(Json(b): Json<WorkflowIdBody>) -> Json<serde_json::Value> {
+    let Some(wf) = crate::workflow::load().into_iter().find(|w| w.id == b.id) else {
+        return Json(serde_json::json!({ "error": "flujo no encontrado" }));
+    };
+    let tools = workflow_registry();
+    // allow_sensitive=true: lo lanza Ariel a mano (su intención explícita); aun así el
+    // registro de ejecución solo trae herramientas seguras, sin acciones irreversibles.
+    let run = crate::workflow::run(&wf, &tools, true).await;
+    Json(
+        serde_json::to_value(run)
+            .unwrap_or_else(|_| serde_json::json!({ "error": "serialización" })),
+    )
 }
 
 #[derive(Deserialize)]
@@ -2025,7 +2432,7 @@ async fn agent(
             browser.clone(),
         )));
         tools.register(Arc::new(crate::agent_tools::CredentialLoginTool::new(
-            browser,
+            browser.clone(),
         )));
         tools.register(Arc::new(crate::agent_tools::ConfirmActionTool::new()));
         tools.register(Arc::new(crate::agent_tools::ScreenSeeTool::new()));
@@ -2036,6 +2443,27 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
+        // 📘 SkillBook (Hermes): memoria PROCEDIMENTAL — cómo hacer cosas que ya funcionaron.
+        // El agente lista/busca/guarda/actualiza procedimientos reutilizables (ranking por
+        // reputación bayesiana × relevancia). Persiste en skillbook.json.
+        {
+            let book = std::sync::Arc::new(tokio::sync::Mutex::new(aion_skills::SkillBook::load(
+                crate::app_data_dir().join("skillbook.json"),
+            )));
+            tools.register(Arc::new(crate::skillbook_tool::SkillBookTool::new(book)));
+        }
+        // 💬 COMUNICACIONES: calendario, contactos, Mensajes y WhatsApp. Cada una pasa por
+        // `comms::CommsPolicy` (filtro de con quién/qué canal) y los envíos piden HITL. Va en
+        // el modo Agente (con el que hablas) con el set completo, incluido enviar.
+        tools.register(Arc::new(crate::comms_tools::CalendarListTool::new()));
+        tools.register(Arc::new(crate::comms_tools::CalendarCreateTool::new()));
+        tools.register(Arc::new(crate::comms_tools::ContactsSearchTool::new()));
+        tools.register(Arc::new(crate::comms_tools::MessagesReadTool::new()));
+        tools.register(Arc::new(crate::comms_tools::MessagesSendTool::new()));
+        tools.register(Arc::new(crate::comms_tools::WhatsAppOpenTool::new(
+            browser.clone(),
+            web.clone(),
+        )));
         // 📷 Reconocimiento facial REAL como herramienta del agente (mata el teatro: antes el LLM
         // inventaba un comando de cámara). La foto capturada se guarda en este buffer y se antepone
         // al Final Answer para mostrarla en el chat. NO se registra en la `crew` autónoma: la cámara
@@ -2501,6 +2929,11 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
+        // 💬 COMUNICACIONES en modo autónomo: SOLO lectura (agenda y contactos) para que el
+        // equipo sea consciente de horarios/personas. NUNCA leer mensajes privados ni enviar
+        // de forma autónoma: eso queda reservado al modo Agente con HITL.
+        tools.register(Arc::new(crate::comms_tools::CalendarListTool::new()));
+        tools.register(Arc::new(crate::comms_tools::ContactsSearchTool::new()));
 
         let bus = EventBus::default();
         // GWT: el equipo entero entra al foco del tablón global. PRIVACIDAD: la

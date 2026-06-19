@@ -7,7 +7,7 @@ use crate::calc;
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // ─── Categoría ────────────────────────────────────────────────────────────────
 
@@ -99,7 +99,11 @@ pub trait Tool: Send + Sync {
 #[derive(Default, Clone)]
 pub struct ToolRegistry {
     tools: BTreeMap<String, Arc<dyn Tool>>,
-    metrics: HashMap<String, ToolMetrics>,
+    // Mutabilidad interior: el bucle del agente sostiene `&ToolRegistry` (inmutable) y aun
+    // así graba el resultado de cada llamada (reputación bayesiana, estilo Hermes). Arc para
+    // que el registro siga siendo Clone; Mutex porque la contención es nula (una escritura
+    // corta por herramienta ejecutada).
+    metrics: Arc<Mutex<HashMap<String, ToolMetrics>>>,
 }
 
 impl ToolRegistry {
@@ -110,7 +114,11 @@ impl ToolRegistry {
     /// Registra una herramienta e inicializa sus métricas.
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
-        self.metrics.entry(name.clone()).or_default();
+        self.metrics
+            .lock()
+            .unwrap()
+            .entry(name.clone())
+            .or_default();
         self.tools.insert(name, tool);
     }
 
@@ -123,8 +131,10 @@ impl ToolRegistry {
     }
 
     /// Registra el resultado de una invocación y actualiza la reputación.
-    pub fn record_call(&mut self, name: &str, success: bool, latency_ms: u64) {
-        let m = self.metrics.entry(name.to_string()).or_default();
+    /// Toma `&self` (mutabilidad interior) para poder grabar desde el bucle del agente.
+    pub fn record_call(&self, name: &str, success: bool, latency_ms: u64) {
+        let mut g = self.metrics.lock().unwrap();
+        let m = g.entry(name.to_string()).or_default();
         m.total_calls += 1;
         if success {
             m.success_count += 1;
@@ -137,6 +147,8 @@ impl ToolRegistry {
     pub fn metrics_snapshot(&self) -> Vec<(String, ToolMetrics)> {
         let mut v: Vec<(String, ToolMetrics)> = self
             .metrics
+            .lock()
+            .unwrap()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
@@ -151,11 +163,12 @@ impl ToolRegistry {
     /// Lista herramientas ordenadas por reputación descendente con porcentaje.
     /// Útil para modo diagnóstico/debug.
     pub fn describe_sorted_by_reputation(&self) -> String {
+        let metrics = self.metrics.lock().unwrap();
         let mut entries: Vec<(&str, f64)> = self
             .tools
             .keys()
             .map(|name| {
-                let rep = self.metrics.get(name).map(|m| m.reputation).unwrap_or(0.8);
+                let rep = metrics.get(name).map(|m| m.reputation).unwrap_or(0.8);
                 (name.as_str(), rep)
             })
             .collect();
@@ -177,14 +190,14 @@ impl ToolRegistry {
         let query_lower = query.to_lowercase();
         let keywords: Vec<&str> = query_lower.split_whitespace().collect();
 
+        let metrics = self.metrics.lock().unwrap();
         let mut scored: Vec<(usize, f64, Arc<dyn Tool>)> = self
             .tools
             .values()
             .map(|tool| {
                 let haystack = format!("{} {}", tool.name(), tool.description()).to_lowercase();
                 let hits = keywords.iter().filter(|kw| haystack.contains(*kw)).count();
-                let rep = self
-                    .metrics
+                let rep = metrics
                     .get(tool.name())
                     .map(|m| m.reputation)
                     .unwrap_or(0.8);
@@ -210,11 +223,12 @@ impl ToolRegistry {
         // files_list «escritorio pdf»). Recortarla rompía las llamadas (el modelo no sabía
         // cómo invocar la herramienta → fallaba y daba vueltas). La latencia se reduce por
         // otras vías (vía rápida conversacional, KV q8, modelo caliente), no aquí.
+        let metrics = self.metrics.lock().unwrap();
         self.tools
             .values()
             .map(|t| {
                 let name = t.name();
-                let warn = match self.metrics.get(name) {
+                let warn = match metrics.get(name) {
                     Some(m) if m.total_calls > 5 && m.reputation < 0.6 => " [⚠]",
                     _ => "",
                 };

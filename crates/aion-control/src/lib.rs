@@ -171,6 +171,7 @@ fn verb_for(intent: &ControlIntent) -> &'static str {
         ControlIntent::RightClick { .. } => "ui.right_click",
         ControlIntent::Type { .. } => "ui.type",
         ControlIntent::Key { .. } => "ui.key",
+        ControlIntent::Chord { .. } => "ui.chord",
     }
 }
 

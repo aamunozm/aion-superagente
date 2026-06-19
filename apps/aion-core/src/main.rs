@@ -14,6 +14,8 @@ mod biography;
 mod capabilities;
 mod claude_code;
 mod claude_mcp;
+mod comms;
+mod comms_tools;
 mod comprehension;
 mod computer;
 mod consciousness;
@@ -59,9 +61,11 @@ mod sensors;
 mod serve;
 mod skill_store;
 mod skill_tool;
+mod skillbook_tool;
 mod tools;
 mod usermodel;
 mod web_tool;
+mod workflow;
 mod workspace;
 
 /// Escritura ATÓMICA (tmp + rename): un crash o un lector concurrente jamás ven un

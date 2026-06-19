@@ -628,7 +628,18 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
                         if !approved {
                             "❌ acción cancelada por el usuario (no se ejecutó).".to_string()
                         } else {
-                            match tool.run(input.trim()).await {
+                            // Reputación bayesiana (estilo Hermes): cronometramos y grabamos
+                            // el resultado de CADA ejecución. El registro aprende qué
+                            // herramientas son fiables y `describe()` marca con [⚠] las que
+                            // fallan repetidamente — el agente lo ve en su propio prompt.
+                            let t0 = std::time::Instant::now();
+                            let result = tool.run(input.trim()).await;
+                            self.tools.record_call(
+                                &action,
+                                result.is_ok(),
+                                t0.elapsed().as_millis() as u64,
+                            );
+                            match result {
                                 Ok(out) => out,
                                 Err(e) => format!("error de herramienta: {e}"),
                             }
