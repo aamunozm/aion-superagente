@@ -167,3 +167,161 @@ export function useDictation(lang: Lang, onFinal: (text: string) => void) {
 
   return { start, stop, listening, interim, supported };
 }
+
+/**
+ * Conversación por voz CONTINUA, estilo teléfono (full-duplex práctico).
+ *   · `listen`: escucha en continuo SIN volver a pulsar (reconocimiento continuo).
+ *     Actívalo cuando AION calla; cada frase final tuya llega por `onUtterance`.
+ *   · `watchBargeIn`: mientras AION HABLA, vigila tu voz con un detector de
+ *     actividad (VAD) sobre un micro con CANCELACIÓN DE ECO; si empiezas a hablar
+ *     dispara `onBargeIn` (para cortar el TTS) y el ciclo vuelve a escucharte.
+ * Así puedes interrumpir a AION como en una llamada. 100% local; degrada si no
+ * hay reconocimiento o micrófono.
+ */
+export function useVoiceConversation(
+  lang: Lang,
+  {
+    listen,
+    watchBargeIn,
+    onUtterance,
+    onBargeIn,
+  }: {
+    listen: boolean;
+    watchBargeIn: boolean;
+    onUtterance: (text: string) => void;
+    onBargeIn: () => void;
+  },
+) {
+  const [listening, setListening] = useState(false);
+  const [interim, setInterim] = useState("");
+  const recRef = useRef<any>(null);
+  const wantRecRef = useRef(false);
+  const cb = useRef({ onUtterance, onBargeIn });
+  cb.current = { onUtterance, onBargeIn };
+
+  // ── Reconocimiento continuo (se reanuda solo tras los cortes por silencio) ──
+  const startRec = useCallback(() => {
+    if (!dictationSupported() || recRef.current) return;
+    const Ctor: any =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    const rec = new Ctor();
+    rec.lang = ttsLang(lang);
+    rec.interimResults = true;
+    rec.continuous = true;
+    rec.maxAlternatives = 1;
+    rec.onresult = (e: any) => {
+      let fin = "";
+      let itr = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const chunk = e.results[i][0].transcript;
+        if (e.results[i].isFinal) fin += chunk;
+        else itr += chunk;
+      }
+      setInterim(itr);
+      const t = fin.trim();
+      if (t) {
+        setInterim("");
+        cb.current.onUtterance(t);
+      }
+    };
+    rec.onerror = () => { /* se gestiona en onend */ };
+    rec.onend = () => {
+      recRef.current = null;
+      setListening(false);
+      setInterim("");
+      // El motor corta solo por silencio; si seguimos queriendo oír, reanuda.
+      if (wantRecRef.current) {
+        setTimeout(() => {
+          if (wantRecRef.current && !recRef.current) startRec();
+        }, 150);
+      }
+    };
+    recRef.current = rec;
+    setListening(true);
+    try {
+      rec.start();
+    } catch {
+      recRef.current = null;
+      setListening(false);
+    }
+  }, [lang]);
+
+  useEffect(() => {
+    wantRecRef.current = listen;
+    if (listen) startRec();
+    else {
+      try { recRef.current?.stop(); } catch { /* */ }
+    }
+  }, [listen, startRec]);
+
+  // ── Barge-in: VAD con cancelación de eco mientras AION habla ──
+  useEffect(() => {
+    if (!watchBargeIn || typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      return;
+    }
+    let cancelled = false;
+    let raf = 0;
+    let stream: MediaStream | null = null;
+    let ctx: AudioContext | null = null;
+    (async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        const AC: any = (window as any).AudioContext || (window as any).webkitAudioContext;
+        ctx = new AC();
+        const src = ctx!.createMediaStreamSource(stream);
+        const an = ctx!.createAnalyser();
+        an.fftSize = 512;
+        src.connect(an);
+        const buf = new Uint8Array(an.fftSize);
+        let above = 0;
+        const tick = () => {
+          an.getByteTimeDomainData(buf);
+          let sum = 0;
+          for (let i = 0; i < buf.length; i++) {
+            const v = (buf[i] - 128) / 128;
+            sum += v * v;
+          }
+          const rms = Math.sqrt(sum / buf.length);
+          // Umbral con histéresis: necesita varios frames seguidos por encima
+          // para no dispararse con ruido puntual (ni con el eco residual de AION).
+          if (rms > 0.14) {
+            above++;
+            if (above >= 3) {
+              cb.current.onBargeIn();
+              return; // deja de vigilar; el ciclo pasará a escuchar
+            }
+          } else {
+            above = Math.max(0, above - 1);
+          }
+          raf = requestAnimationFrame(tick);
+        };
+        raf = requestAnimationFrame(tick);
+      } catch {
+        /* sin micrófono o permiso → sin barge-in (degrada) */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (raf) cancelAnimationFrame(raf);
+      try { ctx?.close(); } catch { /* */ }
+      try { stream?.getTracks().forEach((t) => t.stop()); } catch { /* */ }
+    };
+  }, [watchBargeIn]);
+
+  // Corta todo al desmontar.
+  useEffect(
+    () => () => {
+      wantRecRef.current = false;
+      try { recRef.current?.abort(); } catch { /* */ }
+    },
+    [],
+  );
+
+  return { listening, interim };
+}

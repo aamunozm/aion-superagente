@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AppShell, Icon, Markdown, MessageActions, VoiceBar, VoiceMode, type VoiceState } from "@/components";
 import { useT } from "@/lib/i18n";
-import { useSpeech, useDictation, stripMarkdownForSpeech } from "@/lib/voice";
+import { useSpeech, useDictation, useVoiceConversation, stripMarkdownForSpeech } from "@/lib/voice";
 import { LightboxProvider, useLightbox } from "@/lib/lightbox";
 
 // Foto adjunta por Ariel, mostrada en su burbuja del chat. Clic = ampliar (lightbox).
@@ -440,48 +440,55 @@ export default function ChatPage() {
     });
   }
 
-  // ── Modo voz inmersivo: una conversación hablada continua a pantalla completa.
-  // Es la superficie visual del bucle manos-libres; al abrir, activa manos libres
-  // y empieza a escuchar; al cerrar, corta todo.
+  // ── Modo voz inmersivo: conversación CONTINUA tipo teléfono ──────────────
+  // Escucha sin volver a pulsar y deja interrumpir a AION mientras habla.
   const [voiceMode, setVoiceMode] = useState(false);
+  const [voiceMuted, setVoiceMuted] = useState(false);
+  const lastAnswer = turns.length ? stripMarkdownForSpeech(turns[turns.length - 1].answer) : "";
+
+  // Conversación: escucha en continuo cuando AION calla (no ocupado ni hablando);
+  // vigila barge-in mientras AION habla. Cada frase tuya se envía; tu voz corta el TTS.
+  const convo = useVoiceConversation(lang, {
+    listen: voiceMode && !voiceMuted && !busy && !speech.speakingId,
+    watchBargeIn: voiceMode && !voiceMuted && !!speech.speakingId,
+    onUtterance: (text) => { void runSend(text); },
+    onBargeIn: () => speech.stop(),
+  });
+
   function openVoiceMode() {
     setVoiceMode(true);
-    setHandsFree(true);
+    setVoiceMuted(false);
     speech.stop();
-    if (dictation.supported) dictation.start();
   }
   function closeVoiceMode() {
     setVoiceMode(false);
-    setHandsFree(false);
     speech.stop();
-    dictation.stop();
   }
   // Estado derivado para el overlay (qué está pasando ahora mismo).
   const voiceState: VoiceState = busy
     ? "thinking"
     : speech.speakingId
       ? "speaking"
-      : dictation.listening
+      : convo.listening
         ? "listening"
         : "idle";
-  const lastAnswer = turns.length ? stripMarkdownForSpeech(turns[turns.length - 1].answer) : "";
 
-  // Conversación hablada en tiempo real: cuando una respuesta termina (no hay
-  // stream en curso) y el modo manos libres está activo, AION la lee en voz alta
-  // y, al acabar, reabre el micrófono para que sigas hablando sin tocar nada.
+  // AION lee en voz alta cada respuesta nueva en manos libres O en modo voz. Al
+  // terminar, en manos libres (composer) reabre el dictado puntual; en modo voz
+  // NO hace falta —el hook de conversación retoma la escucha continua solo—.
   useEffect(() => {
-    if (!handsFree || busy || turns.length === 0) return;
+    if (!(handsFree || voiceMode) || busy || turns.length === 0) return;
     const i = turns.length - 1;
     const last = turns[i];
     if (!last.answer || last.answer.startsWith("⚠️")) return;
     if (i === lastSpokenRef.current) return;
     lastSpokenRef.current = i;
     speech.speak(`turn-${i}`, last.answer, lang, () => {
-      if (handsFree && dictation.supported && !busy) dictation.start();
+      if (handsFree && !voiceMode && dictation.supported && !busy) dictation.start();
     });
     // speech/dictation son estables (useCallback); el disparador real es turns/busy.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turns, busy, handsFree, lang]);
+  }, [turns, busy, handsFree, voiceMode, lang]);
 
   return (
     <LightboxProvider>
@@ -837,9 +844,10 @@ export default function ChatPage() {
       <VoiceMode
         open={voiceMode}
         state={voiceState}
-        interim={dictation.interim}
+        muted={voiceMuted}
+        interim={convo.interim}
         caption={lastAnswer}
-        onToggleMic={onMic}
+        onToggleMic={() => setVoiceMuted((m) => !m)}
         onClose={closeVoiceMode}
       />
     </AppShell>

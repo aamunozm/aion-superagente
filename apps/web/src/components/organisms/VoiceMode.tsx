@@ -13,6 +13,7 @@ export type VoiceState = "listening" | "thinking" | "speaking" | "idle";
 export default function VoiceMode({
   open,
   state,
+  muted,
   interim,
   caption,
   onToggleMic,
@@ -20,6 +21,8 @@ export default function VoiceMode({
 }: {
   open: boolean;
   state: VoiceState;
+  /** Micrófono en pausa (silenciado) — no escucha aunque AION calle. */
+  muted?: boolean;
   /** Transcripción provisional mientras hablas (se muestra al escuchar). */
   interim?: string;
   /** Texto/Resumen de lo que AION dice (se muestra al hablar). */
@@ -32,8 +35,9 @@ export default function VoiceMode({
   if (!open) return null;
 
   const active = state === "listening" || state === "speaking";
-  const label =
-    state === "listening"
+  const label = muted
+    ? t("chat.voiceMuted")
+    : state === "listening"
       ? t("chat.listening")
       : state === "thinking"
         ? t("chat.voiceThinking")
@@ -122,13 +126,13 @@ export default function VoiceMode({
           onClick={onToggleMic}
           className="rounded-full p-4 transition-colors"
           style={{
-            background: state === "listening" ? "#ef4444" : "var(--surface-2)",
-            color: state === "listening" ? "#fff" : "var(--text-2)",
+            background: muted ? "var(--surface-2)" : state === "listening" ? "#ef4444" : "var(--accent-subtle)",
+            color: muted ? "var(--text-3)" : state === "listening" ? "#fff" : "var(--gold-deep)",
           }}
-          title={state === "listening" ? t("chat.listening") : t("chat.listen")}
-          aria-label={state === "listening" ? t("chat.listening") : t("chat.listen")}
+          title={muted ? t("chat.voiceMuted") : t("chat.listening")}
+          aria-label={muted ? t("chat.voiceMuted") : t("chat.listening")}
         >
-          <Icon name="mic" size={24} className={state === "listening" ? "animate-pulse" : ""} />
+          <Icon name={muted ? "bellOff" : "mic"} size={24} className={state === "listening" ? "animate-pulse" : ""} />
         </button>
         <button
           onClick={onClose}
