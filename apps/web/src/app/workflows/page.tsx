@@ -103,7 +103,7 @@ export default function WorkflowsPage() {
 
   return (
     <AppShell title="Flujos de trabajo">
-      <div className="max-w-3xl mx-auto px-4 py-6">
+      <div className="max-w-6xl mx-auto px-4 py-6">
         <div className="flex items-start justify-between gap-4 mb-6">
           <p className="text-[15px] max-w-xl" style={{ color: "var(--text-2)" }}>
             Encadena herramientas de AION en automatizaciones (estilo n8n). La salida de un paso
