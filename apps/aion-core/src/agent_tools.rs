@@ -1134,18 +1134,34 @@ impl Tool for PcKeyTool {
         "pc_key"
     }
     fn description(&self) -> &str {
-        "Pulsa una tecla (p. ej. \"enter\", \"tab\", \"esc\"). Entrada: el nombre. \
-         Requiere tu confirmación."
+        "Pulsa una tecla o un ATAJO. Tecla: \"enter\", \"tab\", \"esc\". Atajo (combo) con +: \
+         \"cmd+s\" (guardar), \"cmd+c\"/\"cmd+v\" (copiar/pegar), \"cmd+shift+t\". \
+         Modificadores: cmd, ctrl, alt/option, shift. Requiere tu confirmación."
     }
     fn needs_confirm(&self, input: &str) -> Option<String> {
-        Some(format!("Pulsar la tecla: {}", input.trim()))
+        Some(format!("Pulsar: {}", input.trim()))
     }
     async fn run(&self, input: &str) -> Result<String, String> {
-        let name = input.trim().to_string();
-        if name.is_empty() {
-            return Err("indica la tecla".into());
+        let raw = input.trim().to_string();
+        if raw.is_empty() {
+            return Err("indica la tecla o el atajo (p. ej. cmd+s)".into());
         }
-        tokio::task::spawn_blocking(move || run_control(aion_control::ControlIntent::Key { name }))
+        // Un "+" indica un combo: todo menos lo último son modificadores.
+        let intent = if raw.contains('+') {
+            let mut parts: Vec<String> = raw
+                .split('+')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let key = parts.pop().unwrap_or_default();
+            if key.is_empty() || parts.is_empty() {
+                return Err("formato de atajo: modificador+tecla, p. ej. cmd+s".into());
+            }
+            aion_control::ControlIntent::Chord { mods: parts, key }
+        } else {
+            aion_control::ControlIntent::Key { name: raw }
+        };
+        tokio::task::spawn_blocking(move || run_control(intent))
             .await
             .map_err(|e| e.to_string())?
     }

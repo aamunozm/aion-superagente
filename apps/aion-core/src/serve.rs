@@ -1311,7 +1311,7 @@ const TOOLS_CATALOG: &[(&str, &str, &str, bool)] = &[
     (
         "Pantalla y control",
         "pc_key",
-        "Pulsa una tecla (enter/tab/esc…).",
+        "Pulsa una tecla o un atajo (cmd+s, cmd+c, cmd+shift+t…).",
         true,
     ),
     (
