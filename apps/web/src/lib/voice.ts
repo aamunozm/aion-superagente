@@ -207,15 +207,15 @@ export function useSpeech() {
         return;
       }
       // Preferencias de voz que el usuario puede cambiar en Ajustes.
-      const voiceName =
-        typeof localStorage !== "undefined" ? localStorage.getItem("aion.voice.name") || "" : "";
-      const speed =
-        typeof localStorage !== "undefined"
-          ? parseFloat(localStorage.getItem("aion.voice.speed") || "1") || 1
-          : 1;
-      // Voz propia de AION (Kokoro/Chatterbox vía núcleo). Si el sidecar no está o
-      // falla, cae a la voz del sistema sin romper la conversación.
-      ttsSpeak(clean, lang, { voice: voiceName, speed })
+      const ls = (k: string) =>
+        typeof localStorage !== "undefined" ? localStorage.getItem(k) : null;
+      // Por defecto en español: voz latina mexicana (Piper) — natural y con acento real.
+      const voiceName = ls("aion.voice.name") || (lang === "es" ? "es_MX-claude-high" : "");
+      const engine = ls("aion.voice.engine") || (lang === "es" ? "piper" : "");
+      const speed = parseFloat(ls("aion.voice.speed") || "1") || 1;
+      // Voz propia de AION (Piper latino / Kokoro / Chatterbox vía núcleo). Si el
+      // sidecar no está o falla, cae a la voz del sistema sin romper la conversación.
+      ttsSpeak(clean, lang, { voice: voiceName, engine, speed })
         .then((blob) => {
           if (my !== reqRef.current) return; // superada por otra orden / stop / barge-in
           return playTtsBlob(blob, () => {

@@ -83,23 +83,26 @@ const DEEPSEEK_MODELS: { id: string; label: string; desc: string }[] = [
   { id: "__custom__",         label: "Otro (escribir ID)",   desc: "" },
 ];
 
-// Voces locales disponibles (Kokoro v1.0). "" = automática según el idioma.
-const VOICES: { id: string; label: string }[] = [
-  { id: "", label: "Automática (según idioma)" },
-  { id: "ef_dora", label: "Español · Dora (f)" },
-  { id: "em_alex", label: "Español · Alex (m)" },
-  { id: "em_santa", label: "Español · Santa (m)" },
-  { id: "if_sara", label: "Italiano · Sara (f)" },
-  { id: "im_nicola", label: "Italiano · Nicola (m)" },
-  { id: "af_heart", label: "English · Heart (f)" },
-  { id: "am_michael", label: "English · Michael (m)" },
+// Voces locales disponibles, con su motor. Las latinas (Piper) son las más
+// naturales y con acento real → primeras y por defecto.
+const VOICES: { id: string; engine: string; label: string }[] = [
+  { id: "es_MX-claude-high", engine: "piper", label: "Español (México) · natural ★" },
+  { id: "es_AR-daniela-high", engine: "piper", label: "Español (Argentina) · natural" },
+  { id: "ef_dora", engine: "kokoro", label: "Español · Dora (Kokoro)" },
+  { id: "em_alex", engine: "kokoro", label: "Español · Alex (Kokoro, m)" },
+  { id: "if_sara", engine: "kokoro", label: "Italiano · Sara" },
+  { id: "im_nicola", engine: "kokoro", label: "Italiano · Nicola (m)" },
+  { id: "af_heart", engine: "kokoro", label: "English · Heart" },
+  { id: "am_michael", engine: "kokoro", label: "English · Michael (m)" },
 ];
+const DEFAULT_VOICE_ID = "es_MX-claude-high";
+const engineOf = (id: string) => VOICES.find((v) => v.id === id)?.engine || "kokoro";
 
 /** Todo lo que Ariel puede cambiar de la voz de AION: motor, voz, velocidad + prueba. */
 function VoiceCard() {
   const { lang } = useT();
   const [engine, setEngine] = useState<"auto" | "system">("auto");
-  const [voice, setVoice] = useState("");
+  const [voice, setVoice] = useState(DEFAULT_VOICE_ID);
   const [speed, setSpeed] = useState(1);
   const [testing, setTesting] = useState(false);
   const [testMsg, setTestMsg] = useState<string | null>(null);
@@ -107,11 +110,17 @@ function VoiceCard() {
   useEffect(() => {
     if (typeof localStorage === "undefined") return;
     if (localStorage.getItem("aion.voice") === "system") setEngine("system");
-    setVoice(localStorage.getItem("aion.voice.name") || "");
+    setVoice(localStorage.getItem("aion.voice.name") || DEFAULT_VOICE_ID);
     setSpeed(parseFloat(localStorage.getItem("aion.voice.speed") || "1") || 1);
   }, []);
 
   const save = (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* */ } };
+  // Al elegir voz, guarda también su motor (piper/kokoro) para que useSpeech lo use.
+  const chooseVoice = (id: string) => {
+    setVoice(id);
+    save("aion.voice.name", id);
+    save("aion.voice.engine", engineOf(id));
+  };
 
   async function test() {
     setTestMsg(null);
@@ -124,7 +133,11 @@ function VoiceCard() {
         window.speechSynthesis.cancel();
         window.speechSynthesis.speak(u);
       } else {
-        const blob = await ttsSpeak("Hola Ariel, soy AION. Así sueno con esta voz.", lang, { voice, speed });
+        const blob = await ttsSpeak("Hola Ariel, soy AION. Así sueno con esta voz, más natural.", lang, {
+          voice,
+          engine: engineOf(voice),
+          speed,
+        });
         await playTtsBlob(blob);
       }
     } catch (e) {
@@ -179,7 +192,7 @@ function VoiceCard() {
             className="input"
             value={voice}
             disabled={engine === "system"}
-            onChange={(e) => { setVoice(e.target.value); save("aion.voice.name", e.target.value); }}
+            onChange={(e) => chooseVoice(e.target.value)}
             style={{ background: "var(--surface-1)", color: "var(--text-1)" }}
           >
             {VOICES.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}

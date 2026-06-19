@@ -22,13 +22,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 
 TTS_DIR = os.path.dirname(os.path.abspath(__file__))
+PIPER_DIR = os.path.join(TTS_DIR, "piper-voices")
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("AION_TTS_PORT", "8766"))
 
-# Voz por defecto por idioma (Kokoro v1.0). Españolas: ef_dora; italianas: if_sara.
+# Voz por defecto por idioma. Para ES la mejor (natural + acento latino real) es
+# Piper mexicano; Kokoro queda como alternativa. it/en por Kokoro.
 DEFAULT_VOICE = {"es": "ef_dora", "it": "if_sara", "en": "af_heart"}
 
 _kokoro = None
+_piper = {}  # cache de voces Piper cargadas (model_name → PiperVoice)
 
 
 def kokoro():
@@ -47,6 +50,52 @@ def kokoro():
 def synth_kokoro(text: str, voice: str, lang: str, speed: float):
     samples, sr = kokoro().create(text, voice=voice, speed=speed, lang=lang)
     return np.asarray(samples, dtype=np.float32), sr
+
+
+def piper_voices_available():
+    """Modelos Piper presentes en disco (sin extensión)."""
+    try:
+        return sorted(
+            f[:-5] for f in os.listdir(PIPER_DIR) if f.endswith(".onnx")
+        )
+    except OSError:
+        return []
+
+
+def piper_voice(model: str):
+    """Carga perezosa de una voz Piper (residente tras la 1ª vez)."""
+    if model not in _piper:
+        from piper import PiperVoice
+
+        _piper[model] = PiperVoice.load(os.path.join(PIPER_DIR, f"{model}.onnx"))
+    return _piper[model]
+
+
+def synth_piper(text: str, model: str, speed: float):
+    """Voces español latino (es_MX, es_AR…) — naturales y con acento real."""
+    import wave as _wave
+
+    v = piper_voice(model)
+    buf = io.BytesIO()
+    # length_scale es la inversa de la velocidad (si la versión lo soporta).
+    cfg = None
+    try:
+        from piper import SynthesisConfig
+
+        cfg = SynthesisConfig(length_scale=(1.0 / speed if speed else 1.0))
+    except Exception:  # noqa: BLE001
+        cfg = None
+    with _wave.open(buf, "wb") as wf:
+        if cfg is not None:
+            v.synthesize_wav(text, wf, syn_config=cfg)
+        else:
+            v.synthesize_wav(text, wf)
+    buf.seek(0)
+    with _wave.open(buf, "rb") as wf:
+        sr = wf.getframerate()
+        frames = wf.readframes(wf.getnframes())
+    samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    return samples, sr
 
 
 def _pcm16(samples: np.ndarray) -> bytes:
@@ -100,7 +149,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/health"):
-            body = json.dumps({"ok": True, "engines": ["kokoro"]}).encode()
+            engines = ["kokoro"]
+            if piper_voices_available():
+                engines.append("piper")
+            body = json.dumps(
+                {"ok": True, "engines": engines, "piper_voices": piper_voices_available()}
+            ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self._cors()
@@ -123,17 +177,29 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(n) or b"{}")
             text = (req.get("text") or "").strip()
             lang = (req.get("lang") or "es").strip()
-            engine = (req.get("engine") or "kokoro").strip()
+            engine = (req.get("engine") or "").strip()
             speed = float(req.get("speed") or 1.0)
-            voice = (req.get("voice") or DEFAULT_VOICE.get(lang, "ef_dora")).strip()
+            voice = (req.get("voice") or "").strip()
             if not text:
                 raise ValueError("texto vacío")
-            # Chatterbox aún no disponible → cae a kokoro (honesto, sin romper).
-            samples, sr = synth_kokoro(text, voice, lang, speed)
+            avail = piper_voices_available()
+            # Enrutado de motor: piper (voces latinas naturales) o kokoro. Si piden
+            # piper sin voz válida, usa la mexicana si está. Chatterbox → roadmap.
+            if engine == "piper" or (not engine and voice in avail):
+                model = voice if voice in avail else ("es_MX-claude-high" if "es_MX-claude-high" in avail else (avail[0] if avail else ""))
+                if not model:
+                    raise ValueError("piper sin voces instaladas")
+                samples, sr = synth_piper(text, model, speed)
+                used = "piper"
+            else:
+                samples, sr = synth_kokoro(
+                    text, voice or DEFAULT_VOICE.get(lang, "ef_dora"), lang, speed
+                )
+                used = "kokoro"
             audio, ctype = encode(samples, sr)
             self.send_response(200)
             self.send_header("Content-Type", ctype)
-            self.send_header("X-AION-TTS-Engine", engine if engine == "kokoro" else f"{engine}->kokoro")
+            self.send_header("X-AION-TTS-Engine", used)
             self._cors()
             self.send_header("Content-Length", str(len(audio)))
             self.end_headers()
