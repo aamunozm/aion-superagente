@@ -5,6 +5,7 @@ import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
 import { LANGS, useT } from "@/lib/i18n";
 import {
+  ttsSpeak,
   credentialsList,
   credentialRemove,
   credentialSet,
@@ -81,21 +82,64 @@ const DEEPSEEK_MODELS: { id: string; label: string; desc: string }[] = [
   { id: "__custom__",         label: "Otro (escribir ID)",   desc: "" },
 ];
 
-/** Selector de la voz de AION: propia (Kokoro/Chatterbox, vía núcleo) o del sistema. */
+// Voces locales disponibles (Kokoro v1.0). "" = automática según el idioma.
+const VOICES: { id: string; label: string }[] = [
+  { id: "", label: "Automática (según idioma)" },
+  { id: "ef_dora", label: "Español · Dora (f)" },
+  { id: "em_alex", label: "Español · Alex (m)" },
+  { id: "em_santa", label: "Español · Santa (m)" },
+  { id: "if_sara", label: "Italiano · Sara (f)" },
+  { id: "im_nicola", label: "Italiano · Nicola (m)" },
+  { id: "af_heart", label: "English · Heart (f)" },
+  { id: "am_michael", label: "English · Michael (m)" },
+];
+
+/** Todo lo que Ariel puede cambiar de la voz de AION: motor, voz, velocidad + prueba. */
 function VoiceCard() {
-  const [pref, setPref] = useState<"auto" | "system">("auto");
+  const { lang } = useT();
+  const [engine, setEngine] = useState<"auto" | "system">("auto");
+  const [voice, setVoice] = useState("");
+  const [speed, setSpeed] = useState(1);
+  const [testing, setTesting] = useState(false);
+  const [testMsg, setTestMsg] = useState<string | null>(null);
+
   useEffect(() => {
-    const v = typeof localStorage !== "undefined" ? localStorage.getItem("aion.voice") : null;
-    if (v === "system") setPref("system");
+    if (typeof localStorage === "undefined") return;
+    if (localStorage.getItem("aion.voice") === "system") setEngine("system");
+    setVoice(localStorage.getItem("aion.voice.name") || "");
+    setSpeed(parseFloat(localStorage.getItem("aion.voice.speed") || "1") || 1);
   }, []);
-  function choose(p: "auto" | "system") {
-    setPref(p);
-    try { localStorage.setItem("aion.voice", p); } catch { /* */ }
+
+  const save = (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* */ } };
+
+  async function test() {
+    setTestMsg(null);
+    setTesting(true);
+    try {
+      if (engine === "system") {
+        const u = new SpeechSynthesisUtterance("Hola Ariel, soy AION. Así sueno.");
+        u.lang = lang === "it" ? "it-IT" : lang === "en" ? "en-US" : "es-ES";
+        u.rate = speed;
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(u);
+      } else {
+        const blob = await ttsSpeak("Hola Ariel, soy AION. Así sueno con esta voz.", lang, { voice, speed });
+        const a = new Audio(URL.createObjectURL(blob));
+        a.onerror = () => setTestMsg("No pude reproducir (¿sidecar de voz arrancado?).");
+        await a.play();
+      }
+    } catch {
+      setTestMsg("La voz propia no respondió — se usará la del sistema como respaldo.");
+    } finally {
+      setTesting(false);
+    }
   }
-  const OPTS: { key: "auto" | "system"; label: string; note: string }[] = [
-    { key: "auto", label: "Voz propia de AION", note: "Natural y local (Kokoro). Cae a la del sistema si no está lista." },
-    { key: "system", label: "Voz del sistema", note: "La voz integrada del navegador/macOS. Instantánea." },
+
+  const ENGINES: { key: "auto" | "system"; label: string; note: string }[] = [
+    { key: "auto", label: "Voz propia de AION", note: "Natural y local (Kokoro). Respaldo a la del sistema." },
+    { key: "system", label: "Voz del sistema", note: "La voz integrada de macOS. Instantánea." },
   ];
+
   return (
     <div className="card">
       <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
@@ -104,13 +148,15 @@ function VoiceCard() {
       <p className="text-sm mb-3" style={{ color: "var(--text-3)" }}>
         Cómo suena AION cuando lee sus respuestas y en el modo voz.
       </p>
-      <div className="flex flex-col sm:flex-row gap-2">
-        {OPTS.map((o) => {
-          const active = pref === o.key;
+
+      {/* Motor */}
+      <div className="flex flex-col sm:flex-row gap-2 mb-4">
+        {ENGINES.map((o) => {
+          const active = engine === o.key;
           return (
             <button
               key={o.key}
-              onClick={() => choose(o.key)}
+              onClick={() => { setEngine(o.key); save("aion.voice", o.key); }}
               className="flex-1 text-left px-4 py-3 rounded-xl transition-all"
               style={{
                 background: active ? "var(--accent-subtle)" : "var(--surface-2)",
@@ -124,6 +170,45 @@ function VoiceCard() {
             </button>
           );
         })}
+      </div>
+
+      {/* Voz concreta + velocidad (solo aplican a la voz propia) */}
+      <div className="grid sm:grid-cols-2 gap-3" style={{ opacity: engine === "system" ? 0.5 : 1 }}>
+        <div>
+          <label className="text-xs block mb-1" style={{ color: "var(--text-3)" }}>Voz</label>
+          <select
+            className="input"
+            value={voice}
+            disabled={engine === "system"}
+            onChange={(e) => { setVoice(e.target.value); save("aion.voice.name", e.target.value); }}
+            style={{ background: "var(--surface-1)", color: "var(--text-1)" }}
+          >
+            {VOICES.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-xs block mb-1" style={{ color: "var(--text-3)" }}>
+            Velocidad · {speed.toFixed(2)}×
+          </label>
+          <input
+            type="range"
+            min={0.7}
+            max={1.3}
+            step={0.05}
+            value={speed}
+            disabled={engine === "system"}
+            onChange={(e) => { const s = parseFloat(e.target.value); setSpeed(s); save("aion.voice.speed", String(s)); }}
+            className="w-full"
+            style={{ accentColor: "var(--accent)" }}
+          />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-3 mt-4">
+        <button className="btn inline-flex items-center gap-1.5" onClick={test} disabled={testing}>
+          <Icon name="play" size={15} /> {testing ? "Sonando…" : "Probar voz"}
+        </button>
+        {testMsg && <span className="text-xs" style={{ color: "var(--text-3)" }}>{testMsg}</span>}
       </div>
     </div>
   );

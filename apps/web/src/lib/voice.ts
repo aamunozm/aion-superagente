@@ -140,9 +140,16 @@ export function useSpeech() {
         speakSystem(id, clean, lang, onEnd);
         return;
       }
+      // Preferencias de voz que el usuario puede cambiar en Ajustes.
+      const voiceName =
+        typeof localStorage !== "undefined" ? localStorage.getItem("aion.voice.name") || "" : "";
+      const speed =
+        typeof localStorage !== "undefined"
+          ? parseFloat(localStorage.getItem("aion.voice.speed") || "1") || 1
+          : 1;
       // Voz propia de AION (Kokoro/Chatterbox vía núcleo). Si el sidecar no está o
       // falla, cae a la voz del sistema sin romper la conversación.
-      ttsSpeak(clean, lang)
+      ttsSpeak(clean, lang, { voice: voiceName, speed })
         .then((blob) => {
           if (my !== reqRef.current) return; // superada por otra orden / stop / barge-in
           const url = URL.createObjectURL(blob);
