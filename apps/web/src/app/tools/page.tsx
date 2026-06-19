@@ -38,22 +38,46 @@ export default function ToolsPage() {
 
   return (
     <AppShell title="Herramientas">
-      <div className="max-w-6xl mx-auto px-3 py-6">
-        <p className="text-[15px] mb-2 max-w-2xl" style={{ color: "var(--text-2)" }}>
-          Las capacidades REALES del agente, leídas del núcleo. Las marcadas{" "}
-          <Badge tone="accent">
-            <Icon name="shield" size={11} /> confirma
-          </Badge>{" "}
-          piden tu aprobación antes de actuar (acciones sensibles o que escriben en el mundo).
-        </p>
-        {count > 0 && (
-          <p className="text-xs mb-7" style={{ color: "var(--text-3)" }}>
-            {count} herramientas activas en {groups.length} categorías.
-          </p>
-        )}
+      <div className="max-w-6xl mx-auto px-3 py-6 flex flex-col gap-6">
+        {/* ── CABECERA: qué son + recuento real (patrón de Mente) ── */}
+        <div
+          className="card flex flex-wrap items-center justify-between gap-4"
+          style={{ boxShadow: "var(--shadow-elevated)" }}
+        >
+          <div className="flex items-center gap-4 min-w-0">
+            <span
+              className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0"
+              style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}
+            >
+              <Icon name="tools" size={24} />
+            </span>
+            <div className="min-w-0">
+              <div className="font-display text-xl font-bold" style={{ color: "var(--text-1)" }}>
+                Herramientas
+              </div>
+              <p className="text-sm mt-0.5 max-w-2xl" style={{ color: "var(--text-3)" }}>
+                Las capacidades REALES del agente, leídas del núcleo. Las marcadas{" "}
+                <Badge tone="accent">
+                  <Icon name="shield" size={11} /> confirma
+                </Badge>{" "}
+                piden tu aprobación antes de actuar.
+              </p>
+            </div>
+          </div>
+          {count > 0 && (
+            <div className="min-w-0 text-right">
+              <div className="font-display text-2xl font-bold leading-tight" style={{ color: "var(--text-1)" }}>
+                {count}
+              </div>
+              <div className="text-xs" style={{ color: "var(--text-2)" }}>
+                en {groups.length} categorías
+              </div>
+            </div>
+          )}
+        </div>
 
         {err && (
-          <div className="card text-sm" style={{ color: "var(--text-2)" }}>
+          <div className="card text-sm" style={{ color: "var(--text-2)", boxShadow: "var(--shadow-elevated)" }}>
             No pude leer el catálogo del núcleo. ¿Está AION en marcha (puerto 8765)? Reintenta al
             abrir esta página con el backend activo.
           </div>
