@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AppShell, Icon, Markdown, MessageActions, VoiceBar } from "@/components";
+import { AppShell, Icon, Markdown, MessageActions, VoiceBar, VoiceMode, type VoiceState } from "@/components";
 import { useT } from "@/lib/i18n";
-import { useSpeech, useDictation } from "@/lib/voice";
+import { useSpeech, useDictation, stripMarkdownForSpeech } from "@/lib/voice";
 import { LightboxProvider, useLightbox } from "@/lib/lightbox";
 
 // Foto adjunta por Ariel, mostrada en su burbuja del chat. Clic = ampliar (lightbox).
@@ -440,6 +440,32 @@ export default function ChatPage() {
     });
   }
 
+  // ── Modo voz inmersivo: una conversación hablada continua a pantalla completa.
+  // Es la superficie visual del bucle manos-libres; al abrir, activa manos libres
+  // y empieza a escuchar; al cerrar, corta todo.
+  const [voiceMode, setVoiceMode] = useState(false);
+  function openVoiceMode() {
+    setVoiceMode(true);
+    setHandsFree(true);
+    speech.stop();
+    if (dictation.supported) dictation.start();
+  }
+  function closeVoiceMode() {
+    setVoiceMode(false);
+    setHandsFree(false);
+    speech.stop();
+    dictation.stop();
+  }
+  // Estado derivado para el overlay (qué está pasando ahora mismo).
+  const voiceState: VoiceState = busy
+    ? "thinking"
+    : speech.speakingId
+      ? "speaking"
+      : dictation.listening
+        ? "listening"
+        : "idle";
+  const lastAnswer = turns.length ? stripMarkdownForSpeech(turns[turns.length - 1].answer) : "";
+
   // Conversación hablada en tiempo real: cuando una respuesta termina (no hay
   // stream en curso) y el modo manos libres está activo, AION la lee en voz alta
   // y, al acabar, reabre el micrófono para que sigas hablando sin tocar nada.
@@ -782,6 +808,19 @@ export default function ChatPage() {
           onMic={onMic}
           onToggleHandsFree={toggleHandsFree}
         />
+        {/* Modo voz inmersivo: conversación hablada a pantalla completa. */}
+        {(dictation.supported || speech.supported) && (
+          <button
+            type="button"
+            onClick={openVoiceMode}
+            className="shrink-0 rounded-full p-2 transition-colors"
+            style={{ color: "var(--text-3)", background: "var(--surface-2)" }}
+            title={t("chat.voiceMode")}
+            aria-label={t("chat.voiceMode")}
+          >
+            <Icon name="waveform" size={18} />
+          </button>
+        )}
         <input
           className="input"
           placeholder={dictation.listening ? t("chat.listening") : mode === "chat" ? t("chat.placeholderChat") : mode === "crew" ? t("chat.placeholderCrew") : t("chat.placeholderAgent")}
@@ -794,6 +833,14 @@ export default function ChatPage() {
         </button>
       </form>
       </div>
+      <VoiceMode
+        open={voiceMode}
+        state={voiceState}
+        interim={dictation.interim}
+        caption={lastAnswer}
+        onToggleMic={onMic}
+        onClose={closeVoiceMode}
+      />
     </AppShell>
     </LightboxProvider>
   );

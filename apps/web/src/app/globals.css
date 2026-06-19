@@ -439,3 +439,21 @@
 .md-table th { font-weight: 650; background: var(--accent-subtle); color: var(--text-1); }
 .md-table tr:last-child td { border-bottom: 0; }
 .md-table td { color: var(--text-2); }
+
+/* ── Modo voz: onda + orbe animados ───────────────────────────────────── */
+@keyframes voiceBar {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+@keyframes voicePulse {
+  0%, 100% { transform: scale(1); opacity: 0.7; }
+  50% { transform: scale(1.06); opacity: 1; }
+}
+@keyframes voiceFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.voice-fade { animation: voiceFade 0.2s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .voice-fade { animation: none; }
+}

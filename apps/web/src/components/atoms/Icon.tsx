@@ -12,7 +12,7 @@ export type IconName =
   // ── Nuevos: voz, copiar, comunicaciones ──
   | "copy" | "play" | "stop" | "volume" | "phone" | "message" | "users"
   | "filter" | "x" | "wifi" | "network" | "terminal" | "key" | "trash"
-  | "whatsapp" | "bell" | "bellOff" | "pencil";
+  | "whatsapp" | "bell" | "bellOff" | "pencil" | "waveform";
 
 const PATHS: Record<IconName, React.ReactNode> = {
   chat: <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />,
@@ -68,6 +68,7 @@ const PATHS: Record<IconName, React.ReactNode> = {
   x: <path d="M6 6l12 12M18 6 6 18" />,
   wifi: <><path d="M2 8.5a16 16 0 0 1 20 0M5 12a11 11 0 0 1 14 0M8 15.5a6 6 0 0 1 8 0" /><path d="M12 19h.01" /></>,
   network: <><rect x="9" y="3" width="6" height="5" rx="1" /><rect x="3" y="16" width="6" height="5" rx="1" /><rect x="15" y="16" width="6" height="5" rx="1" /><path d="M12 8v4M6 16v-2h12v2" /></>,
+  waveform: <><path d="M4 10v4M8 6v12M12 9v6M16 4v16M20 10v4" /></>,
   terminal: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m7 9 3 3-3 3M13 15h4" /></>,
   key: <><circle cx="8" cy="8" r="4" /><path d="m11 11 8 8M16 16l2-2M18 18l2-2" /></>,
   trash: <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13" />,
