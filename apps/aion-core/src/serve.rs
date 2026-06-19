@@ -540,6 +540,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/provider/toggle", post(provider_toggle))
         // Catálogo REAL de herramientas del agente (para el dashboard, sin desincronizar).
         .route("/api/tools", get(tools_list))
+        // Flujos de trabajo (estilo n8n): CRUD + ejecución.
+        .route("/api/workflows", get(workflows_list).post(workflows_set))
+        .route("/api/workflows/remove", post(workflows_remove))
+        .route("/api/workflows/run", post(workflows_run))
         // Gobernanza de comunicaciones: con quién y por qué canal puede hablar AION.
         .route("/api/comms", get(comms_get).post(comms_set))
         .route("/api/governance/setup", post(governance_setup))
@@ -1362,6 +1366,75 @@ async fn comms_set(Json(p): Json<crate::comms::CommsPolicy>) -> Json<serde_json:
         Ok(()) => Json(serde_json::json!({ "ok": true })),
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
+}
+
+// ─── Flujos de trabajo (estilo n8n) ─────────────────────────────────────────
+
+/// Lista los flujos guardados.
+async fn workflows_list() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "workflows": crate::workflow::load() }))
+}
+
+/// Crea o actualiza un flujo (upsert por id) y persiste.
+async fn workflows_set(Json(wf): Json<crate::workflow::Workflow>) -> Json<serde_json::Value> {
+    let list = crate::workflow::upsert(crate::workflow::load(), wf);
+    match crate::workflow::save(&list) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "count": list.len() })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct WorkflowIdBody {
+    id: String,
+}
+
+/// Elimina un flujo por id.
+async fn workflows_remove(Json(b): Json<WorkflowIdBody>) -> Json<serde_json::Value> {
+    let list = crate::workflow::remove(crate::workflow::load(), &b.id);
+    match crate::workflow::save(&list) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// Construye un registro con las herramientas SEGURAS (lectura/cálculo/investigación)
+/// para ejecutar flujos. No incluye herramientas sensibles (envíos, control del ratón):
+/// un flujo no debe disparar acciones irreversibles sin el bucle HITL del agente.
+fn workflow_registry() -> ToolRegistry {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(CalculatorTool));
+    if let Ok(mem) = crate::shared_memory() {
+        tools.register(Arc::new(MemoryTool::new(mem.clone(), 3)));
+        tools.register(Arc::new(crate::agent_tools::RememberTool::new(mem)));
+    }
+    let web = Arc::new(WebClient::new());
+    tools.register(Arc::new(crate::agent_tools::SearchTool::new(web.clone())));
+    tools.register(Arc::new(crate::agent_tools::WeatherTool::new(web.clone())));
+    tools.register(Arc::new(WebTool::new(web.clone())));
+    tools.register(Arc::new(crate::agent_tools::FilesTool::new()));
+    tools.register(Arc::new(crate::agent_tools::FileReadTool::new()));
+    tools.register(Arc::new(crate::agent_tools::LibrarySearchTool::new()));
+    tools.register(Arc::new(crate::agent_tools::GraphSearchTool::new()));
+    // Comunicaciones de SOLO lectura (mirar agenda / contactos).
+    tools.register(Arc::new(crate::comms_tools::CalendarListTool::new()));
+    tools.register(Arc::new(crate::comms_tools::ContactsSearchTool::new()));
+    tools
+}
+
+/// Ejecuta un flujo por id (lanzado por Ariel desde la UI). Devuelve el resultado por paso.
+async fn workflows_run(Json(b): Json<WorkflowIdBody>) -> Json<serde_json::Value> {
+    let Some(wf) = crate::workflow::load().into_iter().find(|w| w.id == b.id) else {
+        return Json(serde_json::json!({ "error": "flujo no encontrado" }));
+    };
+    let tools = workflow_registry();
+    // allow_sensitive=true: lo lanza Ariel a mano (su intención explícita); aun así el
+    // registro de ejecución solo trae herramientas seguras, sin acciones irreversibles.
+    let run = crate::workflow::run(&wf, &tools, true).await;
+    Json(
+        serde_json::to_value(run)
+            .unwrap_or_else(|_| serde_json::json!({ "error": "serialización" })),
+    )
 }
 
 #[derive(Deserialize)]

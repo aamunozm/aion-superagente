@@ -64,6 +64,7 @@ mod skill_tool;
 mod skillbook_tool;
 mod usermodel;
 mod web_tool;
+mod workflow;
 mod workspace;
 
 /// Escritura ATÓMICA (tmp + rename): un crash o un lector concurrente jamás ven un
