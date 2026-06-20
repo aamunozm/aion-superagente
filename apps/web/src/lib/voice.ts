@@ -425,7 +425,16 @@ export function useSpeech() {
       qLangRef.current = lang;
       qDoneRef.current = false;
       setSpeakingId(id);
-      qRef.current.push(clean);
+      // Trocea por FRASE antes de encolar: si llega un bloque de varias frases (o «el
+      // resto» del turno), cada frase es un item → el TTS genera trozos pequeños, la 1ª
+      // suena de inmediato y la latencia por llamada es baja (antes mandaba 1400 chars de
+      // golpe = pausa larga). Frases muy largas sin puntuación se trocean por coma.
+      const parts = clean
+        .split(/(?<=[.!?…])\s+/)
+        .flatMap((s) => (s.length > 180 ? s.split(/(?<=,)\s+/) : [s]))
+        .map((s) => s.trim())
+        .filter(Boolean);
+      for (const p of parts.length ? parts : [clean]) qRef.current.push(p);
       drainQueue();
     },
     [drainQueue],
