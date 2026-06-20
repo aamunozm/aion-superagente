@@ -109,6 +109,25 @@ const VOICES: { id: string; engine: string; label: string }[] = [
 ];
 const DEFAULT_VOICE_ID = "es_MX-claude-high";
 
+// Las 12 voces diseñadas (VoiceDesign→clonadas) llevan slug «ES-Nombre / IT-Nombre /
+// EN-Nombre». Las clasificamos por idioma + género para agruparlas bonito en el selector.
+const VOICE_GENDER: Record<string, "m" | "f"> = {
+  Mateo: "m", Diego: "m", Valentina: "f", Camila: "f",
+  Marco: "m", Luca: "m", Giulia: "f", Sofia: "f",
+  James: "m", Ethan: "m", Emma: "f", Charlotte: "f",
+};
+const CLONE_GROUPS = ["Tu voz personal ★", "Español latino", "Italiano", "Inglés"];
+function classifyClone(slug: string): { group: string; label: string } {
+  const m = slug.match(/^(ES|IT|EN)-(.+)$/);
+  if (m) {
+    const lang = { ES: "Español latino", IT: "Italiano", EN: "Inglés" }[m[1] as "ES" | "IT" | "EN"];
+    const g = VOICE_GENDER[m[2]];
+    const sym = g === "m" ? "· hombre" : g === "f" ? "· mujer" : "";
+    return { group: lang, label: `${m[2]} ${sym}` };
+  }
+  return { group: "Tu voz personal ★", label: `${slug} · clonada ★` };
+}
+
 /** Todo lo que Ariel puede cambiar de la voz de AION: motor, voz, velocidad + prueba. */
 function VoiceCard() {
   const { lang } = useT();
@@ -136,7 +155,10 @@ function VoiceCard() {
         const stored = (typeof localStorage !== "undefined" && localStorage.getItem("aion.voice.name")) || "";
         const valid = VOICES.some((v) => v.id === stored) || cl.includes(stored);
         if (stored && !valid) {
-          const best = cl[0] || DEFAULT_VOICE_ID;
+          const best =
+            (cl.includes("chile") ? "chile" : cl.find((c) => c.startsWith("ES-"))) ||
+            cl[0] ||
+            DEFAULT_VOICE_ID;
           const eng = cl.includes(best) ? "qwen" : VOICES.find((v) => v.id === best)?.engine || "kokoro";
           save("aion.voice.name", best);
           save("aion.voice.engine", eng);
@@ -269,13 +291,17 @@ function VoiceCard() {
             onChange={(e) => chooseVoice(e.target.value)}
             style={{ background: "var(--surface-1)", color: "var(--text-1)" }}
           >
-            {cloned.length > 0 && (
-              <optgroup label="Tus voces clonadas — español realista ★">
-                {cloned.map((c) => (
-                  <option key={`c-${c}`} value={c}>{`${c} · clonada ★`}</option>
-                ))}
-              </optgroup>
-            )}
+            {CLONE_GROUPS.map((grp) => {
+              const items = cloned.filter((c) => classifyClone(c).group === grp);
+              if (!items.length) return null;
+              return (
+                <optgroup key={grp} label={grp}>
+                  {items.map((c) => (
+                    <option key={`c-${c}`} value={c}>{classifyClone(c).label}</option>
+                  ))}
+                </optgroup>
+              );
+            })}
             <optgroup label="Voces de catálogo (multiidioma, acento no nativo)">
               {VOICES.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
             </optgroup>
@@ -362,9 +388,9 @@ function VoiceCard() {
           </button>
         </div>
         {cloneMsg && <p className="text-xs mt-2" style={{ color: "var(--text-2)" }}>{cloneMsg}</p>}
-        {cloned.length > 0 && (
+        {cloned.filter((c) => !/^(ES|IT|EN)-/.test(c)).length > 0 && (
           <div className="flex flex-wrap gap-2 mt-3">
-            {cloned.map((c) => (
+            {cloned.filter((c) => !/^(ES|IT|EN)-/.test(c)).map((c) => (
               <span
                 key={c}
                 className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full"
