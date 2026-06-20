@@ -158,6 +158,21 @@ export function useSpeech() {
   // Invalidador de órdenes en vuelo (barge-in / nueva orden / stop).
   const reqRef = useRef(0);
 
+  // Cola secuencial para hablar la respuesta MIENTRAS el LLM la genera (fluidez).
+  const qRef = useRef<string[]>([]);
+  const qBusyRef = useRef(false);
+  const qIdRef = useRef<string | null>(null);
+  const qLangRef = useRef<Lang>("es");
+  const qDoneRef = useRef(false);
+  const qEndRef = useRef<(() => void) | undefined>(undefined);
+
+  const clearQueue = useCallback(() => {
+    qRef.current = [];
+    qBusyRef.current = false;
+    qDoneRef.current = false;
+    qEndRef.current = undefined;
+  }, []);
+
   const cleanupAudio = useCallback(() => {
     stopPlayback();
   }, []);
@@ -168,8 +183,9 @@ export function useSpeech() {
       window.speechSynthesis.cancel();
     }
     cleanupAudio();
+    clearQueue();
     setSpeakingId(null);
-  }, [cleanupAudio]);
+  }, [cleanupAudio, clearQueue]);
 
   // Voz del SISTEMA (fallback): Web Speech API.
   const speakSystem = useCallback(
@@ -308,7 +324,76 @@ export function useSpeech() {
     [cleanupAudio],
   );
 
-  return { speak, stop, speakingId, supported };
+  // ── Cola: reproduce frases en ORDEN sin cancelar la anterior, con Piper
+  // (instantáneo). Permite hablar la respuesta del LLM mientras se genera. ──
+  const drainQueue = useCallback(() => {
+    if (qBusyRef.current) return;
+    const my = reqRef.current;
+    const next = qRef.current.shift();
+    if (next === undefined) {
+      // Nada pendiente: si el turno ya terminó, cierra (reabre micro en modo voz).
+      if (qDoneRef.current) {
+        setSpeakingId((c) => (c === qIdRef.current ? null : c));
+        const end = qEndRef.current;
+        qEndRef.current = undefined;
+        qDoneRef.current = false;
+        end?.();
+      }
+      return;
+    }
+    qBusyRef.current = true;
+    const speed =
+      typeof localStorage !== "undefined"
+        ? parseFloat(localStorage.getItem("aion.voice.speed") || "1") || 1
+        : 1;
+    // Voz rápida (Piper mexicano) para fluidez en vivo, salvo que el usuario tenga
+    // una voz de catálogo rápida elegida (no clonada).
+    const savedEngine =
+      typeof localStorage !== "undefined" ? localStorage.getItem("aion.voice.engine") : null;
+    const savedVoice =
+      typeof localStorage !== "undefined" ? localStorage.getItem("aion.voice.name") : null;
+    const fast = savedEngine && savedEngine !== "chatterbox";
+    const engine = fast ? savedEngine! : "piper";
+    const voice = fast && savedVoice ? savedVoice : "es_MX-claude-high";
+    ttsSpeak(next, qLangRef.current, { voice, engine, speed })
+      .then((blob) => (my === reqRef.current ? playTtsBlob(blob) : undefined))
+      .catch(() => { /* frase fallida → se omite, sigue la conversación */ })
+      .finally(() => {
+        qBusyRef.current = false;
+        if (my === reqRef.current) drainQueue();
+      });
+  }, []);
+
+  /** Encola una frase para hablar en orden (no corta la anterior). */
+  const enqueueSpeak = useCallback(
+    (id: string, text: string, lang: Lang) => {
+      const clean = stripMarkdownForSpeech(text);
+      if (!clean) return;
+      if (typeof localStorage !== "undefined" && localStorage.getItem("aion.voice") === "system") {
+        return; // con voz del sistema no usamos la cola (no soporta streaming así)
+      }
+      qIdRef.current = id;
+      qLangRef.current = lang;
+      qDoneRef.current = false;
+      setSpeakingId(id);
+      qRef.current.push(clean);
+      drainQueue();
+    },
+    [drainQueue],
+  );
+
+  /** Marca el turno como terminado: al vaciarse la cola, dispara onEnd. */
+  const finishQueue = useCallback(
+    (id: string, onEnd?: () => void) => {
+      qIdRef.current = id;
+      qDoneRef.current = true;
+      qEndRef.current = onEnd;
+      drainQueue();
+    },
+    [drainQueue],
+  );
+
+  return { speak, stop, speakingId, supported, enqueueSpeak, finishQueue, clearQueue };
 }
 
 /**

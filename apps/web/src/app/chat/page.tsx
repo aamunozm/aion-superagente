@@ -464,34 +464,60 @@ export default function ChatPage() {
     setVoiceMode(false);
     speech.stop();
   }
-  // Estado derivado para el overlay (qué está pasando ahora mismo).
-  const voiceState: VoiceState = busy
-    ? "thinking"
-    : speech.speakingId
-      ? "speaking"
+  // Estado derivado para el overlay. Hablar tiene prioridad sobre pensar: en cuanto
+  // AION empieza a decir la 1ª frase (aunque el LLM siga escribiendo), mostramos
+  // «Hablando».
+  const voiceState: VoiceState = speech.speakingId
+    ? "speaking"
+    : busy
+      ? "thinking"
       : convo.listening
         ? "listening"
         : "idle";
 
-  // AION lee en voz alta cada respuesta nueva en manos libres O en modo voz. Al
-  // terminar, en manos libres (composer) reabre el dictado puntual; en modo voz
-  // NO hace falta —el hook de conversación retoma la escucha continua solo—.
+  // CONVERSACIÓN FLUIDA: AION habla la respuesta MIENTRAS el LLM la genera. A medida
+  // que llegan frases COMPLETAS las va diciendo (con Piper, instantáneo); así empieza
+  // a responder tras la 1ª frase, no tras toda la respuesta. Al terminar, reabre el
+  // micro (en manos libres; en modo voz el hook de conversación lo retoma solo).
+  const spokenCharRef = useRef(0);
+  const finishedTurnRef = useRef(-1);
   useEffect(() => {
-    if (!(handsFree || voiceMode) || busy || turns.length === 0) return;
+    if (!(handsFree || voiceMode) || turns.length === 0) return;
     const i = turns.length - 1;
-    const last = turns[i];
-    if (!last.answer || last.answer.startsWith("⚠️")) return;
-    if (i === lastSpokenRef.current) return;
-    lastSpokenRef.current = i;
-    speech.speak(
-      `turn-${i}`,
-      last.answer,
-      lang,
-      () => {
-        if (handsFree && !voiceMode && dictation.supported && !busy) dictation.start();
-      },
-      { live: true },
+    const ans = turns[i].answer || "";
+    if (ans.startsWith("⚠️")) return;
+    // Nuevo turno → reinicia el seguimiento.
+    if (lastSpokenRef.current !== i) {
+      lastSpokenRef.current = i;
+      spokenCharRef.current = 0;
+    }
+    // Encola las frases COMPLETAS nuevas (hasta el último signo de puntuación final).
+    const fromIdx = spokenCharRef.current;
+    const pending = ans.slice(fromIdx);
+    const lastEnd = Math.max(
+      pending.lastIndexOf(". "),
+      pending.lastIndexOf("! "),
+      pending.lastIndexOf("? "),
+      pending.lastIndexOf("… "),
+      pending.lastIndexOf(".\n"),
+      pending.lastIndexOf("!\n"),
+      pending.lastIndexOf("?\n"),
     );
+    if (lastEnd >= 0) {
+      const chunk = pending.slice(0, lastEnd + 1).trim();
+      if (chunk) speech.enqueueSpeak(`turn-${i}`, chunk, lang);
+      spokenCharRef.current = fromIdx + lastEnd + 1;
+    }
+    // Cuando el LLM termina: encola el resto y cierra el turno (una sola vez).
+    if (!busy && finishedTurnRef.current !== i) {
+      finishedTurnRef.current = i;
+      const rest = ans.slice(spokenCharRef.current).trim();
+      if (rest) speech.enqueueSpeak(`turn-${i}`, rest, lang);
+      spokenCharRef.current = ans.length;
+      speech.finishQueue(`turn-${i}`, () => {
+        if (handsFree && !voiceMode && dictation.supported) dictation.start();
+      });
+    }
     // speech/dictation son estables (useCallback); el disparador real es turns/busy.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turns, busy, handsFree, voiceMode, lang]);
