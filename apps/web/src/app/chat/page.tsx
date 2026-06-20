@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AppShell, Icon, Markdown, MessageActions, VoiceBar, VoiceMode, type VoiceState } from "@/components";
 import { useT } from "@/lib/i18n";
-import { useSpeech, useDictation, useVoiceConversation, stripMarkdownForSpeech } from "@/lib/voice";
+import { useSpeech, useDictation, useVoiceConversation, stripMarkdownForSpeech, warmVoice } from "@/lib/voice";
 import { LightboxProvider, useLightbox } from "@/lib/lightbox";
 
 // Foto adjunta por Ariel, mostrada en su burbuja del chat. Clic = ampliar (lightbox).
@@ -476,6 +476,7 @@ export default function ChatPage() {
     setVoiceMode(true);
     setVoiceMuted(false);
     speech.stop();
+    warmVoice(lang); // precompila el kernel Metal de la voz elegida → 1ª frase en caliente
   }
   function closeVoiceMode() {
     setVoiceMode(false);

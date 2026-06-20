@@ -33,6 +33,36 @@ export function stripMarkdownForSpeech(md: string): string {
 const BCP47: Record<Lang, string> = { es: "es-ES", it: "it-IT", en: "en-US" };
 export const ttsLang = (lang: Lang): string => BCP47[lang] ?? "es-ES";
 
+// ── Pre-calentado de voz (mata el arranque frío) ──────────────────────────────
+// Qwen3-TTS compila un kernel Metal la PRIMERA vez que sintetiza con una voz dada
+// (≈3-5 s extra solo en esa llamada). Si esperamos a la 1ª respuesta del agente,
+// el usuario percibe ese pico justo cuando más quiere fluidez. Solución estilo
+// ElevenLabs: al ABRIR el modo voz (o al cambiar de voz en Ajustes) lanzamos una
+// síntesis representativa y DESCARTAMOS el audio — el kernel queda compilado y la
+// 1ª frase real sale ya en caliente (~1 s). Se calienta una sola vez por voz/sesión.
+const warmedVoices = new Set<string>();
+export function warmVoice(lang: Lang = "es"): void {
+  if (typeof window === "undefined") return;
+  let engine = localStorage.getItem("aion.voice.engine");
+  if (engine === "chatterbox") engine = "qwen"; // migración clon → Qwen3
+  // Piper y la voz del sistema son instantáneos: no hay kernel que precompilar.
+  if (!engine || engine === "system" || engine === "piper") return;
+  const voice = localStorage.getItem("aion.voice.name") || "";
+  const key = `${engine}:${voice}:${lang}`;
+  if (warmedVoices.has(key)) return;
+  warmedVoices.add(key);
+  // Frase de longitud media: compila el bucket de kernel típico de una frase real.
+  const sample =
+    lang === "it"
+      ? "Va bene, dammi un momento e ci penso io con calma."
+      : lang === "en"
+        ? "Alright, give me a moment and I will sort this out for you."
+        : "A ver, dame un momento y lo vemos con calma, ya te cuento.";
+  ttsSpeak(sample, lang, { voice, engine, speed: 1 }).catch(() => {
+    warmedVoices.delete(key); // falló → permite reintentar en el próximo intento
+  });
+}
+
 // Migración de voz (una vez, al cargar): los presets de Qwen 'dylan' y 'eric' tenían
 // DIALECTO CHINO oculto (beijing/sichuan) → sonaban a extranjero leyendo español. Si
 // quedaron guardados, cae a la voz latina NATIVA (Piper México), que sí es español real.
@@ -181,6 +211,7 @@ export function useSpeech() {
   const qLangRef = useRef<Lang>("es");
   const qDoneRef = useRef(false);
   const qEndRef = useRef<(() => void) | undefined>(undefined);
+  const qTurnRef = useRef<string | null>(null); // id cuyo 1er chunk ya troceamos
 
   const clearQueue = useCallback(() => {
     qRef.current = [];
@@ -425,6 +456,9 @@ export function useSpeech() {
       qLangRef.current = lang;
       qDoneRef.current = false;
       setSpeakingId(id);
+      // ¿Es el PRIMER chunk de este turno? (el streaming llama varias veces por turno).
+      const turnStart = qTurnRef.current !== id;
+      qTurnRef.current = id;
       // Trocea por FRASE antes de encolar: si llega un bloque de varias frases (o «el
       // resto» del turno), cada frase es un item → el TTS genera trozos pequeños, la 1ª
       // suena de inmediato y la latencia por llamada es baja (antes mandaba 1400 chars de
@@ -434,6 +468,24 @@ export function useSpeech() {
         .flatMap((s) => (s.length > 180 ? s.split(/(?<=,)\s+/) : [s]))
         .map((s) => s.trim())
         .filter(Boolean);
+      // FRONT-LOAD del primer audio: el cuello de la latencia percibida es la 1ª frase.
+      // Si el cerebro abre con una frase larga (~100c → ~2.9 s de TTS), partimos su 1ª
+      // cláusula (por coma/«;»/«…») como item suelto: el primer audio sale en ~1 s y el
+      // resto se sintetiza mientras suena. Solo el ARRANQUE del turno; las siguientes
+      // frases van enteras (prosodia natural). Umbral 60c para no trocear aperturas cortas.
+      if (turnStart && parts.length && parts[0].length > 60) {
+        const head = parts[0];
+        // Primer límite de cláusula (coma/;/:/…) que deje una apertura de 12-90c: ni un
+        // trocito ridículo («Mira:», «Vale,») ni una frase entera larga. Si no, va completa.
+        let cut = -1;
+        for (let i = 11; i < head.length - 1 && i < 90; i++) {
+          if (/[,;:…]/.test(head[i])) {
+            cut = i + 1;
+            break;
+          }
+        }
+        if (cut > 0) parts.splice(0, 1, head.slice(0, cut).trim(), head.slice(cut).trim());
+      }
       for (const p of parts.length ? parts : [clean]) qRef.current.push(p);
       drainQueue();
     },
