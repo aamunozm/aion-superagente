@@ -46,6 +46,23 @@ PRESETS = [
 ]
 DEFAULT_PRESET = "serena"  # femenina, natural en español
 
+# ⚠️ Qwen3 espera el idioma como PALABRA ('spanish'), NO el código ISO ('es'). Pasar
+# 'es' hace que fonemice en INGLÉS → "español con acento inglés". Mapear siempre.
+LANG_MAP = {
+    "es": "spanish", "en": "english", "it": "italian", "pt": "portuguese",
+    "fr": "french", "de": "german", "ru": "russian", "ja": "japanese",
+    "ko": "korean", "zh": "chinese",
+}
+
+
+def qwen_lang(lang: str) -> str:
+    lang = (lang or "es").strip().lower()
+    if lang in LANG_MAP:
+        return LANG_MAP[lang]
+    if lang in LANG_MAP.values():  # ya viene como palabra
+        return lang
+    return "spanish"  # AION es español-primario; nunca caer a inglés por defecto
+
 _model = None
 _ready = threading.Event()  # se activa cuando el modelo está cargado y caliente
 
@@ -132,7 +149,7 @@ def _generate(text: str, lang: str, voice: str, speed: float):
     chunks = []
     sr = 24000
     for r in m.generate(
-        text=text, lang_code=(lang or "es"), speed=(speed or 1.0), verbose=False, **kw
+        text=text, lang_code=qwen_lang(lang), speed=(speed or 1.0), verbose=False, **kw
     ):
         chunks.append(np.asarray(r.audio, dtype=np.float32).reshape(-1))
         sr = getattr(r, "sample_rate", None) or getattr(r, "sr", None) or sr
