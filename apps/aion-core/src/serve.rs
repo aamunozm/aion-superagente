@@ -85,6 +85,13 @@ fn build_engine(cfg: &crate::provider::ProviderConfig) -> Arc<dyn LlmEngine> {
 // TEXTO/profundidad. Benchmark en el Mac de Ariel: ~0.6s/turno cacheado vs ~5s DeepSeek.
 const VOICE_BRAIN_URL: &str = "http://127.0.0.1:11920/v1";
 const VOICE_BRAIN_MODEL: &str = "mlx-community/Qwen3-4B-Instruct-2507-4bit";
+/// Directiva de VOZ (constante → forma parte del prefijo estable que el cerebro local
+/// cachea). Pide respuestas breves y conversacionales, como en una llamada.
+const VOICE_NOTE: &str = "\n\nESTÁS EN MODO VOZ (conversación HABLADA, no escrita): \
+    responde BREVE y natural, 1-3 frases, como en una llamada telefónica. Ve directo al \
+    grano, SIN listas, viñetas, títulos ni ensayos; di lo esencial y deja que Ariel siga. \
+    Si el tema da para más, ofrécelo en una frase («¿quieres que profundice?») en vez de \
+    soltarlo todo de golpe.";
 static VOICE_BRAIN_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn voice_brain_engine() -> Arc<dyn LlmEngine> {
@@ -769,6 +776,31 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                             if ok {
                                 VOICE_BRAIN_READY.store(true, std::sync::atomic::Ordering::Relaxed);
                                 tracing::info!("cerebro de voz local LISTO (Qwen3-4B)");
+                                // PRE-CALENTAR el prompt-cache con el prefijo-alma ESTABLE → el
+                                // PRIMER turno de voz real ya acierta el caché (no paga el prefill
+                                // en frío de ~4s). Debe coincidir con el prefijo del handler.
+                                let warm_sys = format!(
+                                    "{}\n\n{}\n\n{}{}",
+                                    crate::self_model::SELF_SUMMARY,
+                                    lang_directive(&Some("es".to_string())),
+                                    crate::prompts::persona("conversacion"),
+                                    VOICE_NOTE
+                                );
+                                let warm = serde_json::json!({
+                                    "model": VOICE_BRAIN_MODEL,
+                                    "max_tokens": 1,
+                                    "messages": [
+                                        {"role": "system", "content": warm_sys},
+                                        {"role": "user", "content": "hola"}
+                                    ]
+                                });
+                                let _ = reqwest::Client::new()
+                                    .post("http://127.0.0.1:11920/v1/chat/completions")
+                                    .json(&warm)
+                                    .timeout(std::time::Duration::from_secs(40))
+                                    .send()
+                                    .await;
+                                tracing::info!("cerebro de voz: prompt-cache pre-calentado");
                                 break;
                             }
                         }
@@ -2135,14 +2167,7 @@ async fn chat(
     // MODO VOZ: respuestas BREVES y conversacionales. En el test de latencia las respuestas
     // salían de 200-300 palabras (ensayos) → tardan mucho y no suenan a conversación hablada.
     // Esto NO toca el alma (identidad/persona): solo pide brevedad, como en una llamada.
-    let voice_note = if body.fast {
-        "\n\nESTÁS EN MODO VOZ (conversación HABLADA, no escrita): responde BREVE y natural, \
-         1-3 frases, como en una llamada telefónica. Ve directo al grano, SIN listas, viñetas, \
-         títulos ni ensayos; di lo esencial y deja que Ariel siga. Si el tema da para más, \
-         ofrécelo en una frase («¿quieres que profundice?») en vez de soltarlo todo de golpe."
-    } else {
-        ""
-    };
+    let voice_note = if body.fast { VOICE_NOTE } else { "" };
     let self_ctx = if using_voice_brain {
         // CEREBRO DE VOZ: prompt ESTABLE y cacheable. El prompt completo lleva bloques que
         // CAMBIAN cada turno (memoria reciente, hora, diario, presencia, estado interno…) →
