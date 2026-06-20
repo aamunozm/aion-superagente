@@ -500,11 +500,14 @@ export function useVoiceConversation(
   {
     listen,
     watchBargeIn,
+    speaking,
     onUtterance,
     onBargeIn,
   }: {
     listen: boolean;
     watchBargeIn: boolean;
+    /** ¿AION está HABLANDO ahora (no solo pensando)? Sirve para recalibrar el eco. */
+    speaking: boolean;
     onUtterance: (text: string) => void;
     onBargeIn: () => void;
   },
@@ -515,6 +518,9 @@ export function useVoiceConversation(
   const wantRecRef = useRef(false);
   const cb = useRef({ onUtterance, onBargeIn });
   cb.current = { onUtterance, onBargeIn };
+  // Estado de "hablando" vivo para el bucle del VAD (recalibra el eco al empezar a hablar).
+  const speakingRef = useRef(speaking);
+  speakingRef.current = speaking;
 
   // ── Reconocimiento continuo (se reanuda solo tras los cortes por silencio) ──
   const startRec = useCallback(() => {
@@ -597,14 +603,18 @@ export function useVoiceConversation(
         src.connect(an);
         const buf = new Uint8Array(an.fftSize);
         let above = 0;
-        // Calibración del SUELO DE ECO: durante los primeros ~430 ms (con AION ya
-        // hablando) medimos cuánto mete su propia voz en el micro tras la cancelación
-        // de eco del sistema, y fijamos el umbral POR ENCIMA. Así el eco no dispara la
-        // interrupción, pero tu voz al hablar por encima SÍ. Se adapta al volumen real.
+        let frame = 0; // frames desde que abrimos el micro (para la gracia inicial)
+        let thresh = 0.16; // umbral base (mientras AION PIENSA, sin eco)
+        // Recalibración del SUELO DE ECO: cuando AION EMPIEZA a hablar, medimos ~430 ms
+        // cuánto mete su propia voz en el micro (tras la cancelación de eco del sistema)
+        // y subimos el umbral POR ENCIMA → su eco no dispara la interrupción, pero tu voz
+        // sí. Mientras solo PIENSA (sin eco) usamos el umbral base 0.16.
+        const CALIB = 26;
+        const ARM = 25; // ~400 ms de gracia: que la cola de tu propia pregunta no dispare
+        let calibrating = false;
         let calib = 0;
         let floorSum = 0;
-        let thresh = 0.16;
-        const CALIB = 26; // ~430 ms a ~60 fps
+        let wasSpeaking = speakingRef.current;
         const tick = () => {
           an.getByteTimeDomainData(buf);
           let sum = 0;
@@ -613,16 +623,29 @@ export function useVoiceConversation(
             sum += v * v;
           }
           const rms = Math.sqrt(sum / buf.length);
-          if (calib < CALIB) {
+          frame++;
+          const sp = speakingRef.current;
+          if (sp && !wasSpeaking) {
+            // AION pasó de pensar a HABLAR → recalibra al eco real de su voz.
+            calibrating = true;
+            calib = 0;
+            floorSum = 0;
+          }
+          wasSpeaking = sp;
+          if (calibrating) {
             floorSum += rms;
             calib++;
-            if (calib === CALIB) thresh = Math.max(0.16, (floorSum / CALIB) * 2.2 + 0.05);
+            if (calib >= CALIB) {
+              thresh = Math.max(0.16, (floorSum / CALIB) * 2.2 + 0.05);
+              calibrating = false;
+            }
             raf = requestAnimationFrame(tick);
             return;
           }
           // Necesita ~5 frames (~80 ms) seguidos por encima del umbral → tu voz real,
-          // no un chasquido ni un pico de eco puntual.
-          if (rms > thresh) {
+          // no un chasquido ni un pico de eco puntual. La gracia inicial evita que el
+          // final de tu propia frase dispare la interrupción nada más arrancar.
+          if (frame > ARM && rms > thresh) {
             above++;
             if (above >= 5) {
               cb.current.onBargeIn();

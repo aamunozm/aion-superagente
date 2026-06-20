@@ -455,7 +455,11 @@ export default function ChatPage() {
   // vigila barge-in mientras AION habla. Cada frase tuya se envía; tu voz corta el TTS.
   const convo = useVoiceConversation(lang, {
     listen: voiceMode && !voiceMuted && !busy && !speech.speakingId,
-    watchBargeIn: voiceMode && !voiceMuted && !!speech.speakingId,
+    // Vigila tu voz mientras AION HABLA y también mientras PIENSA: así puedes cambiar
+    // de tema o interrumpir en cualquier momento, no solo cuando ya está hablando.
+    watchBargeIn: voiceMode && !voiceMuted && (!!speech.speakingId || busy),
+    speaking: !!speech.speakingId, // para recalibrar el eco al empezar a hablar
+
     onUtterance: (text) => { void runSend(text); },
     // Interrupción real: corta la voz Y aborta la generación del LLM en curso, y
     // marca el turno como interrumpido (el efecto incremental no volverá a hablarlo).

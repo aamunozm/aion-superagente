@@ -2042,7 +2042,18 @@ async fn chat(
     }
     let history: Vec<Message> = convo.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
-    tokio::spawn(async move {
+    // Si el cliente se desconecta (p. ej. INTERRUMPES a AION y cambias de tema), abortamos
+    // la generación del LLM: ni gasta cómputo en una respuesta que ya no oyes, ni guarda en
+    // el hilo una respuesta que no escuchaste (que se intercalaría tras tu nuevo mensaje y
+    // desordenaría el historial, confundiendo al agente). Así, al cambiar de tema, te sigue
+    // limpio. El guard se aloja DENTRO del stream y aborta la tarea al soltarse.
+    struct AbortOnDrop(tokio::task::JoinHandle<()>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let gen = tokio::spawn(async move {
         let mut messages = vec![Message::system(self_ctx)];
         messages.extend(history); // hilo de conversación (resumen + turnos recientes)
         let req = GenerateRequest {
@@ -2146,7 +2157,13 @@ async fn chat(
         }
     });
 
-    let stream = ReceiverStream::new(rx).map(Ok);
+    // El guard viaja DENTRO del stream: cuando Axum lo suelta (cliente desconectado),
+    // se dropea y aborta la generación de arriba (cancelación cooperativa por desconexión).
+    let guard = AbortOnDrop(gen);
+    let stream = ReceiverStream::new(rx).map(move |ev| {
+        let _ = &guard;
+        Ok(ev)
+    });
     Sse::new(stream)
 }
 
