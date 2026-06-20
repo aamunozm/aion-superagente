@@ -1844,7 +1844,12 @@ async fn chat(
     // En modo VOZ (fast) la comprensión NUNCA bloquea: una inferencia LLM de varios
     // segundos antes de responder hace la conversación inviable en tiempo real. Corre en
     // segundo plano (sigue memorizando hechos); la respuesta arranca de inmediato.
-    let comp = if looks_like_question(&body.prompt) && !body.fast {
+    let comp = if body.fast {
+        // Modo VOZ: NO ejecutar comprehend EN ABSOLUTO (ni en segundo plano). Usa el LLM
+        // LOCAL (Gemma ~10 GB) que compite con Qwen-TTS por la GPU → ralentiza la voz. En
+        // una conversación fluida no compensa; el chat de TEXTO sí comprende y memoriza.
+        None
+    } else if looks_like_question(&body.prompt) {
         crate::comprehension::comprehend(&body.prompt, &grounding, &bg).await
     } else {
         let p = body.prompt.clone();
