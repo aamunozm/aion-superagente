@@ -33,6 +33,22 @@ export function stripMarkdownForSpeech(md: string): string {
 const BCP47: Record<Lang, string> = { es: "es-ES", it: "it-IT", en: "en-US" };
 export const ttsLang = (lang: Lang): string => BCP47[lang] ?? "es-ES";
 
+// Migración de voz (una vez, al cargar): los presets de Qwen 'dylan' y 'eric' tenían
+// DIALECTO CHINO oculto (beijing/sichuan) → sonaban a extranjero leyendo español. Si
+// quedaron guardados, cae a la voz latina NATIVA (Piper México), que sí es español real.
+// Para el español más realista, el usuario elige su voz clonada en Ajustes.
+if (typeof window !== "undefined") {
+  try {
+    const v = localStorage.getItem("aion.voice.name");
+    if (v === "dylan" || v === "eric") {
+      localStorage.setItem("aion.voice.name", "es_MX-claude-high");
+      localStorage.setItem("aion.voice.engine", "piper");
+    }
+  } catch {
+    /* localStorage no disponible */
+  }
+}
+
 export function speechSupported(): boolean {
   return typeof window !== "undefined" && "speechSynthesis" in window;
 }
