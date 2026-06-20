@@ -77,6 +77,34 @@ fn build_engine(cfg: &crate::provider::ProviderConfig) -> Arc<dyn LlmEngine> {
     }
 }
 
+// ── 🧠⚡ CEREBRO DE VOZ LOCAL ──────────────────────────────────────────────────
+// Modelo pequeño y RÁPIDO (Qwen3-4B 4-bit) servido por mlx_lm.server (OpenAI-compat,
+// :11920) con PROMPT CACHING: el prompt-alma se cachea → TTFT ~0.2s en turnos siguientes.
+// En modo VOZ se usa ESTE en vez del proveedor de red (DeepSeek): mata la latencia de red
+// (Italia→China ~2s) y conversa en tiempo real, 100% local y privado. DeepSeek sigue para
+// TEXTO/profundidad. Benchmark en el Mac de Ariel: ~0.6s/turno cacheado vs ~5s DeepSeek.
+const VOICE_BRAIN_URL: &str = "http://127.0.0.1:11920/v1";
+const VOICE_BRAIN_MODEL: &str = "mlx-community/Qwen3-4B-Instruct-2507-4bit";
+static VOICE_BRAIN_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn voice_brain_engine() -> Arc<dyn LlmEngine> {
+    Arc::new(aion_llm::OpenAiEngine::new(
+        VOICE_BRAIN_URL,
+        "local",
+        VOICE_BRAIN_MODEL,
+    ))
+}
+
+/// ¿Usar el cerebro de voz local en este turno? Solo en modo voz (fast), si el servidor
+/// está listo y el usuario no lo desactivó (archivo de ajuste; por defecto activado).
+fn use_voice_brain(fast: bool) -> bool {
+    if !fast || !VOICE_BRAIN_READY.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    // Ajuste persistente: ~/.../AION/voice_brain_off existe → desactivado.
+    !crate::app_data_dir().join("voice_brain_off").exists()
+}
+
 #[derive(Deserialize)]
 struct ChatBody {
     prompt: String,
@@ -686,6 +714,69 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                         tracing::warn!("sidecar de voz Qwen3 terminó; reintento en 5s");
                     }
                     Err(e) => tracing::warn!("no pude arrancar el sidecar de voz Qwen3: {e}"),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+
+    // 🧠⚡ SIDECAR DEL CEREBRO DE VOZ (mlx_lm.server, OpenAI-compat en :11920): modelo
+    // local rápido (Qwen3-4B 4-bit) con prompt caching para conversar en tiempo real en
+    // modo voz. Su propio venv-llm. Marca VOICE_BRAIN_READY cuando responde; el chat solo
+    // lo usa si está listo (si no, cae al proveedor de red sin romperse).
+    tokio::spawn(async {
+        let py = crate::app_data_dir().join("llm/venv/bin/python");
+        if !py.exists() {
+            tracing::info!(
+                "cerebro de voz local no instalado (sin venv-llm) → voz usa el proveedor de red"
+            );
+            return;
+        }
+        loop {
+            let up = reqwest::Client::new()
+                .get("http://127.0.0.1:11920/v1/models")
+                .timeout(std::time::Duration::from_millis(800))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            VOICE_BRAIN_READY.store(up, std::sync::atomic::Ordering::Relaxed);
+            if !up {
+                tracing::info!("arrancando cerebro de voz local (Qwen3-4B vía mlx_lm.server)");
+                let mut cmd = tokio::process::Command::new(&py);
+                cmd.arg("-m")
+                    .arg("mlx_lm")
+                    .arg("server")
+                    .arg("--model")
+                    .arg(VOICE_BRAIN_MODEL)
+                    .arg("--port")
+                    .arg("11920")
+                    .arg("--log-level")
+                    .arg("WARNING")
+                    .kill_on_drop(true);
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        // espera a que cargue y márcalo listo
+                        for _ in 0..40 {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            let ok = reqwest::Client::new()
+                                .get("http://127.0.0.1:11920/v1/models")
+                                .timeout(std::time::Duration::from_millis(800))
+                                .send()
+                                .await
+                                .map(|r| r.status().is_success())
+                                .unwrap_or(false);
+                            if ok {
+                                VOICE_BRAIN_READY.store(true, std::sync::atomic::Ordering::Relaxed);
+                                tracing::info!("cerebro de voz local LISTO (Qwen3-4B)");
+                                break;
+                            }
+                        }
+                        let _ = child.wait().await;
+                        VOICE_BRAIN_READY.store(false, std::sync::atomic::Ordering::Relaxed);
+                        tracing::warn!("cerebro de voz local terminó; reintento en 5s");
+                    }
+                    Err(e) => tracing::warn!("no pude arrancar el cerebro de voz local: {e}"),
                 }
             }
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -1811,7 +1902,15 @@ async fn chat(
     // genérico — el contenido del chat JAMÁS se persiste en stream.jsonl (legible).
     crate::inner_state::set_focus("chat", "conversando con Ariel");
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
-    let engine = active_engine();
+    // CEREBRO POR RITMO: en modo VOZ (fast) usa el cerebro LOCAL rápido (Qwen3-4B con
+    // prompt caching, TTFT ~0.2s) en vez del proveedor de red → conversación en tiempo
+    // real. En texto/profundidad, el proveedor configurado (DeepSeek u otro).
+    let using_voice_brain = use_voice_brain(body.fast);
+    let engine = if using_voice_brain {
+        voice_brain_engine()
+    } else {
+        active_engine()
+    };
     let prompt = body.prompt.clone();
     let convo = st.thread(body.convo_id.as_deref().unwrap_or("default"));
     // Acumula la respuesta para guardarla en memoria al terminar.
@@ -2102,7 +2201,15 @@ async fn chat(
     // ⏱️ Instrumentación de latencia (visible en los logs): mide desde el arranque de la
     // generación hasta el primer token y hasta la respuesta completa.
     let t_turn = std::time::Instant::now();
-    tracing::info!(fast = body.fast, "🎤 CHAT generación iniciada");
+    tracing::info!(
+        fast = body.fast,
+        brain = if using_voice_brain {
+            "local-voz(Qwen3-4B)"
+        } else {
+            "proveedor"
+        },
+        "🎤 CHAT generación iniciada"
+    );
     let gen = tokio::spawn(async move {
         let mut messages = vec![Message::system(self_ctx)];
         messages.extend(history); // hilo de conversación (resumen + turnos recientes)
