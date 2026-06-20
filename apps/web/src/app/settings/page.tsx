@@ -91,11 +91,13 @@ const DEEPSEEK_MODELS: { id: string; label: string; desc: string }[] = [
 // Voces de catálogo (Piper latino natural + Kokoro). Las clonadas se añaden
 // dinámicamente desde el backend (motor chatterbox).
 const VOICES: { id: string; engine: string; label: string }[] = [
-  // Qwen3-TTS (MLX) — la más natural, tiempo real, sirve para conversar en vivo.
-  { id: "serena", engine: "qwen", label: "Qwen3 · Serena (natural, f) ★" },
-  { id: "eric", engine: "qwen", label: "Qwen3 · Eric (natural, m) ★" },
-  { id: "vivian", engine: "qwen", label: "Qwen3 · Vivian (natural, f)" },
-  { id: "dylan", engine: "qwen", label: "Qwen3 · Dylan (natural, m)" },
+  // Qwen3-TTS (MLX) — multiidioma, tiempo real. OJO: son hablantes NO nativos de
+  // español (acento internacional). Para español REALISTA usa tu voz clonada (arriba).
+  // (eric=dialecto sichuan y dylan=dialecto beijing → sonaban extranjeros; retirados.)
+  { id: "serena", engine: "qwen", label: "Qwen3 · Serena (femenina, multiidioma)" },
+  { id: "vivian", engine: "qwen", label: "Qwen3 · Vivian (femenina, multiidioma)" },
+  { id: "ryan", engine: "qwen", label: "Qwen3 · Ryan (masculino, multiidioma)" },
+  { id: "aiden", engine: "qwen", label: "Qwen3 · Aiden (masculino, multiidioma)" },
   { id: "es_MX-claude-high", engine: "piper", label: "Español (México) · natural" },
   { id: "es_AR-daniela-high", engine: "piper", label: "Español (Argentina) · natural" },
   { id: "ef_dora", engine: "kokoro", label: "Español · Dora (Kokoro)" },
@@ -123,7 +125,25 @@ function VoiceCard() {
   const [cloneMsg, setCloneMsg] = useState<string | null>(null);
   const cloneFile = useRef<HTMLInputElement>(null);
 
-  const refreshCloned = () => ttsVoices().then((r) => setCloned(r.cloned || [])).catch(() => {});
+  const refreshCloned = () =>
+    ttsVoices()
+      .then((r) => {
+        const cl = r.cloned || [];
+        setCloned(cl);
+        // Migración: si la voz guardada ya no existe (p. ej. los presets eric/dylan
+        // retirados por sonar a dialecto chino), salta a la MEJOR disponible: tu voz
+        // clonada si la hay (español realista), si no la voz latina por defecto.
+        const stored = (typeof localStorage !== "undefined" && localStorage.getItem("aion.voice.name")) || "";
+        const valid = VOICES.some((v) => v.id === stored) || cl.includes(stored);
+        if (stored && !valid) {
+          const best = cl[0] || DEFAULT_VOICE_ID;
+          const eng = cl.includes(best) ? "qwen" : VOICES.find((v) => v.id === best)?.engine || "kokoro";
+          save("aion.voice.name", best);
+          save("aion.voice.engine", eng);
+          setVoice(best);
+        }
+      })
+      .catch(() => {});
   useEffect(() => {
     if (typeof localStorage === "undefined") return;
     if (localStorage.getItem("aion.voice") === "system") setEngine("system");
@@ -250,13 +270,13 @@ function VoiceCard() {
             style={{ background: "var(--surface-1)", color: "var(--text-1)" }}
           >
             {cloned.length > 0 && (
-              <optgroup label="Tus voces clonadas">
+              <optgroup label="Tus voces clonadas — español realista ★">
                 {cloned.map((c) => (
                   <option key={`c-${c}`} value={c}>{`${c} · clonada ★`}</option>
                 ))}
               </optgroup>
             )}
-            <optgroup label="Voces de catálogo">
+            <optgroup label="Voces de catálogo (multiidioma, acento no nativo)">
               {VOICES.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
             </optgroup>
           </select>

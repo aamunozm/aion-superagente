@@ -376,7 +376,7 @@ export default function ChatPage() {
             update((t) => ({ ...t, meta: `${ev.tokens} tokens · ${ev.tps.toFixed(1)} tok/s` }));
           else if (ev.kind === "error") update((t) => ({ ...t, answer: `⚠️ ${ev.text}` }));
           scroll();
-        }, convoId, undefined, ctrl.signal);
+        }, convoId, undefined, ctrl.signal, voiceMode || handsFree);
       } else {
         const stream = mode === "crew" ? crewStream : agentStream;
         // CONTEXTO RECIENTE para el agente: los últimos turnos viajan con la tarea.

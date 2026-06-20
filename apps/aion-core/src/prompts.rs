@@ -43,7 +43,7 @@ pub fn persona_default(task: &str) -> &'static str {
 
 /// Clasifica la petición en una tarea para elegir el prompt. Heurística rápida
 /// primero (sin latencia); si es ambigua, un clasificador LLM minúsculo.
-pub async fn route(engine: &dyn LlmEngine, prompt: &str) -> String {
+pub async fn route(engine: &dyn LlmEngine, prompt: &str, allow_llm: bool) -> String {
     let p = prompt.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| p.contains(w));
 
@@ -129,6 +129,10 @@ pub async fn route(engine: &dyn LlmEngine, prompt: &str) -> String {
         return "conversacion".into();
     }
 
+    // Modo VOZ (baja latencia): no gastes una inferencia LLM en clasificar; conversa.
+    if !allow_llm {
+        return "conversacion".into();
+    }
     // Ambiguo → clasificador LLM minúsculo.
     let req = GenerateRequest {
         messages: vec![Message::user(format!(

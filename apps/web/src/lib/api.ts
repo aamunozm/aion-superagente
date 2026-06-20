@@ -369,6 +369,7 @@ export async function chatStream(
   convoId?: string,
   projectId?: string,
   signal?: AbortSignal,
+  fast?: boolean,
 ): Promise<void> {
   const res = await fetch(`${BRIDGE_URL}/api/chat`, {
     method: "POST",
@@ -379,6 +380,8 @@ export async function chatStream(
       lang: lang(),
       convo_id: convoId ?? "default",
       project_id: projectId,
+      // Modo voz: respuesta de baja latencia (la comprensión/route no bloquean).
+      fast: fast ?? false,
     }),
     signal,
   });

@@ -90,6 +90,10 @@ struct ChatBody {
     /// Si el chat pertenece a un PROYECTO, su id: ancla la respuesta a sus fuentes.
     #[serde(default)]
     project_id: Option<String>,
+    /// Modo VOZ / baja latencia: la comprensión (inferencia LLM extra) NO bloquea la
+    /// respuesta — corre en segundo plano. Imprescindible para conversar en tiempo real.
+    #[serde(default)]
+    fast: bool,
 }
 
 /// Directiva de idioma de RESPUESTA según el ajuste del usuario (es/it/en).
@@ -1827,7 +1831,10 @@ async fn chat(
     // arranca de inmediato en vez de esperar una inferencia que no cambia el tono.
     // Segundo plano PRESENTE en el instante de leer: quién es Ariel + qué venía viviendo AION.
     let bg = comprehension_background();
-    let comp = if looks_like_question(&body.prompt) {
+    // En modo VOZ (fast) la comprensión NUNCA bloquea: una inferencia LLM de varios
+    // segundos antes de responder hace la conversación inviable en tiempo real. Corre en
+    // segundo plano (sigue memorizando hechos); la respuesta arranca de inmediato.
+    let comp = if looks_like_question(&body.prompt) && !body.fast {
         crate::comprehension::comprehend(&body.prompt, &grounding, &bg).await
     } else {
         let p = body.prompt.clone();
@@ -1841,7 +1848,7 @@ async fn chat(
         None
     };
     // PROMPT DINÁMICO: elige el modo (persona) según lo que el usuario necesita.
-    let mode = crate::prompts::route(&*engine, &body.prompt).await;
+    let mode = crate::prompts::route(&*engine, &body.prompt, !body.fast).await;
     // EMPATÍA: adapta el tono al estado del usuario (frustración, prisa, confusión…).
     let empathy = crate::empathy::directive(&crate::empathy::read_state(&body.prompt));
     // ¿Razonamiento profundo? Solo si el usuario lo pidió Y la pregunta lo amerita.
