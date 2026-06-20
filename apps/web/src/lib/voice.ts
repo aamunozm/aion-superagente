@@ -294,6 +294,10 @@ export function useSpeech() {
       // Por defecto en español: voz latina mexicana (Piper) — natural y con acento real.
       let voiceName = ls("aion.voice.name") || (lang === "es" ? "es_MX-claude-high" : "");
       let engine = ls("aion.voice.engine") || (lang === "es" ? "piper" : "");
+      // Migración: las voces clonadas ahora usan Qwen3 (natural + tiempo real) en
+      // vez de Chatterbox (más lento). Quien tuviera una voz clonada guardada como
+      // chatterbox pasa a qwen sin re-seleccionar.
+      if (engine === "chatterbox") engine = "qwen";
       const speed = parseFloat(ls("aion.voice.speed") || "1") || 1;
       const exaggeration = parseFloat(ls("aion.voice.exaggeration") || "0.6") || 0.6;
       // HÍBRIDO: Chatterbox (voz clonada PyTorch) es ~3× tiempo real → demasiado lenta
@@ -374,10 +378,13 @@ export function useSpeech() {
         : 1;
     // Voz rápida (Piper mexicano) para fluidez en vivo, salvo que el usuario tenga
     // una voz de catálogo rápida elegida (no clonada).
-    const savedEngine =
+    let savedEngine =
       typeof localStorage !== "undefined" ? localStorage.getItem("aion.voice.engine") : null;
+    if (savedEngine === "chatterbox") savedEngine = "qwen"; // migración: clon → Qwen3
     const savedVoice =
       typeof localStorage !== "undefined" ? localStorage.getItem("aion.voice.name") : null;
+    // Qwen3 es rápido (RTF ~0.3) → vale para la cola en vivo; solo Chatterbox quedaba
+    // excluido por lento (ya migrado a qwen arriba).
     const fast = savedEngine && savedEngine !== "chatterbox";
     const engine = fast ? savedEngine! : "piper";
     const voice = fast && savedVoice ? savedVoice : "es_MX-claude-high";
