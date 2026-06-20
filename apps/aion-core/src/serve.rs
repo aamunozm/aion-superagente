@@ -108,11 +108,13 @@ const VOICE_NOTE: &str = "\n\nESTÁS EN UNA CONVERSACIÓN HABLADA, por voz, en t
 static VOICE_BRAIN_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn voice_brain_engine() -> Arc<dyn LlmEngine> {
-    Arc::new(aion_llm::OpenAiEngine::new(
-        VOICE_BRAIN_URL,
-        "local",
-        VOICE_BRAIN_MODEL,
-    ))
+    Arc::new(
+        aion_llm::OpenAiEngine::new(VOICE_BRAIN_URL, "local", VOICE_BRAIN_MODEL)
+            // Anti-bucle OBLIGATORIO: Qwen3-4B 4-bit sin penalización de repetición degenera
+            // en "tienes tienes tienes…" hasta el tope de tokens. 1.15 lo corta; top_p 0.9
+            // mantiene naturalidad. (mlx_lm.server soporta estos parámetros.)
+            .with_sampling(1.15, 0.9),
+    )
 }
 
 /// ¿Usar el cerebro de voz local en este turno? Solo en modo voz (fast), si el servidor
@@ -2276,8 +2278,12 @@ async fn chat(
             // (saludo, recordar el nombre) responde al instante sin cadena de pensamiento.
             messages,
             think: deep,
-            temperature: Some(1.0),
-            max_tokens: None,
+            // VOZ: temperatura más baja (más coherente, menos divagación) y respuesta ACOTADA
+            // a ~200 tokens → breve (1-3 frases) y latencia limitada. Antes max_tokens=None
+            // dejaba que generara 512 tokens (~8s) y, sin penalización de repetición, degeneraba
+            // en bucles. El proveedor de texto (DeepSeek) mantiene su comportamiento normal.
+            temperature: Some(if using_voice_brain { 0.7 } else { 1.0 }),
+            max_tokens: if using_voice_brain { Some(200) } else { None },
         };
         let tx2 = tx.clone();
         let acc = answer_acc.clone();
