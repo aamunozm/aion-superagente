@@ -55,6 +55,16 @@ LANG_MAP = {
 }
 
 
+# Instrucción de ESTILO (Qwen3 `instruct`): controla emoción/prosodia en lenguaje natural.
+# Por defecto, cálido y conversacional → voz más HUMANA (no plana). Configurable/vacío con
+# AION_TTS_INSTRUCT="". Se aplica también al clon (probado: combina con ref_audio sin romperlo).
+INSTRUCT = os.environ.get(
+    "AION_TTS_INSTRUCT",
+    "Habla con calidez y cercanía, como en una conversación relajada y natural entre amigos; "
+    "entonación viva y humana, ritmo conversacional, ni plano ni robótico.",
+).strip()
+
+
 def qwen_lang(lang: str) -> str:
     lang = (lang or "es").strip().lower()
     if lang in LANG_MAP:
@@ -146,6 +156,8 @@ def _generate(text: str, lang: str, voice: str, speed: float):
         kw["voice"] = DEFAULT_PRESET
     else:
         kw["voice"] = voice if voice in PRESETS else DEFAULT_PRESET
+    if INSTRUCT:
+        kw["instruct"] = INSTRUCT  # emoción/prosodia → voz humana, no plana
     chunks = []
     sr = 24000
     for r in m.generate(
