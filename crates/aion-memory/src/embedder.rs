@@ -41,7 +41,16 @@ impl OllamaEmbedder {
 
     /// Devuelve el embedding de un texto.
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let body = serde_json::json!({ "model": self.model, "prompt": text });
+        // keep_alive: mantén el modelo de embeddings CALIENTE (si no, Ollama lo descarga a
+        // los 5 min y lo RECARGA en la siguiente recuperación → latencia). num_ctx FIJO a
+        // 8192 (el nativo de BGE-M3): sin esto Ollama lo cargaba con 32768 (sobredimensionado
+        // → rope extension, más RAM y carga más lenta; "context size too large for model").
+        let body = serde_json::json!({
+            "model": self.model,
+            "prompt": text,
+            "keep_alive": std::env::var("AION_KEEP_ALIVE").unwrap_or_else(|_| "24h".into()),
+            "options": { "num_ctx": 8192 }
+        });
         let resp = self
             .http
             .post(format!("{}/api/embeddings", self.base_url))
