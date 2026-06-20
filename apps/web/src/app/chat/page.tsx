@@ -452,7 +452,15 @@ export default function ChatPage() {
     listen: voiceMode && !voiceMuted && !busy && !speech.speakingId,
     watchBargeIn: voiceMode && !voiceMuted && !!speech.speakingId,
     onUtterance: (text) => { void runSend(text); },
-    onBargeIn: () => speech.stop(),
+    // Interrupción real: corta la voz Y aborta la generación del LLM en curso, y
+    // marca el turno como interrumpido (el efecto incremental no volverá a hablarlo).
+    // Así AION se detiene de inmediato para escucharte y la conversación puede variar.
+    onBargeIn: () => {
+      interruptedRef.current = true;
+      speech.stop();
+      streamAbort.current?.abort();
+      setBusy(false);
+    },
   });
 
   function openVoiceMode() {
@@ -481,16 +489,22 @@ export default function ChatPage() {
   // micro (en manos libres; en modo voz el hook de conversación lo retoma solo).
   const spokenCharRef = useRef(0);
   const finishedTurnRef = useRef(-1);
+  // Cuando interrumpes a AION (barge-in), marcamos el turno para NO seguir hablándolo
+  // (ni encolar más frases ni "el resto"): AION se calla de verdad y te escucha.
+  const interruptedRef = useRef(false);
   useEffect(() => {
     if (!(handsFree || voiceMode) || turns.length === 0) return;
     const i = turns.length - 1;
     const ans = turns[i].answer || "";
     if (ans.startsWith("⚠️")) return;
-    // Nuevo turno → reinicia el seguimiento.
+    // Nuevo turno → reinicia el seguimiento (y limpia la marca de interrupción).
     if (lastSpokenRef.current !== i) {
       lastSpokenRef.current = i;
       spokenCharRef.current = 0;
+      interruptedRef.current = false;
     }
+    // Si interrumpiste este turno, no sigas hablándolo (ni frases nuevas ni el resto).
+    if (interruptedRef.current) return;
     // Encola las frases COMPLETAS nuevas (hasta el último signo de puntuación final).
     const fromIdx = spokenCharRef.current;
     const pending = ans.slice(fromIdx);

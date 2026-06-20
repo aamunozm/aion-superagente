@@ -597,6 +597,14 @@ export function useVoiceConversation(
         src.connect(an);
         const buf = new Uint8Array(an.fftSize);
         let above = 0;
+        // Calibración del SUELO DE ECO: durante los primeros ~430 ms (con AION ya
+        // hablando) medimos cuánto mete su propia voz en el micro tras la cancelación
+        // de eco del sistema, y fijamos el umbral POR ENCIMA. Así el eco no dispara la
+        // interrupción, pero tu voz al hablar por encima SÍ. Se adapta al volumen real.
+        let calib = 0;
+        let floorSum = 0;
+        let thresh = 0.16;
+        const CALIB = 26; // ~430 ms a ~60 fps
         const tick = () => {
           an.getByteTimeDomainData(buf);
           let sum = 0;
@@ -605,13 +613,20 @@ export function useVoiceConversation(
             sum += v * v;
           }
           const rms = Math.sqrt(sum / buf.length);
-          // Umbral con histéresis: necesita varios frames seguidos por encima
-          // para no dispararse con ruido puntual (ni con el eco residual de AION).
-          if (rms > 0.14) {
+          if (calib < CALIB) {
+            floorSum += rms;
+            calib++;
+            if (calib === CALIB) thresh = Math.max(0.16, (floorSum / CALIB) * 2.2 + 0.05);
+            raf = requestAnimationFrame(tick);
+            return;
+          }
+          // Necesita ~5 frames (~80 ms) seguidos por encima del umbral → tu voz real,
+          // no un chasquido ni un pico de eco puntual.
+          if (rms > thresh) {
             above++;
-            if (above >= 3) {
+            if (above >= 5) {
               cb.current.onBargeIn();
-              return; // deja de vigilar; el ciclo pasará a escuchar
+              return; // deja de vigilar; el ciclo pasará a escucharte
             }
           } else {
             above = Math.max(0, above - 1);
