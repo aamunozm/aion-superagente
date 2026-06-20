@@ -564,6 +564,9 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     let _ = std::fs::remove_file(&path); // limpia el staging
+                                                         // Respiro entre trabajos: la ingesta real tarda segundos; este freno
+                                                         // evita que un fallo en bucle queme un core a cientos por segundo.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 None => tokio::time::sleep(std::time::Duration::from_millis(1500)).await,
             }
@@ -2072,6 +2075,10 @@ async fn chat(
             self.0.abort();
         }
     }
+    // ⏱️ Instrumentación de latencia (visible en los logs): mide desde el arranque de la
+    // generación hasta el primer token y hasta la respuesta completa.
+    let t_turn = std::time::Instant::now();
+    tracing::info!(fast = body.fast, "🎤 CHAT generación iniciada");
     let gen = tokio::spawn(async move {
         let mut messages = vec![Message::system(self_ctx)];
         messages.extend(history); // hilo de conversación (resumen + turnos recientes)
@@ -2085,6 +2092,7 @@ async fn chat(
         };
         let tx2 = tx.clone();
         let acc = answer_acc.clone();
+        let mut first_token = true;
         let result = engine
             .generate_stream(
                 req,
@@ -2094,10 +2102,15 @@ async fn chat(
                             serde_json::json!({ "kind": "thinking", "text": text })
                         }
                         StreamChunk::Answer { text } => {
+                            if first_token {
+                                first_token = false;
+                                tracing::info!(ms = t_turn.elapsed().as_millis() as u64, "⏱️ PRIMER TOKEN");
+                            }
                             acc.lock().unwrap_or_else(|e| e.into_inner()).push_str(text);
                             serde_json::json!({ "kind": "answer", "text": text })
                         }
                         StreamChunk::Done { tokens, tokens_per_sec } => {
+                            tracing::info!(ms = t_turn.elapsed().as_millis() as u64, tokens = *tokens, tps = *tokens_per_sec, "⏱️ RESPUESTA COMPLETA");
                             serde_json::json!({ "kind": "done", "tokens": tokens, "tps": tokens_per_sec })
                         }
                     };
@@ -6364,6 +6377,14 @@ async fn tts_speak(Json(req): Json<TtsReq>) -> axum::response::Response {
     if req.text.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "texto vacío").into_response();
     }
+    // ⏱️ Instrumentación de latencia de voz (visible en logs).
+    let t0 = std::time::Instant::now();
+    let nchars = req.text.chars().count();
+    let eng = if req.engine.is_empty() {
+        "kokoro".to_string()
+    } else {
+        req.engine.clone()
+    };
     let body = serde_json::json!({
         "text": req.text,
         "voice": req.voice,
@@ -6391,14 +6412,23 @@ async fn tts_speak(Json(req): Json<TtsReq>) -> axum::response::Response {
                 .unwrap_or("audio/mpeg")
                 .to_string();
             match r.bytes().await {
-                Ok(bytes) => (
-                    [
-                        (header::CONTENT_TYPE, ct),
-                        (header::CACHE_CONTROL, "no-store".to_string()),
-                    ],
-                    bytes,
-                )
-                    .into_response(),
+                Ok(bytes) => {
+                    tracing::info!(
+                        ms = t0.elapsed().as_millis() as u64,
+                        engine = %eng,
+                        chars = nchars,
+                        bytes = bytes.len(),
+                        "🔊 TTS frase"
+                    );
+                    (
+                        [
+                            (header::CONTENT_TYPE, ct),
+                            (header::CACHE_CONTROL, "no-store".to_string()),
+                        ],
+                        bytes,
+                    )
+                        .into_response()
+                }
                 Err(_) => (StatusCode::BAD_GATEWAY, "tts: no pude leer el audio").into_response(),
             }
         }
