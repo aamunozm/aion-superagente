@@ -2033,13 +2033,25 @@ async fn chat(
         + usize::from(!lib_block.is_empty())
         + usize::from(!proj_block.is_empty())
         + usize::from(!epi_block.is_empty());
+    // MODO VOZ: respuestas BREVES y conversacionales. En el test de latencia las respuestas
+    // salían de 200-300 palabras (ensayos) → tardan mucho y no suenan a conversación hablada.
+    // Esto NO toca el alma (identidad/persona): solo pide brevedad, como en una llamada.
+    let voice_note = if body.fast {
+        "\n\nESTÁS EN MODO VOZ (conversación HABLADA, no escrita): responde BREVE y natural, \
+         1-3 frases, como en una llamada telefónica. Ve directo al grano, SIN listas, viñetas, \
+         títulos ni ensayos; di lo esencial y deja que Ariel siga. Si el tema da para más, \
+         ofrécelo en una frase («¿quieres que profundice?») en vez de soltarlo todo de golpe."
+    } else {
+        ""
+    };
     let self_ctx = format!(
-        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         self_awareness_prompt(),
         lang_directive(&body.lang),
         crate::prompts::persona(&mode),
         empathy_block,
         think_note,
+        voice_note,
         mem_block,
         epi_block,
         proj_block,
@@ -2050,6 +2062,13 @@ async fn chat(
         action_note,
         face_block,
         inventory_block,
+    );
+    // 📏 Tamaño del prompt de sistema (para diagnosticar el coste de prefill: cuanto más
+    // grande, más tarda DeepSeek en subir+procesar y más cuesta cada turno).
+    tracing::info!(
+        sys_chars = self_ctx.len(),
+        fast = body.fast,
+        "📏 PROMPT sistema"
     );
 
     // ACTO CONSCIENTE + MEMORIA DE HECHOS: si comprendimos EN LÍNEA (turno-pregunta), los
