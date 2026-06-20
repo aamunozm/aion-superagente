@@ -423,6 +423,41 @@ def ref_text_for(path: str):
     return None
 
 
+# Ventana Hann (raised-cosine) para el crossfade entre chunks de streaming, cacheada por
+# longitud de solape (se reutiliza en cada unión).
+_HANN_CACHE = {}
+
+
+def _hann_ramp(n: int):
+    r = _HANN_CACHE.get(n)
+    if r is None:
+        r = (0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n, dtype=np.float32)))).astype(np.float32)
+        _HANN_CACHE[n] = r
+    return r
+
+
+def _join_crossfade(chunks, overlap: int = 256):
+    """Une los chunks del streaming con CROSSFADE Hann en cada frontera (overlap-add). Sin
+    esto, la concatenación naive deja micro-clics audibles en las uniones (medido: saltos
+    ~0.02 vs ~0.01 interno). 256 muestras ≈ 10.7 ms @ 24 kHz: imperceptible y mata el clic."""
+    chunks = [c for c in chunks if c is not None and len(c)]
+    if not chunks:
+        return np.zeros(1, np.float32)
+    if len(chunks) == 1:
+        return chunks[0]
+    out = np.asarray(chunks[0], dtype=np.float32)
+    for nxt in chunks[1:]:
+        nxt = np.asarray(nxt, dtype=np.float32)
+        ov = min(overlap, len(out), len(nxt))
+        if ov >= 16:
+            fade = _hann_ramp(ov)  # 0→1
+            blended = out[-ov:] * (1.0 - fade) + nxt[:ov] * fade
+            out = np.concatenate([out[:-ov], blended, nxt[ov:]])
+        else:
+            out = np.concatenate([out, nxt])
+    return out
+
+
 def _generate(text: str, lang: str, voice: str, speed: float):
     """Genera audio. SOLO la llama el hilo trabajador (MLX no es reentrante)."""
     m = model()
@@ -445,18 +480,23 @@ def _generate(text: str, lang: str, voice: str, speed: float):
     eff_speed = max(0.8, min(1.25, (speed or 1.0) * sfactor))
     # Normaliza números/símbolos a palabras del idioma → evita code-switch a acento inglés.
     say = normalize_for_tts(text, lang)
+    # TWO-PHASE EMIT: stream=True hace que el vocoder emita audio mientras aún genera (1er
+    # chunk en ~0.1-0.4s en vez de ~2s; total algo más rápido). Los chunks resultantes se
+    # unen con CROSSFADE Hann (necesario: el streaming introduce micro-discontinuidades).
     chunks = []
     sr = 24000
     for r in m.generate(
-        text=say, lang_code=qwen_lang(lang), speed=eff_speed, verbose=False, **kw
+        text=say,
+        lang_code=qwen_lang(lang),
+        speed=eff_speed,
+        verbose=False,
+        stream=True,
+        streaming_interval=0.4,
+        **kw,
     ):
         chunks.append(np.asarray(r.audio, dtype=np.float32).reshape(-1))
         sr = getattr(r, "sample_rate", None) or getattr(r, "sr", None) or sr
-    audio = (
-        np.concatenate(chunks)
-        if len(chunks) > 1
-        else (chunks[0] if chunks else np.zeros(1, np.float32))
-    )
+    audio = _join_crossfade(chunks)
     return audio, int(sr)
 
 
