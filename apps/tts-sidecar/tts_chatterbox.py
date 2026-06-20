@@ -16,6 +16,7 @@ import io
 import json
 import os
 import re
+import threading
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -28,6 +29,9 @@ PORT = int(os.environ.get("AION_TTS_CB_PORT", "8767"))
 
 _model = None
 _prepared = None  # ruta del clip cuyo "condicionamiento" está cargado en el modelo
+# El modelo (PyTorch/MPS) NO es seguro en paralelo: serializamos toda generación.
+# Sin esto, dos peticiones a la vez corrompen MPS → "Broken pipe"/cuelgues.
+_gen_lock = threading.Lock()
 
 
 def model():
@@ -100,6 +104,12 @@ def sentences(text: str):
 
 
 def synth(text: str, lang: str, voice: str, exaggeration: float = 0.6, cfg: float = 0.5):
+    # Serializa: una sola generación a la vez (el modelo no es reentrante en MPS).
+    with _gen_lock:
+        return _synth_locked(text, lang, voice, exaggeration, cfg)
+
+
+def _synth_locked(text: str, lang: str, voice: str, exaggeration: float, cfg: float):
     global _prepared
     m = model()
     ref = clip_path(voice)
