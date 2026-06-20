@@ -25,6 +25,7 @@ import json
 import os
 import queue
 import threading
+import unicodedata
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -60,26 +61,90 @@ LANG_MAP = {
 # AION_TTS_INSTRUCT="". Se aplica también al clon (probado: combina con ref_audio sin romperlo).
 INSTRUCT = os.environ.get(
     "AION_TTS_INSTRUCT",
-    "Habla con calidez y cercanía, como en una conversación relajada y natural entre amigos; "
-    "entonación viva y humana, ritmo conversacional, ni plano ni robótico.",
+    "Tono cálido y cercano, conversación relajada y natural, nunca plano ni robótico.",
 ).strip()
 
 
-def pick_instruct(text: str) -> str:
-    """PROSODIA EMOCIONAL ADAPTATIVA: elige la emoción según el contenido de la frase, para
-    que la voz NO sea plana sino que viva con lo que dice (como un humano). Heurística barata
-    sobre el texto que ya escribe el cerebro (signos, énfasis)."""
+def _norm(s: str) -> str:
+    """minúsculas + sin acentos → matching de léxico robusto en ES/IT/EN."""
+    s = unicodedata.normalize("NFD", s.lower())
+    return "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+
+# Léxico emocional MULTI-IDIOMA (español latino · italiano · inglés), normalizado sin
+# acentos. Detecta la emoción por CONTENIDO, no solo por signos → prosodia mucho más rica.
+_LEX = {
+    "empatia": [
+        "lo siento", "perdona", "perdoname", "disculpa", "disculpame", "te entiendo",
+        "entiendo como", "lamento", "tranquilo", "tranquila", "no te preocupes", "descuida",
+        "mi dispiace", "scusa", "scusami", "capisco", "tranquillo", "non preoccuparti",
+        "i'm sorry", "im sorry", "i am sorry", "i understand", "no worries", "take it easy",
+    ],
+    "alegria": [
+        "genial", "increible", "me encanta", "que bueno", "que bien", "fantastico",
+        "estupendo", "maravilloso", "buenisimo", "me alegro", "que alegria", "alucinante",
+        "espectacular", "que emocion", "felicidades", "enhorabuena",
+        "che bello", "stupendo", "meraviglioso", "mi piace tanto", "evviva", "fantastica",
+        "great", "awesome", "amazing", "i love", "love it", "wonderful", "so happy", "excited",
+    ],
+    "duda": [
+        "mmm", "hmm", "a ver", "dejame pensar", "dejame ver", "no estoy seguro", "no se",
+        "supongo", "quiza", "quizas", "tal vez", "puede que", "mas o menos", "no sabria",
+        "vediamo", "fammi pensare", "non sono sicuro", "non so", "forse", "credo che", "boh",
+        "let me think", "not sure", "i guess", "maybe", "perhaps", "i think so",
+    ],
+    "enfasis": [
+        "claro que", "por supuesto", "sin duda", "desde luego", "exacto", "exactamente",
+        "definitivamente", "totalmente", "te lo aseguro", "de verdad que", "sin lugar a dudas",
+        "certo che", "senz'altro", "senza dubbio", "esatto", "assolutamente",
+        "of course", "definitely", "absolutely", "for sure", "no doubt", "exactly",
+    ],
+    "saludo": [
+        "hola", "buenas", "buenos dias", "buenas tardes", "buenas noches", "hasta luego",
+        "nos vemos", "cuidate", "un abrazo", "que tengas", "que descanses",
+        "ciao", "salve", "buongiorno", "buonasera", "a presto", "ci vediamo",
+        "hello", "hi there", "good morning", "see you", "take care", "see you soon",
+    ],
+}
+
+# Cada estilo → (instrucción Qwen3 `instruct`, factor de velocidad). Investigación 2026
+# (Hume/OpenAI/ElevenLabs): la directiva de estilo funciona mejor PRECISA y CORTA (≤~100
+# chars), emoción específica > genérica; el `instruct` lleva la EMOCIÓN y el `speed` lleva
+# la TASA (palancas separadas). El factor multiplica la velocidad base del usuario: algo más
+# rápido animados, más lento reflexionando/empáticos (validado: alegría/ira+, ternura/calma−).
+_STYLES = {
+    "empatia": ("Tono suave y empático, cálido y cercano, transmitiendo calma.", 0.95),
+    "duda": ("Tono pausado y reflexivo, pensando en voz alta, con micro-pausas.", 0.92),
+    "alegria": ("Tono animado y alegre, expresivo y entusiasta, como sonriendo.", 1.07),
+    "enfasis": ("Tono seguro y firme, con convicción cálida, marcando lo importante.", 1.0),
+    "pregunta": ("Tono cálido y curioso, con interés genuino, entonación de pregunta.", 1.0),
+    "saludo": ("Tono cálido y cercano, como saludando a alguien que aprecias.", 1.03),
+}
+
+
+def pick_style(text: str):
+    """PROSODIA EMOCIONAL ADAPTATIVA → (instruct, speed_factor). Elige la emoción según el
+    CONTENIDO (léxico multi-idioma + signos), para que la voz viva con lo que dice, como un
+    humano. Heurística barata sobre el texto que ya escribe el cerebro."""
     if not INSTRUCT:
-        return ""
+        return "", 1.0
     t = text.strip()
-    base = "entonación viva y humana, ritmo conversacional natural, nunca plano ni robótico."
-    if "¡" in t or t.count("!") >= 1:
-        return "Habla ANIMADO y con alegría, expresivo y cercano, como contando algo que te entusiasma; " + base
-    if "…" in t or "..." in t:
-        return "Habla PAUSADO y reflexivo, con calma y cercanía, como pensando en voz alta; " + base
+    n = _norm(t)
+    # Orden de prioridad: la emoción más "marcada" gana. Empatía/duda mandan sobre el resto
+    # (definen el tono de apertura); luego alegría/énfasis; signos como respaldo.
+    if any(k in n for k in _LEX["empatia"]):
+        return _STYLES["empatia"]
+    if "…" in t or "..." in t or any(k in n for k in _LEX["duda"]):
+        return _STYLES["duda"]
+    if "¡" in t or t.count("!") >= 1 or any(k in n for k in _LEX["alegria"]):
+        return _STYLES["alegria"]
+    if any(k in n for k in _LEX["enfasis"]):
+        return _STYLES["enfasis"]
     if "¿" in t or t.rstrip().endswith("?"):
-        return "Habla con tono CÁLIDO y curioso, con interés genuino; " + base
-    return INSTRUCT
+        return _STYLES["pregunta"]
+    if any(n.startswith(k) for k in _LEX["saludo"]):
+        return _STYLES["saludo"]
+    return INSTRUCT, 1.0
 
 
 def qwen_lang(lang: str) -> str:
@@ -173,13 +238,16 @@ def _generate(text: str, lang: str, voice: str, speed: float):
         kw["voice"] = DEFAULT_PRESET
     else:
         kw["voice"] = voice if voice in PRESETS else DEFAULT_PRESET
-    instr = pick_instruct(text)  # emoción adaptativa según el contenido → voz humana
+    instr, sfactor = pick_style(text)  # emoción adaptativa según el contenido → voz humana
     if instr:
         kw["instruct"] = instr
+    # Velocidad ADAPTATIVA: el factor de la emoción (animado +, reflexivo −) modula la
+    # velocidad base del usuario, con clamp para que nunca suene antinatural.
+    eff_speed = max(0.8, min(1.25, (speed or 1.0) * sfactor))
     chunks = []
     sr = 24000
     for r in m.generate(
-        text=text, lang_code=qwen_lang(lang), speed=(speed or 1.0), verbose=False, **kw
+        text=text, lang_code=qwen_lang(lang), speed=eff_speed, verbose=False, **kw
     ):
         chunks.append(np.asarray(r.audio, dtype=np.float32).reshape(-1))
         sr = getattr(r, "sample_rate", None) or getattr(r, "sr", None) or sr

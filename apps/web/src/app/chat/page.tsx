@@ -24,6 +24,7 @@ import {
   agentStream,
   crewStream,
   chatStream,
+  warmBrain,
   chatReset,
   confirmDecision,
   answerQuestion,
@@ -476,7 +477,9 @@ export default function ChatPage() {
     setVoiceMode(true);
     setVoiceMuted(false);
     speech.stop();
-    warmVoice(lang); // precompila el kernel Metal de la voz elegida → 1ª frase en caliente
+    // Precalentado en paralelo al abrir el modo voz → ni el 1er turno nota el arranque frío:
+    warmVoice(lang); // compila el kernel Metal de la voz elegida (Qwen3-TTS)
+    warmBrain(); // calienta la KV-cache del cerebro local (Qwen3-4B)
   }
   function closeVoiceMode() {
     setVoiceMode(false);

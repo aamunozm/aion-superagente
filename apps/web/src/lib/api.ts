@@ -388,6 +388,40 @@ export async function chatStream(
   await readSse(res, onEvent);
 }
 
+/** Precalienta el CEREBRO de voz (Qwen3-4B local) al abrir el modo voz: un fast-chat
+ * efímero a un convo desechable que abortamos en cuanto llega el primer byte. Para entonces
+ * el prefill del prefijo de sistema ESTABLE ya ocurrió → su KV-cache queda caliente y el
+ * PRIMER turno real sale ya rápido (~0.3s), sin el pico del arranque en frío. Best-effort:
+ * si el cerebro no está listo o falla, el pre-warm del arranque cubre el caso. */
+export async function warmBrain(): Promise<void> {
+  try {
+    const ctrl = new AbortController();
+    const kill = setTimeout(() => ctrl.abort(), 3000);
+    const res = await fetch(`${BRIDGE_URL}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        prompt: "hola",
+        think: false,
+        lang: lang(),
+        convo_id: "__voicewarm__", // desechable: nunca se muestra
+        fast: true, // dispara el cerebro local de voz
+      }),
+      signal: ctrl.signal,
+    });
+    // No nos interesa la respuesta: con el primer byte el prefijo ya se procesó. Cancelar
+    // el stream hace que aion-core (AbortOnDrop) detenga la generación → cero desperdicio.
+    const reader = res.body?.getReader();
+    if (reader) {
+      await reader.read();
+      await reader.cancel();
+    }
+    clearTimeout(kill);
+  } catch {
+    /* best-effort */
+  }
+}
+
 // ── Proyectos (workspace estilo NotebookLM) ─────────────────────────────────
 
 export type Project = { id: string; name: string; desc: string; icon: string; created: string; updated: string };
