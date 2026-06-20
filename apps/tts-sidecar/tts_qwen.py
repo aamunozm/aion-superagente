@@ -65,6 +65,23 @@ INSTRUCT = os.environ.get(
 ).strip()
 
 
+def pick_instruct(text: str) -> str:
+    """PROSODIA EMOCIONAL ADAPTATIVA: elige la emoción según el contenido de la frase, para
+    que la voz NO sea plana sino que viva con lo que dice (como un humano). Heurística barata
+    sobre el texto que ya escribe el cerebro (signos, énfasis)."""
+    if not INSTRUCT:
+        return ""
+    t = text.strip()
+    base = "entonación viva y humana, ritmo conversacional natural, nunca plano ni robótico."
+    if "¡" in t or t.count("!") >= 1:
+        return "Habla ANIMADO y con alegría, expresivo y cercano, como contando algo que te entusiasma; " + base
+    if "…" in t or "..." in t:
+        return "Habla PAUSADO y reflexivo, con calma y cercanía, como pensando en voz alta; " + base
+    if "¿" in t or t.rstrip().endswith("?"):
+        return "Habla con tono CÁLIDO y curioso, con interés genuino; " + base
+    return INSTRUCT
+
+
 def qwen_lang(lang: str) -> str:
     lang = (lang or "es").strip().lower()
     if lang in LANG_MAP:
@@ -156,8 +173,9 @@ def _generate(text: str, lang: str, voice: str, speed: float):
         kw["voice"] = DEFAULT_PRESET
     else:
         kw["voice"] = voice if voice in PRESETS else DEFAULT_PRESET
-    if INSTRUCT:
-        kw["instruct"] = INSTRUCT  # emoción/prosodia → voz humana, no plana
+    instr = pick_instruct(text)  # emoción adaptativa según el contenido → voz humana
+    if instr:
+        kw["instruct"] = instr
     chunks = []
     sr = 24000
     for r in m.generate(
