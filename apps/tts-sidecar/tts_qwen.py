@@ -164,12 +164,18 @@ def _generate(text: str, lang: str, voice: str, speed: float):
 def _worker():
     """Hilo ÚNICO dueño del modelo: carga, calienta y procesa la cola en serie."""
     try:
-        # Calentar en ESTE hilo: preset + (si hay) el primer clip clonado, para que
-        # la 1ª petición real ya vaya en caliente (sin cargar modelo/ASR/tokenizer).
-        _generate("Hola.", "es", DEFAULT_PRESET, 1.0)
+        # Calentar en ESTE hilo con una frase LARGA y realista: MLX compila kernels
+        # por longitud de secuencia en la 1ª inferencia (coste ~6-7 s). Si calentamos
+        # con "Hola." (corto) ese coste se paga en la PRIMERA frase real del usuario.
+        # Con una frase de longitud típica lo pagamos aquí, en segundo plano al arrancar.
+        WARM = (
+            "Hola Ariel, esta es una frase de calentamiento un poco más larga para "
+            "preparar la voz en tiempo real y que la primera respuesta ya salga rápida."
+        )
+        _generate(WARM, "es", DEFAULT_PRESET, 1.0)
         cs = clips()
         if cs:
-            _generate("Hola.", "es", cs[0], 1.0)
+            _generate(WARM, "es", cs[0], 1.0)  # también el clip clonado (camino real)
         print("[aion-tts-qwen] modelo Qwen3 cargado y caliente", flush=True)
     except Exception as e:  # noqa: BLE001
         print(f"[aion-tts-qwen] AVISO: warmup falló: {e}", flush=True)

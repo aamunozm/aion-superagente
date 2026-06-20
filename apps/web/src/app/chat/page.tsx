@@ -414,8 +414,13 @@ export default function ChatPage() {
       if (err instanceof DOMException && err.name === "AbortError") return;
       update((t) => ({ ...t, answer: `⚠️ ${err instanceof Error ? err.message : "error"}` }));
     } finally {
-      if (streamAbort.current === ctrl) streamAbort.current = null;
-      setBusy(false);
+      // Solo el turno VIGENTE controla `busy`. Si una nueva petición (p. ej. tras
+      // interrumpir a AION) ya tomó el control, este `finally` (de un turno abortado)
+      // NO debe apagar `busy` ni AION hablaría "el resto" del turno viejo por error.
+      if (streamAbort.current === ctrl) {
+        streamAbort.current = null;
+        setBusy(false);
+      }
     }
   }
 
