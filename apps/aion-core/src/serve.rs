@@ -2143,25 +2143,45 @@ async fn chat(
     } else {
         ""
     };
-    let self_ctx = format!(
-        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
-        self_awareness_prompt(),
-        lang_directive(&body.lang),
-        crate::prompts::persona(&mode),
-        empathy_block,
-        think_note,
-        voice_note,
-        mem_block,
-        epi_block,
-        proj_block,
-        lib_block,
-        comp_block,
-        senses_block,
-        computer_block,
-        action_note,
-        face_block,
-        inventory_block,
-    );
+    let self_ctx = if using_voice_brain {
+        // CEREBRO DE VOZ: prompt ESTABLE y cacheable. El prompt completo lleva bloques que
+        // CAMBIAN cada turno (memoria reciente, hora, diario, presencia, estado interno…) →
+        // rompen el prompt-cache del modelo local → prefill completo (~2s) cada turno. Aquí
+        // usamos solo lo CONSTANTE: identidad (SELF_SUMMARY) + persona + voz, más los bloques
+        // de PERCEPCIÓN (vacíos salvo consulta puntual). La continuidad la da el HISTORIAL.
+        // → el prefijo no cambia entre turnos → cache HIT → TTFT ~0.4s (medido).
+        format!(
+            "{}\n\n{}\n\n{}{}{}{}{}{}",
+            crate::self_model::SELF_SUMMARY,
+            lang_directive(&body.lang),
+            crate::prompts::persona(&mode),
+            voice_note,
+            senses_block,
+            computer_block,
+            face_block,
+            inventory_block,
+        )
+    } else {
+        format!(
+            "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            self_awareness_prompt(),
+            lang_directive(&body.lang),
+            crate::prompts::persona(&mode),
+            empathy_block,
+            think_note,
+            voice_note,
+            mem_block,
+            epi_block,
+            proj_block,
+            lib_block,
+            comp_block,
+            senses_block,
+            computer_block,
+            action_note,
+            face_block,
+            inventory_block,
+        )
+    };
     // 📏 Tamaño del prompt de sistema (para diagnosticar el coste de prefill: cuanto más
     // grande, más tarda DeepSeek en subir+procesar y más cuesta cada turno).
     tracing::info!(
