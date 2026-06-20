@@ -99,7 +99,7 @@ def sentences(text: str):
     return [p.strip() for p in parts if p.strip()] or [text.strip()]
 
 
-def synth(text: str, lang: str, voice: str):
+def synth(text: str, lang: str, voice: str, exaggeration: float = 0.6, cfg: float = 0.5):
     global _prepared
     m = model()
     ref = clip_path(voice)
@@ -109,12 +109,15 @@ def synth(text: str, lang: str, voice: str):
     # UNA vez por clip y reusarlo. Así las frases siguientes van a velocidad normal
     # (~2-3× en vez de ~35×, que es lo que cuesta re-codificar la referencia cada vez).
     if ref and _prepared != ref:
-        m.prepare_conditionals(ref)
+        m.prepare_conditionals(ref, exaggeration=exaggeration)
         _prepared = ref
     chunks = []
     for s in sentences(text):
-        # Sin audio_prompt_path → reusa las conds ya preparadas (rápido).
-        wav = m.generate(s, language_id=lang or "es")
+        # exaggeration = expresividad/énfasis (0.3 sobrio … 0.9 muy expresivo).
+        # cfg_weight bajo → ritmo más natural; alto → se ciñe más al texto.
+        wav = m.generate(
+            s, language_id=lang or "es", exaggeration=exaggeration, cfg_weight=cfg
+        )
         chunks.append(wav.squeeze().detach().cpu().numpy().astype(np.float32))
     audio = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
     return audio, int(getattr(m, "sr", 24000))
@@ -186,9 +189,11 @@ class Handler(BaseHTTPRequestHandler):
             text = (req.get("text") or "").strip()
             lang = (req.get("lang") or "es").strip()
             voice = (req.get("voice") or "").strip()
+            exaggeration = float(req.get("exaggeration") if req.get("exaggeration") is not None else 0.6)
+            exaggeration = max(0.25, min(1.0, exaggeration))
             if not text:
                 raise ValueError("texto vacío")
-            audio, ctype = encode(*synth(text, lang, voice))
+            audio, ctype = encode(*synth(text, lang, voice, exaggeration))
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("X-AION-TTS-Engine", "chatterbox")

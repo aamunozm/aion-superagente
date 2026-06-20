@@ -190,6 +190,56 @@ export function useSpeech() {
     [],
   );
 
+  // STREAMING para la voz clonada (lenta): trocea por frases, reproduce la 1ª en
+  // cuanto está y genera la siguiente MIENTRAS suena → empieza a hablar mucho antes
+  // (time-to-first-audio ~una frase, no toda la respuesta). Una sola generación a la
+  // vez (el modelo no es reentrante en MPS).
+  const speakStreamed = useCallback(
+    (
+      id: string,
+      clean: string,
+      lang: Lang,
+      voiceName: string,
+      speed: number,
+      exaggeration: number,
+      my: number,
+      onEnd?: () => void,
+    ) => {
+      const parts = clean
+        .split(/(?<=[.!?…])\s+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const sents = parts.length ? parts : [clean];
+      const gen = (s: string) =>
+        ttsSpeak(s, lang, { voice: voiceName, engine: "chatterbox", speed, exaggeration });
+      const fail = (i: number) => {
+        if (my === reqRef.current) speakSystem(id, sents.slice(i).join(" "), lang, onEnd);
+      };
+      const step = (i: number, cur: Promise<Blob>) => {
+        cur.then(
+          (blob) => {
+            if (my !== reqRef.current) return;
+            const next = i + 1 < sents.length ? gen(sents[i + 1]) : null; // genera la siguiente ya
+            playTtsBlob(blob).then(
+              () => {
+                if (my !== reqRef.current) return;
+                if (next) step(i + 1, next);
+                else {
+                  setSpeakingId((c) => (c === id ? null : c));
+                  onEnd?.();
+                }
+              },
+              () => fail(i),
+            );
+          },
+          () => fail(i),
+        );
+      };
+      step(0, gen(sents[0]));
+    },
+    [speakSystem],
+  );
+
   const speak = useCallback(
     (id: string, text: string, lang: Lang, onEnd?: () => void, opts?: { live?: boolean }) => {
       const clean = stripMarkdownForSpeech(text);
@@ -213,15 +263,21 @@ export function useSpeech() {
       let voiceName = ls("aion.voice.name") || (lang === "es" ? "es_MX-claude-high" : "");
       let engine = ls("aion.voice.engine") || (lang === "es" ? "piper" : "");
       const speed = parseFloat(ls("aion.voice.speed") || "1") || 1;
-      // HÍBRIDO: la voz clonada (Chatterbox) es ~2.5× tiempo real → demasiado lenta
+      const exaggeration = parseFloat(ls("aion.voice.exaggeration") || "0.6") || 0.6;
+      // HÍBRIDO: la voz clonada (Chatterbox) es ~3× tiempo real → demasiado lenta
       // para conversar EN VIVO. En modo voz / lectura automática usamos Piper mexicano
       // (instantáneo); la clonada queda para el botón Escuchar (a demanda).
       if (opts?.live && engine === "chatterbox") {
         engine = "piper";
         voiceName = "es_MX-claude-high";
       }
-      // Voz propia de AION (Piper latino / Kokoro / Chatterbox vía núcleo). Si el
-      // sidecar no está o falla, cae a la voz del sistema sin romper la conversación.
+      // Voz clonada (lenta) → streaming por frases para empezar a hablar antes.
+      if (engine === "chatterbox") {
+        speakStreamed(id, clean, lang, voiceName, speed, exaggeration, my, onEnd);
+        return;
+      }
+      // Voz propia de AION (Piper latino / Kokoro vía núcleo). Si el sidecar no está
+      // o falla, cae a la voz del sistema sin romper la conversación.
       ttsSpeak(clean, lang, { voice: voiceName, engine, speed })
         .then((blob) => {
           if (my !== reqRef.current) return; // superada por otra orden / stop / barge-in
@@ -238,7 +294,7 @@ export function useSpeech() {
           if (my === reqRef.current) speakSystem(id, clean, lang, onEnd);
         });
     },
-    [cleanupAudio, speakSystem],
+    [cleanupAudio, speakSystem, speakStreamed],
   );
 
   // Corta cualquier lectura al desmontar (no dejar a AION hablando solo).

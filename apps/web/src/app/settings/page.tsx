@@ -108,6 +108,7 @@ function VoiceCard() {
   const [engine, setEngine] = useState<"auto" | "system">("auto");
   const [voice, setVoice] = useState(DEFAULT_VOICE_ID);
   const [speed, setSpeed] = useState(1);
+  const [exaggeration, setExaggeration] = useState(0.6);
   const [testing, setTesting] = useState(false);
   const [testMsg, setTestMsg] = useState<string | null>(null);
   // Voces clonadas (motor chatterbox), cargadas del backend.
@@ -123,6 +124,7 @@ function VoiceCard() {
     if (localStorage.getItem("aion.voice") === "system") setEngine("system");
     setVoice(localStorage.getItem("aion.voice.name") || DEFAULT_VOICE_ID);
     setSpeed(parseFloat(localStorage.getItem("aion.voice.speed") || "1") || 1);
+    setExaggeration(parseFloat(localStorage.getItem("aion.voice.exaggeration") || "0.6") || 0.6);
     refreshCloned();
   }, []);
 
@@ -182,6 +184,7 @@ function VoiceCard() {
           voice,
           engine: voiceEngine(voice),
           speed,
+          exaggeration,
         });
         setTestMsg(null);
         await playTtsBlob(blob);
@@ -270,6 +273,28 @@ function VoiceCard() {
           />
         </div>
       </div>
+
+      {/* Expresividad — solo aplica a la voz clonada (Chatterbox). */}
+      {voiceEngine(voice) === "chatterbox" && engine !== "system" && (
+        <div className="mt-3">
+          <label className="text-xs block mb-1" style={{ color: "var(--text-3)" }}>
+            Expresividad / énfasis · {Math.round(exaggeration * 100)}%
+          </label>
+          <input
+            type="range"
+            min={0.3}
+            max={0.95}
+            step={0.05}
+            value={exaggeration}
+            onChange={(e) => { const v = parseFloat(e.target.value); setExaggeration(v); save("aion.voice.exaggeration", String(v)); }}
+            className="w-full"
+            style={{ accentColor: "var(--accent)" }}
+          />
+          <p className="text-[11px] mt-0.5" style={{ color: "var(--text-3)" }}>
+            Más alto = más emoción y énfasis (puede sonar más teatral); más bajo = más sobrio.
+          </p>
+        </div>
+      )}
 
       <div className="flex items-center gap-3 mt-4">
         <button className="btn inline-flex items-center gap-1.5" onClick={test} disabled={testing}>

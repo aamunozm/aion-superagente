@@ -133,14 +133,15 @@ def encode(samples: np.ndarray, sr: int):
         return to_wav_bytes(samples, sr), "audio/wav"
 
 
-def proxy_chatterbox(text: str, lang: str, voice: str, speed: float):
+def proxy_chatterbox(text: str, lang: str, voice: str, speed: float, exaggeration):
     """Delega en el sidecar de voz CLONADA (Chatterbox, proceso aparte en :8767,
     venv con torch). Devuelve (bytes, content_type). Lanza si no está disponible."""
     import urllib.request
 
-    payload = json.dumps(
-        {"text": text, "lang": lang, "voice": voice, "speed": speed}
-    ).encode()
+    body = {"text": text, "lang": lang, "voice": voice, "speed": speed}
+    if exaggeration is not None:
+        body["exaggeration"] = exaggeration
+    payload = json.dumps(body).encode()
     req = urllib.request.Request(
         "http://127.0.0.1:8767/tts",
         data=payload,
@@ -197,13 +198,14 @@ class Handler(BaseHTTPRequestHandler):
             engine = (req.get("engine") or "").strip()
             speed = float(req.get("speed") or 1.0)
             voice = (req.get("voice") or "").strip()
+            exaggeration = req.get("exaggeration")
             if not text:
                 raise ValueError("texto vacío")
             avail = piper_voices_available()
             # Enrutado de motor: chatterbox (voz clonada, sidecar aparte) | piper
             # (voces latinas naturales) | kokoro. Sin engine, piper si la voz existe.
             if engine == "chatterbox":
-                audio, ctype = proxy_chatterbox(text, lang, voice, speed)
+                audio, ctype = proxy_chatterbox(text, lang, voice, speed, exaggeration)
                 used = "chatterbox"
             elif engine == "piper" or (not engine and voice in avail):
                 model = voice if voice in avail else ("es_MX-claude-high" if "es_MX-claude-high" in avail else (avail[0] if avail else ""))

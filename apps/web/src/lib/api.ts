@@ -49,7 +49,7 @@ if (typeof window !== "undefined" && !(window as unknown as { __aionPatched?: bo
 export async function ttsSpeak(
   text: string,
   lang: string,
-  opts?: { voice?: string; engine?: string; speed?: number },
+  opts?: { voice?: string; engine?: string; speed?: number; exaggeration?: number },
 ): Promise<Blob> {
   const res = await fetch(`${BRIDGE_URL}/api/tts`, {
     method: "POST",
@@ -60,6 +60,7 @@ export async function ttsSpeak(
       voice: opts?.voice ?? "",
       engine: opts?.engine ?? "",
       speed: opts?.speed ?? 1.0,
+      ...(opts?.exaggeration != null ? { exaggeration: opts.exaggeration } : {}),
     }),
   });
   if (!res.ok) throw new Error(`tts ${res.status}`);

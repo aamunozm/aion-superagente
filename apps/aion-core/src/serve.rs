@@ -6277,6 +6277,9 @@ struct TtsReq {
     engine: String,
     #[serde(default)]
     speed: Option<f32>,
+    /// Expresividad/énfasis de la voz clonada (Chatterbox): 0.25 sobrio … 1.0 muy expresivo.
+    #[serde(default)]
+    exaggeration: Option<f32>,
 }
 
 /// Sintetiza la voz de AION delegando en el sidecar local (127.0.0.1:8766).
@@ -6291,6 +6294,7 @@ async fn tts_speak(Json(req): Json<TtsReq>) -> axum::response::Response {
         "lang": if req.lang.is_empty() { "es" } else { &req.lang },
         "engine": if req.engine.is_empty() { "kokoro" } else { &req.engine },
         "speed": req.speed.unwrap_or(1.0),
+        "exaggeration": req.exaggeration,
     });
     match reqwest::Client::new()
         .post("http://127.0.0.1:8766/tts")
