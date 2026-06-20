@@ -1819,10 +1819,17 @@ async fn chat(
     // recuerdos se aplican y cuántos los escribió OTRO modo (re-entrada → índice Φ).
     // RECUPERACIÓN en PARALELO: memoria y biblioteca embeben la consulta cada una; antes
     // corrían en serie (dos embeddings secuenciales). Ahora se solapan.
-    let ((grounding, mem_hits, cross_hits), lib_grounding) = tokio::join!(
-        relevant_knowledge(&body.prompt),
-        library_grounding(&body.prompt),
-    );
+    let ((grounding, mem_hits, cross_hits), lib_grounding) = if body.fast {
+        // Modo voz: sin recuperación proactiva de memoria/biblioteca (dos embeddings por
+        // turno) → menos latencia. El chat de texto sí recupera; la voz se apoya en el hilo
+        // de conversación (que ya viaja con cada turno).
+        ((String::new(), 0usize, 0usize), String::new())
+    } else {
+        tokio::join!(
+            relevant_knowledge(&body.prompt),
+            library_grounding(&body.prompt),
+        )
+    };
     // COMPRENSIÓN: razona QUÉ te está diciendo Ariel (intención + hechos a recordar). Es
     // una inferencia LLM extra (~varios segundos), así que NO siempre bloquea la respuesta:
     // solo cuando el turno parece una PREGUNTA, donde la anti-alucinación importa (dilo con
@@ -1909,6 +1916,11 @@ async fn chat(
         } else {
             format!("\n\n{note}")
         }
+    } else if body.fast {
+        // Modo voz: sin recall episódico PROACTIVO (un embedding por turno) → menos
+        // latencia. Si Ariel pregunta explícitamente «¿te acuerdas de…?» sí se recupera
+        // (rama de arriba); aquí, en charla fluida, AION se apoya en el hilo.
+        String::new()
     } else {
         let hits = crate::episodic::recall(&body.prompt, 2, 0).await;
         let note = crate::episodic::proactive_note(&hits);
