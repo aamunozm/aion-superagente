@@ -24,6 +24,7 @@ import io
 import json
 import os
 import queue
+import re
 import threading
 import unicodedata
 import wave
@@ -155,6 +156,204 @@ def qwen_lang(lang: str) -> str:
         return lang
     return "spanish"  # AION es español-primario; nunca caer a inglés por defecto
 
+
+# ── Normalización pre-TTS: números y símbolos → PALABRAS del idioma ───────────────
+# Investigación 2026: si el texto lleva "1.234", "50%", "32°C" o "€20", Qwen3-TTS hace
+# CODE-SWITCH a fonética inglesa en esos tokens ("español con acento inglés" puntual).
+# Verbalizarlos en el idioma ANTES de sintetizar lo evita. Conversor propio (sin deps,
+# portable) para es/it/en, enteros 0..10^12 + decimales dígito a dígito. Robusto: si algo
+# falla, se devuelve el texto original (la voz nunca se rompe por esto).
+_ONES = {
+    "es": ["", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve", "diez",
+           "once", "doce", "trece", "catorce", "quince", "dieciséis", "diecisiete", "dieciocho",
+           "diecinueve", "veinte", "veintiuno", "veintidós", "veintitrés", "veinticuatro",
+           "veinticinco", "veintiséis", "veintisiete", "veintiocho", "veintinueve"],
+    "it": ["", "uno", "due", "tre", "quattro", "cinque", "sei", "sette", "otto", "nove", "dieci",
+           "undici", "dodici", "tredici", "quattordici", "quindici", "sedici", "diciassette",
+           "diciotto", "diciannove", "venti", "ventuno", "ventidue", "ventitré", "ventiquattro",
+           "venticinque", "ventisei", "ventisette", "ventotto", "ventinove"],
+    "en": ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+           "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+           "eighteen", "nineteen", "twenty", "twenty-one", "twenty-two", "twenty-three",
+           "twenty-four", "twenty-five", "twenty-six", "twenty-seven", "twenty-eight", "twenty-nine"],
+}
+_TENS = {
+    "es": ["", "", "", "treinta", "cuarenta", "cincuenta", "sesenta", "setenta", "ochenta", "noventa"],
+    "it": ["", "", "", "trenta", "quaranta", "cinquanta", "sessanta", "settanta", "ottanta", "novanta"],
+    "en": ["", "", "", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"],
+}
+_HUND = {
+    "es": ["", "ciento", "doscientos", "trescientos", "cuatrocientos", "quinientos", "seiscientos",
+           "setecientos", "ochocientos", "novecientos"],
+    "it": ["", "cento", "duecento", "trecento", "quattrocento", "cinquecento", "seicento",
+           "settecento", "ottocento", "novecento"],
+    "en": ["", "one hundred", "two hundred", "three hundred", "four hundred", "five hundred",
+           "six hundred", "seven hundred", "eight hundred", "nine hundred"],
+}
+_ZERO = {"es": "cero", "it": "zero", "en": "zero"}
+_POINT = {"es": "coma", "it": "virgola", "en": "point"}
+
+
+def _under_1000(n: int, lang: str) -> str:
+    if n == 0:
+        return ""
+    o, t, h = _ONES[lang], _TENS[lang], _HUND[lang]
+    out = []
+    hundreds, rem = divmod(n, 100)
+    if hundreds:
+        if lang == "es" and n == 100:
+            return "cien"
+        out.append(h[hundreds])
+    if rem:
+        if rem < 30:
+            out.append(o[rem])
+        else:
+            tens, units = divmod(rem, 10)
+            if units:
+                if lang == "es":
+                    out.append(f"{t[tens]} y {o[units]}")
+                elif lang == "it":
+                    base = t[tens]
+                    # elisión italiana: trenta+uno→trentuno, quaranta+otto→quarantotto
+                    if o[units] in ("uno", "otto"):
+                        base = base[:-1]
+                    out.append(base + o[units])
+                else:
+                    out.append(f"{t[tens]}-{o[units]}")
+            else:
+                out.append(t[tens])
+    return " ".join(w for w in out if w)
+
+
+def _int_to_words(n: int, lang: str) -> str:
+    if n == 0:
+        return _ZERO[lang]
+    if n < 0:
+        neg = {"es": "menos ", "it": "meno ", "en": "minus "}[lang]
+        return neg + _int_to_words(-n, lang)
+    if n >= 10**12:
+        return None  # demasiado grande → mejor dígito a dígito (lo maneja el caller)
+    parts = []
+    scales = [
+        (10**9, {"es": ("mil millones", "mil millones"), "it": ("miliardo", "miliardi"), "en": ("billion", "billion")}),
+        (10**6, {"es": ("un millón", "millones"), "it": ("milione", "milioni"), "en": ("million", "million")}),
+        (10**3, {"es": ("mil", "mil"), "it": ("mille", "mila"), "en": ("thousand", "thousand")}),
+    ]
+    rem = n
+    for value, names in scales:
+        q, rem = divmod(rem, value)
+        if not q:
+            continue
+        sing, plur = names[lang]
+        if value == 10**3:
+            if lang == "es":
+                parts.append("mil" if q == 1 else f"{_under_1000(q, 'es')} mil")
+            elif lang == "it":
+                parts.append("mille" if q == 1 else f"{_int_to_words(q, 'it')}mila")
+            else:
+                parts.append(f"{_int_to_words(q, 'en')} thousand")
+        elif lang == "es":
+            parts.append(sing if q == 1 and value == 10**6 else f"{_int_to_words(q, 'es')} {plur}")
+        elif lang == "it":
+            parts.append(sing if q == 1 else f"{_int_to_words(q, 'it')} {plur}")
+        else:
+            parts.append(f"{_int_to_words(q, 'en')} {plur}")
+    if rem:
+        parts.append(_under_1000(rem, lang))
+    return " ".join(p for p in parts if p)
+
+
+def _digits_to_words(s: str, lang: str) -> str:
+    """Cada dígito por separado: '56' → 'cinco seis' (para decimales)."""
+    return " ".join(_ONES[lang][int(d)] if d != "0" else _ZERO[lang] for d in s)
+
+
+def _int_or_digits(s: str, lang: str) -> str:
+    """Entero a palabras; si es enorme (>10^12), dígito a dígito."""
+    w = _int_to_words(int(s), lang)
+    return w if w is not None else _digits_to_words(s, lang)
+
+
+def _num_token_to_words(tok: str, lang: str) -> str:
+    """'1.234,56'(es) | '1,234.56'(en) | '4.2.1'(versión) → palabras. Sep. según idioma."""
+    thou, dec = (".", ",") if lang in ("es", "it") else (",", ".")
+    # 1) Decimal estándar: un único separador decimal, fracción de dígitos.
+    if tok.count(dec) == 1:
+        left, _, right = tok.partition(dec)
+        if right.isdigit() and left.replace(thou, "").isdigit():
+            return f"{_int_or_digits(left.replace(thou, ''), lang)} {_POINT[lang]} {_digits_to_words(right, lang)}"
+    # 2) Entero con agrupación de miles VÁLIDA (1 / 12 / 1.234 / 1.234.567).
+    if re.fullmatch(rf"\d{{1,3}}(\{thou}\d{{3}})*", tok):
+        return _int_or_digits(tok.replace(thou, ""), lang)
+    # 3) es/it: un único "." con ≠3 dígitos detrás también es DECIMAL (3.14, 1.5).
+    if lang in ("es", "it") and tok.count(".") == 1:
+        a, _, b = tok.partition(".")
+        if a.isdigit() and b.isdigit():
+            return f"{_int_or_digits(a, lang)} {_POINT[lang]} {_digits_to_words(b, lang)}"
+    # 4) Versión / multi-separador (4.2.1): cada grupo, unido por "punto".
+    parts = re.split(r"[.,]", tok)
+    if len(parts) >= 2 and all(p.isdigit() for p in parts):
+        join = {"es": " punto ", "it": " punto ", "en": " point "}[lang]
+        return join.join(_int_or_digits(p, lang) for p in parts)
+    # 5) Sin patrón claro: número simple o se deja igual.
+    bare = tok.replace(thou, "").replace(dec, "")
+    return _int_or_digits(bare, lang) if bare.isdigit() else tok
+
+
+# Símbolos pegados a números → palabra del idioma (antes de convertir los números).
+# Nota: solo "°" (U+00B0, grado), NO "º" (U+00BA, ordinal masculino "1º"=primero).
+_SYM = {
+    "es": [("%", " por ciento"), ("€", " euros"), ("$", " dólares"), ("£", " libras"), ("°", " grados")],
+    "it": [("%", " per cento"), ("€", " euro"), ("$", " dollari"), ("£", " sterline"), ("°", " gradi")],
+    "en": [("%", " percent"), ("€", " euros"), ("$", " dollars"), ("£", " pounds"), ("°", " degrees")],
+}
+
+
+def normalize_for_tts(text: str, lang: str) -> str:
+    """Verbaliza números y símbolos en el idioma para evitar code-switch de acento."""
+    try:
+        lng = "es"
+        for k, v in LANG_MAP.items():
+            if lang == k or lang == v:
+                lng = k if k in _ONES else ("es" if v == "spanish" else "en")
+                break
+        if lng not in _ONES:
+            lng = "es"
+        out = text
+        # Temperatura: "32°C"/"°F" → "... grados centígrados/Fahrenheit" (antes del ° suelto,
+        # si no la C/F queda colgando: "gradosC").
+        _TEMP = {
+            "es": (" grados centígrados", " grados Fahrenheit"),
+            "it": (" gradi centigradi", " gradi Fahrenheit"),
+            "en": (" degrees Celsius", " degrees Fahrenheit"),
+        }[lng]
+        out = re.sub(r"[°º]\s?C\b", _TEMP[0], out)
+        out = re.sub(r"[°º]\s?F\b", _TEMP[1], out)
+        out = out.replace("℃", _TEMP[0]).replace("℉", _TEMP[1])
+        # Moneda con símbolo a la izquierda: "€20"/"$5" → "20 euros"/"5 dólares".
+        for sym, word in _SYM[lng]:
+            if sym in ("€", "$", "£"):
+                out = re.sub(rf"\{sym}\s?(\d[\d.,]*)", lambda m, w=word: m.group(1) + w, out)
+        # Resto de símbolos pegados a la derecha del número: "50%","32°".
+        for sym, word in _SYM[lng]:
+            out = out.replace(sym, word)
+        # Signo negativo pegado a un número y NO precedido por letra/dígito (evita "GPT-4"
+        # → "GPT menos cuatro" o rangos "3-5"): " -5" → " menos 5".
+        minus = {"es": "menos ", "it": "meno ", "en": "minus "}[lng]
+        out = re.sub(r"(?<![\w-])-(?=\d)", minus, out)
+        # Números (con separadores) → palabras, SOLO si no están pegados a letras (así
+        # "Qwen3", "4B", "mp3", "v2" quedan intactos y se leen como nombre, no "tres/cuatro").
+        out = re.sub(
+            r"(?<![^\W\d_])(?:\d[\d.,]*\d|\d)(?![^\W\d_])",
+            lambda m: _num_token_to_words(m.group(0), lng),
+            out,
+        )
+        out = re.sub(r"\s{2,}", " ", out)  # colapsa espacios dobles que dejan los símbolos
+        return out
+    except Exception:
+        return text  # ante cualquier fallo, jamás romper la voz
+
+
 _model = None
 _ready = threading.Event()  # se activa cuando el modelo está cargado y caliente
 
@@ -238,16 +437,18 @@ def _generate(text: str, lang: str, voice: str, speed: float):
         kw["voice"] = DEFAULT_PRESET
     else:
         kw["voice"] = voice if voice in PRESETS else DEFAULT_PRESET
-    instr, sfactor = pick_style(text)  # emoción adaptativa según el contenido → voz humana
+    instr, sfactor = pick_style(text)  # emoción adaptativa sobre el texto ORIGINAL (signos/léxico)
     if instr:
         kw["instruct"] = instr
     # Velocidad ADAPTATIVA: el factor de la emoción (animado +, reflexivo −) modula la
     # velocidad base del usuario, con clamp para que nunca suene antinatural.
     eff_speed = max(0.8, min(1.25, (speed or 1.0) * sfactor))
+    # Normaliza números/símbolos a palabras del idioma → evita code-switch a acento inglés.
+    say = normalize_for_tts(text, lang)
     chunks = []
     sr = 24000
     for r in m.generate(
-        text=text, lang_code=qwen_lang(lang), speed=eff_speed, verbose=False, **kw
+        text=say, lang_code=qwen_lang(lang), speed=eff_speed, verbose=False, **kw
     ):
         chunks.append(np.asarray(r.audio, dtype=np.float32).reshape(-1))
         sr = getattr(r, "sample_rate", None) or getattr(r, "sr", None) or sr
