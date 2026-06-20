@@ -401,24 +401,8 @@ export function useSpeech() {
     [cleanupAudio],
   );
 
-  // ── Cola: reproduce frases en ORDEN sin cancelar la anterior, con Piper
-  // (instantáneo). Permite hablar la respuesta del LLM mientras se genera. ──
-  const drainQueue = useCallback(() => {
-    if (qBusyRef.current) return;
-    const my = reqRef.current;
-    const next = qRef.current.shift();
-    if (next === undefined) {
-      // Nada pendiente: si el turno ya terminó, cierra (reabre micro en modo voz).
-      if (qDoneRef.current) {
-        setSpeakingId((c) => (c === qIdRef.current ? null : c));
-        const end = qEndRef.current;
-        qEndRef.current = undefined;
-        qDoneRef.current = false;
-        end?.();
-      }
-      return;
-    }
-    qBusyRef.current = true;
+  // Genera el audio de UNA frase con la voz/motor/velocidad elegidos en Ajustes.
+  const genBlob = useCallback((text: string): Promise<Blob> => {
     const speed =
       typeof localStorage !== "undefined"
         ? parseFloat(localStorage.getItem("aion.voice.speed") || "1") || 1
@@ -435,14 +419,79 @@ export function useSpeech() {
     const fast = savedEngine && savedEngine !== "chatterbox";
     const engine = fast ? savedEngine! : "piper";
     const voice = fast && savedVoice ? savedVoice : "es_MX-claude-high";
-    ttsSpeak(next, qLangRef.current, { voice, engine, speed })
-      .then((blob) => (my === reqRef.current ? playTtsBlob(blob) : undefined))
-      .catch(() => { /* frase fallida → se omite, sigue la conversación */ })
-      .finally(() => {
-        qBusyRef.current = false;
-        if (my === reqRef.current) drainQueue();
-      });
+    return ttsSpeak(text, qLangRef.current, { voice, engine, speed });
   }, []);
+
+  // ── Cola con PIPELINE: reproduce frases en ORDEN sin cortar la anterior y, lo
+  // clave para que NO suene entrecortado, GENERA la frase siguiente MIENTRAS suena la
+  // actual (antes se generaba al terminar = ~1s de silencio entre frases). Resultado:
+  // habla continua y humana mientras el LLM aún escribe el resto del turno. ──
+  const drainQueue = useCallback(() => {
+    if (qBusyRef.current) return;
+    const my = reqRef.current;
+    const first = qRef.current.shift();
+    if (first === undefined) {
+      // Nada pendiente: si el turno ya terminó, cierra (reabre micro en modo voz).
+      if (qDoneRef.current) {
+        setSpeakingId((c) => (c === qIdRef.current ? null : c));
+        const end = qEndRef.current;
+        qEndRef.current = undefined;
+        qDoneRef.current = false;
+        end?.();
+      }
+      return;
+    }
+    qBusyRef.current = true;
+    const endTurn = () => {
+      qBusyRef.current = false;
+      if (my !== reqRef.current) return;
+      if (qRef.current.length) {
+        drainQueue(); // llegaron frases tarde (el LLM seguía escribiendo)
+      } else if (qDoneRef.current) {
+        setSpeakingId((c) => (c === qIdRef.current ? null : c));
+        const end = qEndRef.current;
+        qEndRef.current = undefined;
+        qDoneRef.current = false;
+        end?.();
+      }
+    };
+    // Bombea: con el blob actual ya listo, ARRANCA la generación de la frase siguiente
+    // (prefetch) y, en paralelo, reproduce la actual. Al terminar de sonar, la siguiente
+    // ya está casi lista → empalme sin huecos.
+    const pump = (blobP: Promise<Blob>) => {
+      blobP.then(
+        (blob) => {
+          if (my !== reqRef.current) {
+            qBusyRef.current = false;
+            return;
+          }
+          const nextText = qRef.current.shift();
+          const nextP = nextText !== undefined ? genBlob(nextText) : null; // prefetch
+          playTtsBlob(blob)
+            .catch(() => {})
+            .finally(() => {
+              if (my !== reqRef.current) {
+                qBusyRef.current = false;
+                return;
+              }
+              if (nextP) pump(nextP);
+              else endTurn();
+            });
+        },
+        () => {
+          // Generación fallida → omite esa frase y sigue con la siguiente sin cortar.
+          if (my !== reqRef.current) {
+            qBusyRef.current = false;
+            return;
+          }
+          const nextText = qRef.current.shift();
+          if (nextText !== undefined) pump(genBlob(nextText));
+          else endTurn();
+        },
+      );
+    };
+    pump(genBlob(first));
+  }, [genBlob]);
 
   /** Encola una frase para hablar en orden (no corta la anterior). */
   const enqueueSpeak = useCallback(
