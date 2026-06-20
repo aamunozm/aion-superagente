@@ -91,6 +91,11 @@ const DEEPSEEK_MODELS: { id: string; label: string; desc: string }[] = [
 // Voces de catálogo (Piper latino natural + Kokoro). Las clonadas se añaden
 // dinámicamente desde el backend (motor chatterbox).
 const VOICES: { id: string; engine: string; label: string }[] = [
+  // Qwen3-TTS (MLX) — la más natural, tiempo real, sirve para conversar en vivo.
+  { id: "serena", engine: "qwen", label: "Qwen3 · Serena (natural, f) ★" },
+  { id: "eric", engine: "qwen", label: "Qwen3 · Eric (natural, m) ★" },
+  { id: "vivian", engine: "qwen", label: "Qwen3 · Vivian (natural, f)" },
+  { id: "dylan", engine: "qwen", label: "Qwen3 · Dylan (natural, m)" },
   { id: "es_MX-claude-high", engine: "piper", label: "Español (México) · natural" },
   { id: "es_AR-daniela-high", engine: "piper", label: "Español (Argentina) · natural" },
   { id: "ef_dora", engine: "kokoro", label: "Español · Dora (Kokoro)" },
@@ -129,9 +134,9 @@ function VoiceCard() {
   }, []);
 
   const save = (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* */ } };
-  // El motor de una voz: clonada → chatterbox; si no, el del catálogo.
+  // El motor de una voz: clonada → Qwen3 (natural + tiempo real); si no, el del catálogo.
   const voiceEngine = (id: string) =>
-    cloned.includes(id) ? "chatterbox" : VOICES.find((v) => v.id === id)?.engine || "kokoro";
+    cloned.includes(id) ? "qwen" : VOICES.find((v) => v.id === id)?.engine || "kokoro";
   const chooseVoice = (id: string) => {
     setVoice(id);
     save("aion.voice.name", id);
@@ -177,8 +182,8 @@ function VoiceCard() {
         window.speechSynthesis.cancel();
         window.speechSynthesis.speak(u);
       } else {
-        if (voiceEngine(voice) === "chatterbox") {
-          setTestMsg("Generando con tu voz clonada… (puede tardar unos segundos)");
+        if (voiceEngine(voice) === "qwen" || voiceEngine(voice) === "chatterbox") {
+          setTestMsg("Generando con tu voz natural… (la 1ª vez puede tardar un momento)");
         }
         const blob = await ttsSpeak("Hola Ariel, soy AION. Así sueno con esta voz, más natural.", lang, {
           voice,
@@ -310,8 +315,9 @@ function VoiceCard() {
         </h3>
         <p className="text-xs mb-3" style={{ color: "var(--text-3)" }}>
           Sube un clip limpio de <strong>10-20&nbsp;s</strong> (voz sola, sin música ni ruido) y AION
-          la clona conservando acento y timbre. La voz clonada es muy realista pero <strong>más
-          lenta</strong> (se usa al pulsar «Escuchar»; en el modo voz en vivo se usa la rápida).
+          la clona con <strong>Qwen3-TTS</strong> conservando acento y timbre. Es muy realista y
+          <strong> en tiempo real</strong> (RTF&nbsp;~0.3), así que sirve también para conversar en
+          el modo voz en vivo, no solo al pulsar «Escuchar».
         </p>
         <div className="flex flex-col sm:flex-row gap-2">
           <input

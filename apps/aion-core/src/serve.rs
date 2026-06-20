@@ -645,6 +645,46 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // 🗣️ SIDECAR DE VOZ NATURAL (Qwen3-TTS vía MLX): voz natural + clonada en TIEMPO
+    // REAL (RTF ~0.3 en Apple Silicon), su propio venv-mlx. Proceso aparte en :8768;
+    // el sidecar principal le enruta engine=qwen. Warmup en segundo plano. Sin
+    // venv-mlx → la UI usa Piper/Kokoro.
+    tokio::spawn(async {
+        let dir = crate::app_data_dir().join("tts");
+        let _ = std::fs::create_dir_all(&dir);
+        let script = dir.join("tts_qwen.py");
+        let _ = std::fs::write(&script, include_str!("../../tts-sidecar/tts_qwen.py"));
+        let py = dir.join("venv-mlx/bin/python");
+        if !py.exists() {
+            tracing::info!(
+                "sidecar de voz Qwen3 no instalado (sin venv-mlx) → se usa Piper/Kokoro"
+            );
+            return;
+        }
+        loop {
+            let up = reqwest::Client::new()
+                .get("http://127.0.0.1:8768/health")
+                .timeout(std::time::Duration::from_millis(800))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if !up {
+                tracing::info!("arrancando sidecar de voz natural (Qwen3-TTS/MLX)");
+                let mut cmd = tokio::process::Command::new(&py);
+                cmd.arg(&script).kill_on_drop(true);
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        let _ = child.wait().await;
+                        tracing::warn!("sidecar de voz Qwen3 terminó; reintento en 5s");
+                    }
+                    Err(e) => tracing::warn!("no pude arrancar el sidecar de voz Qwen3: {e}"),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+
     // CORS restringido a orígenes LOCALES (web :3000 en dev, Tauri en producción):
     // antes era `Any`, lo que permitía a CUALQUIER web abierta en el navegador leer
     // las respuestas del puente (memoria, auditoría, credenciales). Ahora el navegador

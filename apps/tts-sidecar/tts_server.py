@@ -133,22 +133,33 @@ def encode(samples: np.ndarray, sr: int):
         return to_wav_bytes(samples, sr), "audio/wav"
 
 
-def proxy_chatterbox(text: str, lang: str, voice: str, speed: float, exaggeration):
-    """Delega en el sidecar de voz CLONADA (Chatterbox, proceso aparte en :8767,
-    venv con torch). Devuelve (bytes, content_type). Lanza si no está disponible."""
+def _proxy(port: int, body: dict, timeout: int):
+    """POST genérico a un sidecar local (Chatterbox/Qwen). (bytes, content_type)."""
     import urllib.request
 
-    body = {"text": text, "lang": lang, "voice": voice, "speed": speed}
-    if exaggeration is not None:
-        body["exaggeration"] = exaggeration
     payload = json.dumps(body).encode()
     req = urllib.request.Request(
-        "http://127.0.0.1:8767/tts",
+        f"http://127.0.0.1:{port}/tts",
         data=payload,
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=300) as r:  # chatterbox es lento
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read(), r.headers.get("Content-Type", "audio/mpeg")
+
+
+def proxy_chatterbox(text: str, lang: str, voice: str, speed: float, exaggeration):
+    """Delega en el sidecar de voz CLONADA (Chatterbox, proceso aparte en :8767,
+    venv con torch). Devuelve (bytes, content_type). Lanza si no está disponible."""
+    body = {"text": text, "lang": lang, "voice": voice, "speed": speed}
+    if exaggeration is not None:
+        body["exaggeration"] = exaggeration
+    return _proxy(8767, body, 300)  # chatterbox es lento
+
+
+def proxy_qwen(text: str, lang: str, voice: str, speed: float):
+    """Delega en el sidecar de voz NATURAL Qwen3-TTS/MLX (:8768, venv-mlx). Natural
+    + clona la voz chilena en tiempo real (RTF ~0.3). Lanza si no está disponible."""
+    return _proxy(8768, {"text": text, "lang": lang, "voice": voice, "speed": speed}, 120)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -204,7 +215,10 @@ class Handler(BaseHTTPRequestHandler):
             avail = piper_voices_available()
             # Enrutado de motor: chatterbox (voz clonada, sidecar aparte) | piper
             # (voces latinas naturales) | kokoro. Sin engine, piper si la voz existe.
-            if engine == "chatterbox":
+            if engine == "qwen":
+                audio, ctype = proxy_qwen(text, lang, voice, speed)
+                used = "qwen"
+            elif engine == "chatterbox":
                 audio, ctype = proxy_chatterbox(text, lang, voice, speed, exaggeration)
                 used = "chatterbox"
             elif engine == "piper" or (not engine and voice in avail):

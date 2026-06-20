@@ -218,6 +218,7 @@ export function useSpeech() {
       voiceName: string,
       speed: number,
       exaggeration: number,
+      engine: string,
       my: number,
       onEnd?: () => void,
     ) => {
@@ -227,9 +228,24 @@ export function useSpeech() {
         .filter(Boolean);
       const sents = parts.length ? parts : [clean];
       const gen = (s: string) =>
-        ttsSpeak(s, lang, { voice: voiceName, engine: "chatterbox", speed, exaggeration });
+        ttsSpeak(s, lang, { voice: voiceName, engine, speed, exaggeration });
+      // Fallback NATURAL: si la voz propia falla, lee el resto con Piper latino
+      // (no la voz robótica del sistema). Solo si Piper también falla cae al sistema.
       const fail = (i: number) => {
-        if (my === reqRef.current) speakSystem(id, sents.slice(i).join(" "), lang, onEnd);
+        if (my !== reqRef.current) return;
+        const rest = sents.slice(i).join(" ");
+        ttsSpeak(rest, lang, { voice: "es_MX-claude-high", engine: "piper", speed })
+          .then((blob) =>
+            my === reqRef.current
+              ? playTtsBlob(blob, () => {
+                  setSpeakingId((c) => (c === id ? null : c));
+                  onEnd?.();
+                })
+              : undefined,
+          )
+          .catch(() => {
+            if (my === reqRef.current) speakSystem(id, rest, lang, onEnd);
+          });
       };
       const step = (i: number, cur: Promise<Blob>) => {
         cur.then(
@@ -280,35 +296,45 @@ export function useSpeech() {
       let engine = ls("aion.voice.engine") || (lang === "es" ? "piper" : "");
       const speed = parseFloat(ls("aion.voice.speed") || "1") || 1;
       const exaggeration = parseFloat(ls("aion.voice.exaggeration") || "0.6") || 0.6;
-      // HÍBRIDO: la voz clonada (Chatterbox) es ~3× tiempo real → demasiado lenta
-      // para conversar EN VIVO. En modo voz / lectura automática usamos Piper mexicano
-      // (instantáneo); la clonada queda para el botón Escuchar (a demanda).
+      // HÍBRIDO: Chatterbox (voz clonada PyTorch) es ~3× tiempo real → demasiado lenta
+      // para conversar EN VIVO; en modo voz se sustituye por Piper. Qwen3 (MLX) es
+      // ~0.3× tiempo real → SÍ sirve en vivo, así que se mantiene (voz natural real).
       if (opts?.live && engine === "chatterbox") {
         engine = "piper";
         voiceName = "es_MX-claude-high";
       }
-      // Voz clonada (lenta) → streaming por frases para empezar a hablar antes.
-      if (engine === "chatterbox") {
-        speakStreamed(id, clean, lang, voiceName, speed, exaggeration, my, onEnd);
+      // Voz natural/clonada (Qwen3 o Chatterbox) → streaming por frases: empieza a
+      // hablar tras la 1ª frase y genera la siguiente mientras suena.
+      if (engine === "qwen" || engine === "chatterbox") {
+        speakStreamed(id, clean, lang, voiceName, speed, exaggeration, engine, my, onEnd);
         return;
       }
       // Voz propia de AION (Piper latino / Kokoro vía núcleo). Si el sidecar no está
-      // o falla, cae a la voz del sistema sin romper la conversación.
+      // o falla, cae a Piper y, en último caso, a la voz del sistema (nunca robótica
+      // si se puede evitar).
+      const onFail = () => {
+        if (my !== reqRef.current) return;
+        if (engine === "piper") {
+          speakSystem(id, clean, lang, onEnd); // Piper ya falló → sistema
+        } else {
+          ttsSpeak(clean, lang, { voice: "es_MX-claude-high", engine: "piper", speed })
+            .then((b) =>
+              my === reqRef.current
+                ? playTtsBlob(b, () => { setSpeakingId((c) => (c === id ? null : c)); onEnd?.(); })
+                : undefined,
+            )
+            .catch(() => { if (my === reqRef.current) speakSystem(id, clean, lang, onEnd); });
+        }
+      };
       ttsSpeak(clean, lang, { voice: voiceName, engine, speed })
         .then((blob) => {
           if (my !== reqRef.current) return; // superada por otra orden / stop / barge-in
           return playTtsBlob(blob, () => {
             setSpeakingId((cur) => (cur === id ? null : cur));
             onEnd?.();
-          }).catch(() => {
-            // Audio bloqueado (sin gesto) o sin decodificar → voz del sistema.
-            if (my === reqRef.current) speakSystem(id, clean, lang, onEnd);
-          });
+          }).catch(onFail);
         })
-        .catch(() => {
-          // Sidecar caído / error de red → voz del sistema.
-          if (my === reqRef.current) speakSystem(id, clean, lang, onEnd);
-        });
+        .catch(onFail);
     },
     [cleanupAudio, speakSystem, speakStreamed],
   );
