@@ -362,7 +362,7 @@ _jobs: "queue.Queue[_Job]" = queue.Queue()
 
 
 class _Job:
-    __slots__ = ("text", "lang", "voice", "speed", "ev", "audio", "sr", "err")
+    __slots__ = ("text", "lang", "voice", "speed", "ev", "audio", "sr", "err", "stream_q")
 
     def __init__(self, text, lang, voice, speed):
         self.text = text
@@ -373,6 +373,9 @@ class _Job:
         self.audio = None
         self.sr = 24000
         self.err = None
+        # Si != None, el worker emite PCM Int16 chunk a chunk a esta cola (streaming en vivo)
+        # en vez de devolver el audio completo. La pone el handler de /tts/stream.
+        self.stream_q = None
 
 
 def model():
@@ -500,6 +503,48 @@ def _generate(text: str, lang: str, voice: str, speed: float):
     return audio, int(sr)
 
 
+def _kw_for(voice: str):
+    """Construye los kwargs de voz/clon para m.generate (común a normal y streaming)."""
+    kw = {}
+    ref = clip_path(voice) if voice else None
+    if ref:
+        kw["ref_audio"] = ref
+        rt = ref_text_for(ref)
+        if rt:
+            kw["ref_text"] = rt
+        kw["voice"] = DEFAULT_PRESET
+    else:
+        kw["voice"] = voice if voice in PRESETS else DEFAULT_PRESET
+    return kw
+
+
+def _generate_stream_into(job: "_Job"):
+    """STREAMING: emite PCM Int16 (24 kHz mono) chunk a chunk a job.stream_q según los va
+    produciendo el vocoder (1er audio en ~0.1-0.4s). SOLO la llama el hilo trabajador."""
+    m = model()
+    kw = _kw_for(job.voice)
+    instr, sfactor = pick_style(job.text)
+    if instr:
+        kw["instruct"] = instr
+    eff_speed = max(0.8, min(1.25, (job.speed or 1.0) * sfactor))
+    say = normalize_for_tts(job.text, job.lang)
+    n = 0
+    for r in m.generate(
+        text=say,
+        lang_code=qwen_lang(job.lang),
+        speed=eff_speed,
+        verbose=False,
+        stream=True,
+        streaming_interval=0.3,
+        **kw,
+    ):
+        a = np.asarray(r.audio, dtype=np.float32).reshape(-1)
+        if len(a):
+            job.stream_q.put(_pcm16(a))
+            n += 1
+    job.stream_q.put(None)  # fin del stream
+
+
 def _worker():
     """Hilo ÚNICO dueño del modelo: carga, calienta y procesa la cola en serie."""
     try:
@@ -522,9 +567,14 @@ def _worker():
     while True:
         job = _jobs.get()
         try:
-            job.audio, job.sr = _generate(job.text, job.lang, job.voice, job.speed)
+            if job.stream_q is not None:
+                _generate_stream_into(job)  # emite PCM a la cola; termina con None
+            else:
+                job.audio, job.sr = _generate(job.text, job.lang, job.voice, job.speed)
         except Exception as e:  # noqa: BLE001
             job.err = str(e)
+            if job.stream_q is not None:
+                job.stream_q.put(None)  # cierra el stream aunque falle
         finally:
             job.ev.set()
 
@@ -537,6 +587,19 @@ def synth(text: str, lang: str, voice: str, speed: float):
     if job.err:
         raise RuntimeError(job.err)
     return job.audio, job.sr
+
+
+def synth_stream(text: str, lang: str, voice: str, speed: float):
+    """Generador: encola un trabajo de STREAMING y va devolviendo bloques de PCM Int16 según
+    el worker los produce. Permite empezar a reproducir en ~0.1-0.4s en vez de esperar todo."""
+    job = _Job(text, lang, voice, speed)
+    job.stream_q = queue.Queue(maxsize=64)  # backpressure: el worker no corre muy por delante
+    _jobs.put(job)
+    while True:
+        item = job.stream_q.get()
+        if item is None:
+            break
+        yield item
 
 
 def _pcm16(a: np.ndarray) -> bytes:
@@ -609,6 +672,24 @@ class Handler(BaseHTTPRequestHandler):
             speed = float(req.get("speed") or 1.0)
             if not text:
                 raise ValueError("texto vacío")
+            # STREAMING: /tts/stream → PCM Int16 24 kHz mono, chunk a chunk (1er audio ~0.1s).
+            # El cliente lo reproduce con Web Audio. HTTP/1.0 → cierra al EOF, sin Content-Length.
+            if self.path.startswith("/tts/stream"):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("X-AION-TTS-Engine", "qwen")
+                self.send_header("X-Sample-Rate", "24000")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                self._cors()
+                self.end_headers()
+                try:
+                    for pcm in synth_stream(text, lang, voice, speed):
+                        self.wfile.write(pcm)
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # el cliente cortó (barge-in / cambió de tema): normal
+                return
             audio, ctype = encode(*synth(text, lang, voice, speed))
             self.send_response(200)
             self.send_header("Content-Type", ctype)

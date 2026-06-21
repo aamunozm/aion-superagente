@@ -140,7 +140,14 @@ function unlockAudio() {
 
 if (typeof window !== "undefined") {
   ["pointerdown", "keydown", "touchstart"].forEach((ev) =>
-    window.addEventListener(ev, unlockAudio),
+    window.addEventListener(ev, () => {
+      unlockAudio();
+      // Desbloquea/reanuda también el AudioContext del streaming (política de autoplay).
+      try {
+        const c = streamCtx();
+        if (c && c.state === "suspended") c.resume().catch(() => {});
+      } catch { /* */ }
+    }),
   );
 }
 
@@ -148,6 +155,120 @@ function stopPlayback() {
   if (_audioEl) {
     try { _audioEl.pause(); } catch { /* */ }
   }
+}
+
+// ── Reproducción por STREAMING (Web Audio): el sidecar manda PCM Int16 chunk a chunk y lo
+// vamos programando en la línea de tiempo del AudioContext → primer sonido en ~0.1-0.4s, sin
+// esperar a generar toda la frase. Es el camino de baja latencia para el modo voz en vivo. ──
+const TTS_SIDECAR = "http://127.0.0.1:8768";
+let _streamCtx: AudioContext | null = null;
+let _streamSources: AudioBufferSourceNode[] = [];
+let _streamAbort: AbortController | null = null;
+
+function streamCtx(): AudioContext | null {
+  if (typeof window === "undefined") return null;
+  const AC: typeof AudioContext | undefined =
+    (window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext })
+      .AudioContext ||
+    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AC) return null;
+  if (!_streamCtx) {
+    try { _streamCtx = new AC(); } catch { return null; }
+  }
+  return _streamCtx;
+}
+
+/** Corta la reproducción por streaming (barge-in / stop): aborta el fetch y para las fuentes. */
+export function stopStream() {
+  try { _streamAbort?.abort(); } catch { /* */ }
+  _streamAbort = null;
+  for (const s of _streamSources) {
+    try { s.stop(); } catch { /* */ }
+    try { s.disconnect(); } catch { /* */ }
+  }
+  _streamSources = [];
+}
+
+/** ¿Se puede usar el streaming Web Audio? (hay AudioContext y no está desactivado). */
+export function streamingAvailable(): boolean {
+  if (typeof window === "undefined") return false;
+  if (typeof localStorage !== "undefined" && localStorage.getItem("aion.voice.stream") === "off") {
+    return false;
+  }
+  return !!streamCtx();
+}
+
+/**
+ * Sintetiza y reproduce `text` por streaming (PCM → AudioContext). Resuelve cuando termina de
+ * sonar; LANZA si algo falla (→ el llamador cae al camino por blob). `alive()` permite cortar
+ * entre chunks (barge-in). No trocea: el sidecar ya emite progresivamente.
+ */
+async function streamSpeak(
+  text: string,
+  lang: Lang,
+  voice: string,
+  engine: string,
+  speed: number,
+  alive: () => boolean,
+): Promise<void> {
+  const ctx = streamCtx();
+  if (!ctx) throw new Error("sin AudioContext");
+  if (ctx.state === "suspended") { try { await ctx.resume(); } catch { /* */ } }
+  const ctrl = new AbortController();
+  _streamAbort = ctrl;
+  const res = await fetch(`${TTS_SIDECAR}/tts/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, lang, voice, engine, speed }),
+    signal: ctrl.signal,
+  });
+  if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
+  const reader = res.body.getReader();
+  const SR = 24000;
+  let nextTime = ctx.currentTime + 0.08; // pequeño colchón inicial
+  let carry: Uint8Array | null = null; // byte impar arrastrado entre chunks
+  const mine: AudioBufferSourceNode[] = [];
+  let got = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!alive()) { try { ctrl.abort(); } catch { /* */ } break; }
+      let bytes: Uint8Array = value;
+      if (carry) {
+        const m = new Uint8Array(carry.length + value.length);
+        m.set(carry); m.set(value, carry.length); bytes = m; carry = null;
+      }
+      const usable = bytes.length - (bytes.length % 2);
+      if (usable < bytes.length) carry = bytes.slice(usable);
+      if (usable <= 0) continue;
+      const samples = usable / 2;
+      const f32 = new Float32Array(samples);
+      for (let i = 0; i < samples; i++) {
+        let v = bytes[2 * i] | (bytes[2 * i + 1] << 8);
+        if (v >= 32768) v -= 65536;
+        f32[i] = v / 32768;
+      }
+      const ab = ctx.createBuffer(1, samples, SR);
+      ab.copyToChannel(f32, 0);
+      const node = ctx.createBufferSource();
+      node.buffer = ab;
+      node.connect(ctx.destination);
+      const startAt = Math.max(nextTime, ctx.currentTime + 0.01);
+      node.start(startAt);
+      nextTime = startAt + ab.duration;
+      mine.push(node);
+      _streamSources.push(node);
+      got = true;
+    }
+  } finally {
+    if (_streamAbort === ctrl) _streamAbort = null;
+  }
+  if (!got) throw new Error("stream vacío");
+  // Espera hasta que la última muestra programada haya sonado (o nos corten).
+  const waitMs = Math.max(0, (nextTime - ctx.currentTime) * 1000);
+  await new Promise<void>((r) => setTimeout(r, waitMs));
+  _streamSources = _streamSources.filter((s) => !mine.includes(s));
 }
 
 /**
@@ -230,6 +351,7 @@ export function useSpeech() {
       window.speechSynthesis.cancel();
     }
     cleanupAudio();
+    stopStream(); // corta también la reproducción por streaming (Web Audio)
     clearQueue();
     setSpeakingId(null);
   }, [cleanupAudio, clearQueue]);
@@ -401,26 +523,28 @@ export function useSpeech() {
     [cleanupAudio],
   );
 
-  // Genera el audio de UNA frase con la voz/motor/velocidad elegidos en Ajustes.
-  const genBlob = useCallback((text: string): Promise<Blob> => {
+  // Motor/voz/velocidad elegidos en Ajustes (común a streaming y a blob).
+  const voiceParams = useCallback(() => {
     const speed =
       typeof localStorage !== "undefined"
         ? parseFloat(localStorage.getItem("aion.voice.speed") || "1") || 1
         : 1;
-    // Voz rápida (Piper mexicano) para fluidez en vivo, salvo que el usuario tenga
-    // una voz de catálogo rápida elegida (no clonada).
     let savedEngine =
       typeof localStorage !== "undefined" ? localStorage.getItem("aion.voice.engine") : null;
     if (savedEngine === "chatterbox") savedEngine = "qwen"; // migración: clon → Qwen3
     const savedVoice =
       typeof localStorage !== "undefined" ? localStorage.getItem("aion.voice.name") : null;
-    // Qwen3 es rápido (RTF ~0.3) → vale para la cola en vivo; solo Chatterbox quedaba
-    // excluido por lento (ya migrado a qwen arriba).
     const fast = savedEngine && savedEngine !== "chatterbox";
     const engine = fast ? savedEngine! : "piper";
     const voice = fast && savedVoice ? savedVoice : "es_MX-claude-high";
-    return ttsSpeak(text, qLangRef.current, { voice, engine, speed });
+    return { engine, voice, speed };
   }, []);
+
+  // Genera el audio de UNA frase (blob) — camino de fallback / motores sin streaming.
+  const genBlob = useCallback((text: string): Promise<Blob> => {
+    const { engine, voice, speed } = voiceParams();
+    return ttsSpeak(text, qLangRef.current, { voice, engine, speed });
+  }, [voiceParams]);
 
   // ── Cola con PIPELINE: reproduce frases en ORDEN sin cortar la anterior y, lo
   // clave para que NO suene entrecortado, GENERA la frase siguiente MIENTRAS suena la
@@ -455,9 +579,33 @@ export function useSpeech() {
         end?.();
       }
     };
-    // Bombea: con el blob actual ya listo, ARRANCA la generación de la frase siguiente
-    // (prefetch) y, en paralelo, reproduce la actual. Al terminar de sonar, la siguiente
-    // ya está casi lista → empalme sin huecos.
+    const { engine, voice, speed } = voiceParams();
+    // CAMINO RÁPIDO (streaming Web Audio): para Qwen3 reproducimos PCM en cuanto llega → el
+    // PRIMER sonido sale en ~0.1-0.4s en vez de esperar a generar toda la frase (~1s). Cada
+    // frase se reproduce en orden; al terminar arranca la siguiente (que también abre rápido).
+    if (engine === "qwen" && streamingAvailable()) {
+      const pumpStream = (text: string) => {
+        streamSpeak(text, qLangRef.current, voice, engine, speed, () => my === reqRef.current)
+          .catch(() => {
+            // Si el streaming falla, NO romper la voz: cae al camino por blob.
+            if (my !== reqRef.current) return;
+            return genBlob(text).then((b) => playTtsBlob(b)).catch(() => {});
+          })
+          .finally(() => {
+            if (my !== reqRef.current) {
+              qBusyRef.current = false;
+              return;
+            }
+            const nt = qRef.current.shift();
+            if (nt !== undefined) pumpStream(nt);
+            else endTurn();
+          });
+      };
+      pumpStream(first);
+      return;
+    }
+    // CAMINO POR BLOB (Piper / fallback): con PIPELINE — genera la frase siguiente MIENTRAS
+    // suena la actual (prefetch) para que no haya silencio entre frases.
     const pump = (blobP: Promise<Blob>) => {
       blobP.then(
         (blob) => {
@@ -491,7 +639,7 @@ export function useSpeech() {
       );
     };
     pump(genBlob(first));
-  }, [genBlob]);
+  }, [genBlob, voiceParams]);
 
   /** Encola una frase para hablar en orden (no corta la anterior). */
   const enqueueSpeak = useCallback(
