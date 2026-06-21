@@ -90,7 +90,9 @@ const VOICE_BRAIN_MODEL: &str = "mlx-community/Qwen3-4B-Instruct-2507-4bit";
 const VOICE_NOTE: &str = "\n\nESTÁS EN UNA CONVERSACIÓN HABLADA, por voz, en tiempo real. \
     Habla como una PERSONA real charlando con un amigo —cercano, natural, chileno—, NO como \
     un asistente. Cómo suena un humano:\n\
-    · BREVE: 1-3 frases, al grano; deja que Ariel siga. NADA de listas, viñetas, títulos ni ensayos.\n\
+    · MUY BREVE: 1-2 frases CORTAS y al grano, luego CALLA y deja que Ariel siga (es una \
+    conversación de ida y vuelta, no un monólogo). Si hay más que contar, ofrécelo en pocas \
+    palabras ('¿te cuento más?') en vez de soltarlo todo. NADA de listas, viñetas ni ensayos.\n\
     · RITMO humano: mezcla frases cortas y largas; usa comas y puntos suspensivos (…) para pausas \
     y para pensar en voz alta. No hables como un texto perfecto y plano.\n\
     · MULETILLAS y conectores con MODERACIÓN y naturalidad ('mira', 'o sea', 'a ver', 'fíjate', \
@@ -2278,16 +2280,30 @@ async fn chat(
             // (saludo, recordar el nombre) responde al instante sin cadena de pensamiento.
             messages,
             think: deep,
-            // VOZ: temperatura más baja (más coherente, menos divagación) y respuesta ACOTADA
-            // a ~200 tokens → breve (1-3 frases) y latencia limitada. Antes max_tokens=None
-            // dejaba que generara 512 tokens (~8s) y, sin penalización de repetición, degeneraba
-            // en bucles. El proveedor de texto (DeepSeek) mantiene su comportamiento normal.
+            // VOZ: temperatura más baja (más coherente) y respuesta MUY ACOTADA a ~90 tokens
+            // (1-2 frases). Clave para la LATENCIA percibida: con TTS y cerebro compitiendo por
+            // la GPU, una respuesta de 200 tokens tardaba ~5s en generarse + mucho rato en
+            // hablarse → se sentía "9s". 90 tokens = respuesta breve, conversación ágil de ida y
+            // vuelta. El proveedor de texto (DeepSeek) mantiene su comportamiento normal.
             temperature: Some(if using_voice_brain { 0.7 } else { 1.0 }),
-            max_tokens: if using_voice_brain { Some(200) } else { None },
+            max_tokens: if using_voice_brain { Some(90) } else { None },
         };
         let tx2 = tx.clone();
         let acc = answer_acc.clone();
         let mut first_token = true;
+        // Instrumentación de latencia a ARCHIVO (los logs de stderr no se capturan en la app
+        // empaquetada). Por turno registramos: TTFT, tiempo a la 1ª FRASE (cuando el front
+        // arranca el TTS = lo que el usuario percibe como "Pensando→Hablando" menos el TTFB
+        // del TTS ~0.16s) y el total. Se anexa a ~/.../AION/voice_latency.jsonl.
+        let mut ttft_ms: u64 = 0;
+        let mut fs_ms: u64 = 0;
+        let mut first_sentence = true;
+        let eng_label: &str = if using_voice_brain {
+            "voz-local"
+        } else {
+            "proveedor"
+        };
+        let lat_path = crate::app_data_dir().join("voice_latency.jsonl");
         let result = engine
             .generate_stream(
                 req,
@@ -2299,13 +2315,32 @@ async fn chat(
                         StreamChunk::Answer { text } => {
                             if first_token {
                                 first_token = false;
-                                tracing::info!(ms = t_turn.elapsed().as_millis() as u64, "⏱️ PRIMER TOKEN");
+                                ttft_ms = t_turn.elapsed().as_millis() as u64;
+                                tracing::info!(ms = ttft_ms, "⏱️ PRIMER TOKEN");
                             }
                             acc.lock().unwrap_or_else(|e| e.into_inner()).push_str(text);
+                            if first_sentence && text.contains(['.', '!', '?', '…']) {
+                                first_sentence = false;
+                                fs_ms = t_turn.elapsed().as_millis() as u64;
+                            }
                             serde_json::json!({ "kind": "answer", "text": text })
                         }
                         StreamChunk::Done { tokens, tokens_per_sec } => {
-                            tracing::info!(ms = t_turn.elapsed().as_millis() as u64, tokens = *tokens, tps = *tokens_per_sec, "⏱️ RESPUESTA COMPLETA");
+                            let total_ms = t_turn.elapsed().as_millis() as u64;
+                            tracing::info!(ms = total_ms, tokens = *tokens, tps = *tokens_per_sec, "⏱️ RESPUESTA COMPLETA");
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            let line = format!(
+                                "{{\"ts\":{ts},\"engine\":\"{eng_label}\",\"ttft_ms\":{ttft_ms},\"first_sentence_ms\":{fs_ms},\"total_ms\":{total_ms},\"tokens\":{},\"tps\":{:.1}}}\n",
+                                *tokens, *tokens_per_sec
+                            );
+                            let _ = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&lat_path)
+                                .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
                             serde_json::json!({ "kind": "done", "tokens": tokens, "tps": tokens_per_sec })
                         }
                     };

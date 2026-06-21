@@ -137,6 +137,7 @@ function VoiceCard() {
   const [exaggeration, setExaggeration] = useState(0.6);
   const [testing, setTesting] = useState(false);
   const [testMsg, setTestMsg] = useState<string | null>(null);
+  const [savedMsg, setSavedMsg] = useState(false);
   // Voces clonadas (motor chatterbox), cargadas del backend.
   const [cloned, setCloned] = useState<string[]>([]);
   const [cloneName, setCloneName] = useState("");
@@ -313,8 +314,8 @@ function VoiceCard() {
           </label>
           <input
             type="range"
-            min={0.7}
-            max={1.3}
+            min={0.6}
+            max={1.5}
             step={0.05}
             value={speed}
             disabled={engine === "system"}
@@ -351,6 +352,23 @@ function VoiceCard() {
         <button className="btn inline-flex items-center gap-1.5" onClick={test} disabled={testing}>
           <Icon name="play" size={15} /> {testing ? "Sonando…" : "Probar voz"}
         </button>
+        <button
+          className="btn inline-flex items-center gap-1.5"
+          onClick={() => {
+            // Re-persiste todas las preferencias de voz (ya se autoguardan en cada cambio;
+            // este botón da confirmación visible y asegura el estado actual en disco).
+            save("aion.voice.name", voice);
+            save("aion.voice.engine", voiceEngine(voice));
+            save("aion.voice.speed", String(speed));
+            save("aion.voice.exaggeration", String(exaggeration));
+            save("aion.voice", engine === "system" ? "system" : "auto");
+            setSavedMsg(true);
+            setTimeout(() => setSavedMsg(false), 2200);
+          }}
+        >
+          <Icon name="check" size={15} /> Guardar preferencia
+        </button>
+        {savedMsg && <span className="text-xs" style={{ color: "var(--accent)" }}>✓ Preferencia guardada</span>}
         {testMsg && <span className="text-xs" style={{ color: "var(--text-3)" }}>{testMsg}</span>}
       </div>
 

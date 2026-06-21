@@ -482,8 +482,10 @@ def _generate(text: str, lang: str, voice: str, speed: float):
     if instr:
         kw["instruct"] = instr
     # Velocidad ADAPTATIVA: el factor de la emoción (animado +, reflexivo −) modula la
-    # velocidad base del usuario, con clamp para que nunca suene antinatural.
-    eff_speed = max(0.8, min(1.25, (speed or 1.0) * sfactor))
+    # velocidad base del usuario. Clamp AMPLIO [0.5, 1.5] para RESPETAR el slider del usuario
+    # (rango 0.6-1.5) — antes [0.8,1.25] capaba la velocidad elegida (el slider no hacía nada
+    # por encima de ~1.17). El factor de emoción (0.92-1.07) cabe dentro sin recortar.
+    eff_speed = max(0.5, min(1.5, (speed or 1.0) * sfactor))
     # Normaliza números/símbolos a palabras del idioma → evita code-switch a acento inglés.
     say = normalize_for_tts(text, lang)
     # TWO-PHASE EMIT: stream=True hace que el vocoder emita audio mientras aún genera (1er
@@ -529,7 +531,7 @@ def _generate_stream_into(job: "_Job"):
     instr, sfactor = pick_style(job.text)
     if instr:
         kw["instruct"] = instr
-    eff_speed = max(0.8, min(1.25, (job.speed or 1.0) * sfactor))
+    eff_speed = max(0.5, min(1.5, (job.speed or 1.0) * sfactor))  # respeta el slider (ver _generate)
     say = normalize_for_tts(job.text, job.lang)
     for r in m.generate(
         text=say,
