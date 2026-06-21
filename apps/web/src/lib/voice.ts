@@ -198,6 +198,13 @@ export function streamingAvailable(): boolean {
   return !!streamCtx();
 }
 
+/** ¿El turno se reproducirá por STREAMING? (motor Qwen3 + Web Audio disponible). */
+function usingStream(): boolean {
+  let e = typeof localStorage !== "undefined" ? localStorage.getItem("aion.voice.engine") : null;
+  if (e === "chatterbox") e = "qwen"; // migración
+  return e === "qwen" && streamingAvailable();
+}
+
 /**
  * Sintetiza y reproduce `text` por streaming (PCM → AudioContext). Resuelve cuando termina de
  * sonar; LANZA si algo falla (→ el llamador cae al camino por blob). `alive()` permite cortar
@@ -665,12 +672,13 @@ export function useSpeech() {
         .flatMap((s) => (s.length > 180 ? s.split(/(?<=,)\s+/) : [s]))
         .map((s) => s.trim())
         .filter(Boolean);
-      // FRONT-LOAD del primer audio: el cuello de la latencia percibida es la 1ª frase.
-      // Si el cerebro abre con una frase larga (~100c → ~2.9 s de TTS), partimos su 1ª
-      // cláusula (por coma/«;»/«…») como item suelto: el primer audio sale en ~1 s y el
-      // resto se sintetiza mientras suena. Solo el ARRANQUE del turno; las siguientes
-      // frases van enteras (prosodia natural). Umbral 60c para no trocear aperturas cortas.
-      if (turnStart && parts.length && parts[0].length > 60) {
+      // FRONT-LOAD del primer audio (SOLO camino por blob): el cuello de la latencia
+      // percibida es la 1ª frase. Si el cerebro abre con una frase larga (~100c → ~2.9 s de
+      // TTS), partimos su 1ª cláusula como item suelto: el primer audio sale en ~1 s y el
+      // resto se sintetiza mientras suena. Con STREAMING NO se hace: el 1er audio ya sale en
+      // ~0.16 s (TTFB), y trocear añadiría un hueco a media frase (cada cláusula = un stream
+      // aparte). Umbral 60c para no trocear aperturas cortas.
+      if (!usingStream() && turnStart && parts.length && parts[0].length > 60) {
         const head = parts[0];
         // Primer límite de cláusula (coma/;/:/…) que deje una apertura de 12-90c: ni un
         // trocito ridículo («Mira:», «Vale,») ni una frase entera larga. Si no, va completa.
