@@ -362,7 +362,7 @@ _jobs: "queue.Queue[_Job]" = queue.Queue()
 
 
 class _Job:
-    __slots__ = ("text", "lang", "voice", "speed", "ev", "audio", "sr", "err", "stream_q")
+    __slots__ = ("text", "lang", "voice", "speed", "ev", "audio", "sr", "err", "stream_q", "cancel")
 
     def __init__(self, text, lang, voice, speed):
         self.text = text
@@ -376,6 +376,9 @@ class _Job:
         # Si != None, el worker emite PCM Int16 chunk a chunk a esta cola (streaming en vivo)
         # en vez de devolver el audio completo. La pone el handler de /tts/stream.
         self.stream_q = None
+        # El handler la activa si el cliente CORTA (barge-in): el worker deja de generar de
+        # inmediato (libera GPU para la siguiente respuesta) y NO se bloquea llenando la cola.
+        self.cancel = threading.Event()
 
 
 def model():
@@ -528,7 +531,6 @@ def _generate_stream_into(job: "_Job"):
         kw["instruct"] = instr
     eff_speed = max(0.8, min(1.25, (job.speed or 1.0) * sfactor))
     say = normalize_for_tts(job.text, job.lang)
-    n = 0
     for r in m.generate(
         text=say,
         lang_code=qwen_lang(job.lang),
@@ -538,11 +540,24 @@ def _generate_stream_into(job: "_Job"):
         streaming_interval=0.3,
         **kw,
     ):
+        if job.cancel.is_set():
+            break  # barge-in: deja de generar (libera la GPU para la próxima respuesta)
         a = np.asarray(r.audio, dtype=np.float32).reshape(-1)
-        if len(a):
-            job.stream_q.put(_pcm16(a))
-            n += 1
-    job.stream_q.put(None)  # fin del stream
+        if not len(a):
+            continue
+        pcm = _pcm16(a)
+        # put con timeout + recheck de cancel: si el cliente cortó y la cola está llena, NO
+        # bloquea el hilo trabajador (que es ÚNICO: bloquearlo colgaría todo el TTS).
+        while not job.cancel.is_set():
+            try:
+                job.stream_q.put(pcm, timeout=0.2)
+                break
+            except queue.Full:
+                continue
+    try:
+        job.stream_q.put_nowait(None)  # fin del stream (si nadie lee, da igual)
+    except queue.Full:
+        pass
 
 
 def _worker():
@@ -591,15 +606,19 @@ def synth(text: str, lang: str, voice: str, speed: float):
 
 def synth_stream(text: str, lang: str, voice: str, speed: float):
     """Generador: encola un trabajo de STREAMING y va devolviendo bloques de PCM Int16 según
-    el worker los produce. Permite empezar a reproducir en ~0.1-0.4s en vez de esperar todo."""
+    el worker los produce. Permite empezar a reproducir en ~0.1-0.4s en vez de esperar todo.
+    Al cerrarse (el handler corta por barge-in) activa job.cancel → el worker para de generar."""
     job = _Job(text, lang, voice, speed)
     job.stream_q = queue.Queue(maxsize=64)  # backpressure: el worker no corre muy por delante
     _jobs.put(job)
-    while True:
-        item = job.stream_q.get()
-        if item is None:
-            break
-        yield item
+    try:
+        while True:
+            item = job.stream_q.get()
+            if item is None:
+                break
+            yield item
+    finally:
+        job.cancel.set()  # dejaron de leer (cliente cortó / fin) → no sigas generando
 
 
 def _pcm16(a: np.ndarray) -> bytes:
@@ -683,12 +702,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Connection", "close")
                 self._cors()
                 self.end_headers()
+                gen = synth_stream(text, lang, voice, speed)
                 try:
-                    for pcm in synth_stream(text, lang, voice, speed):
+                    for pcm in gen:
                         self.wfile.write(pcm)
                         self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     pass  # el cliente cortó (barge-in / cambió de tema): normal
+                finally:
+                    gen.close()  # dispara el finally del generador → job.cancel.set()
                 return
             audio, ctype = encode(*synth(text, lang, voice, speed))
             self.send_response(200)
