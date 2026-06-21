@@ -48,4 +48,4 @@ AION corre localmente y expone memoria vía MCP (`mcp__aion__*`) en `http://127.
 
 ## Pendientes conocidos (de auditorías)
 - ✅ Resuelto: **auth + CORS** de la API local `:8765` (P0-1 fase 1+2): `local_guard` (Host anti-DNS-rebinding + Origin obligatorio en mutaciones), Bearer local timing-safe (`require_api_token`) en todo `/api/*`, CORS allowlist de orígenes locales. Ver `docs/auditoria-*` y la memoria `aion-auditoria-2026-06`.
-- Parcial: **concurrencia inter-proceso** del JSONL de memoria — `aion remember` ahora RUTEA por HTTP al daemon (`POST /api/memory/remember`) si está vivo → escritor único, cierra el lost-update; si no hay daemon, escritura directa (sin rival). Falta lo mismo para `aion sleep` (consolidación más compleja: aún escribe directo).
+- ✅ Resuelto: **concurrencia inter-proceso** del JSONL de memoria — `aion remember` y `aion sleep` RUTEAN por HTTP al daemon (`POST /api/memory/remember` / `/api/memory/sleep`) si está vivo → el daemon es escritor único, cierra el lost-update; si no hay daemon, escritura directa (sin rival → segura). Patrón: cualquier subcomando CLI que escriba estado del daemon debe rutear por HTTP cuando esté vivo.

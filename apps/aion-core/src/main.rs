@@ -891,6 +891,17 @@ fn verdict(accepted: bool) -> &'static str {
 
 /// "Sueño" F4: ciclo de consolidación darwiniana de la memoria persistente.
 async fn run_sleep() -> Result<(), Box<dyn std::error::Error>> {
+    // RUTEO POR HTTP si el daemon está vivo (igual que `remember`): la consolidación
+    // (fusiona/poda + reescribe el JSONL) debe hacerla el DAEMON, dueño único de la memoria
+    // en RAM + archivo, para no competir con sus escrituras (lost-update). El daemon además
+    // refina el grafo. Si no hay daemon, consolidación directa (sin rival → segura).
+    if let Some((before, merged, pruned, after)) = sleep_via_daemon().await {
+        println!("🌙 AION entra en fase de sueño (vía daemon)");
+        println!("   🔗 fusionados (casi-duplicados): {merged}");
+        println!("   ✂️  podados (débiles sin uso):    {pruned}");
+        println!("☀️  despierta · {before} → {after} recuerdos");
+        return Ok(());
+    }
     use aion_memory::ConsolidationConfig;
     let path = memory_path();
     let mem = VectorMemory::persistent_local(&path)?;
@@ -4223,6 +4234,29 @@ async fn remember_via_daemon(text: &str) -> Option<(String, u64)> {
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     Some((id, count))
+}
+
+/// Intenta delegar la CONSOLIDACIÓN (sleep) al daemon vía HTTP (escritor único). Devuelve
+/// `(before, merged, pruned, after)` si lo hizo; `None` si no hay daemon o falló (→ directo).
+async fn sleep_via_daemon() -> Option<(u64, u64, u64, u64)> {
+    let resp = reqwest::Client::new()
+        .post("http://127.0.0.1:8765/api/memory/sleep")
+        .bearer_auth(crate::claude_code::persisted_token())
+        .header("Origin", "http://127.0.0.1:8765")
+        .json(&serde_json::json!({})) // el handler no lee body; mandamos uno válido vacío
+        .timeout(std::time::Duration::from_secs(60)) // consolidar es en RAM (rápido), margen amplio
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: serde_json::Value = resp.json().await.ok()?;
+    if v.get("error").is_some() {
+        return None;
+    }
+    let g = |k: &str| v.get(k).and_then(serde_json::Value::as_u64);
+    Some((g("before")?, g("merged")?, g("pruned")?, g("after")?))
 }
 
 /// Recupera de la memoria persistente los recuerdos más relevantes.
