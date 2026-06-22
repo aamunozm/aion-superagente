@@ -91,23 +91,27 @@ const DEEPSEEK_MODELS: { id: string; label: string; desc: string }[] = [
 // Voces de catálogo (Piper latino natural + Kokoro). Las clonadas se añaden
 // dinámicamente desde el backend (motor chatterbox).
 const VOICES: { id: string; engine: string; label: string }[] = [
-  // Qwen3-TTS (MLX) — multiidioma, tiempo real. OJO: son hablantes NO nativos de
-  // español (acento internacional). Para español REALISTA usa tu voz clonada (arriba).
-  // (eric=dialecto sichuan y dylan=dialecto beijing → sonaban extranjeros; retirados.)
-  { id: "serena", engine: "qwen", label: "Qwen3 · Serena (femenina, multiidioma)" },
-  { id: "vivian", engine: "qwen", label: "Qwen3 · Vivian (femenina, multiidioma)" },
-  { id: "ryan", engine: "qwen", label: "Qwen3 · Ryan (masculino, multiidioma)" },
-  { id: "aiden", engine: "qwen", label: "Qwen3 · Aiden (masculino, multiidioma)" },
-  { id: "es_MX-claude-high", engine: "piper", label: "Español (México) · natural" },
-  { id: "es_AR-daniela-high", engine: "piper", label: "Español (Argentina) · natural" },
-  { id: "ef_dora", engine: "kokoro", label: "Español · Dora (Kokoro)" },
-  { id: "em_alex", engine: "kokoro", label: "Español · Alex (Kokoro, m)" },
-  { id: "if_sara", engine: "kokoro", label: "Italiano · Sara" },
-  { id: "im_nicola", engine: "kokoro", label: "Italiano · Nicola (m)" },
-  { id: "af_heart", engine: "kokoro", label: "English · Heart" },
-  { id: "am_michael", engine: "kokoro", label: "English · Michael (m)" },
+  // ESPAÑOL NATIVO con GÉNERO FIABLE (Piper) — RECOMENDADAS. Piper es determinista (cada voz
+  // es un modelo entrenado), así que el género es ESTABLE — a diferencia de Qwen3-TTS, cuyo
+  // género es inestable y se sesga a femenino (incl. clonación), verificado por F0.
+  { id: "es_ES-davefx-medium", engine: "piper", label: "Diego · hombre (español) ✓" },
+  { id: "es_MX-ald-medium", engine: "piper", label: "Mateo · hombre (México) ✓" },
+  { id: "es_MX-claude-high", engine: "piper", label: "Lucía · mujer (México) ✓" },
+  { id: "es_AR-daniela-high", engine: "piper", label: "Daniela · mujer (Argentina) ✓" },
+  // Qwen3-TTS (MLX) — multiidioma, tiempo real, hablantes NO nativos. ⚠️ El género es
+  // INESTABLE en este modelo 0.6B (puede sonar más agudo de lo esperado).
+  { id: "serena", engine: "qwen", label: "Qwen3 · Serena (mujer, multiidioma)" },
+  { id: "vivian", engine: "qwen", label: "Qwen3 · Vivian (mujer, multiidioma)" },
+  { id: "ryan", engine: "qwen", label: "Qwen3 · Ryan (hombre*, multiidioma)" },
+  { id: "aiden", engine: "qwen", label: "Qwen3 · Aiden (hombre*, multiidioma)" },
+  { id: "ef_dora", engine: "kokoro", label: "Español · Dora (Kokoro, mujer)" },
+  { id: "em_alex", engine: "kokoro", label: "Español · Alex (Kokoro, hombre)" },
+  { id: "if_sara", engine: "kokoro", label: "Italiano · Sara (mujer)" },
+  { id: "im_nicola", engine: "kokoro", label: "Italiano · Nicola (hombre)" },
+  { id: "af_heart", engine: "kokoro", label: "English · Heart (mujer)" },
+  { id: "am_michael", engine: "kokoro", label: "English · Michael (hombre)" },
 ];
-const DEFAULT_VOICE_ID = "es_MX-claude-high";
+const DEFAULT_VOICE_ID = "es_MX-ald-medium";
 
 // Las 12 voces diseñadas (VoiceDesign→clonadas) llevan slug «ES-Nombre / IT-Nombre /
 // EN-Nombre». Las clasificamos por idioma + género para agruparlas bonito en el selector.
@@ -116,7 +120,10 @@ const VOICE_GENDER: Record<string, "m" | "f"> = {
   Marco: "m", Luca: "m", Giulia: "f", Sofia: "f",
   James: "m", Ethan: "m", Emma: "f", Charlotte: "f",
 };
-const CLONE_GROUPS = ["Tu voz personal ★", "Español latino", "Italiano", "Inglés"];
+// Solo mostramos tu voz personal real. Las voces "diseñadas" (ES-/IT-/EN- clonadas con
+// Qwen3-TTS 0.6B) se OCULTAN: ese modelo tiene género INESTABLE y sesgo femenino (Diego
+// sonaba a mujer, verificado por F0). Para género fiable usa las voces de catálogo Piper.
+const CLONE_GROUPS = ["Tu voz personal ★"];
 function classifyClone(slug: string): { group: string; label: string } {
   const m = slug.match(/^(ES|IT|EN)-(.+)$/);
   if (m) {
@@ -150,20 +157,18 @@ function VoiceCard() {
       .then((r) => {
         const cl = r.cloned || [];
         setCloned(cl);
-        // Migración: si la voz guardada ya no existe (p. ej. los presets eric/dylan
-        // retirados por sonar a dialecto chino), salta a la MEJOR disponible: tu voz
-        // clonada si la hay (español realista), si no la voz latina por defecto.
+        // Migración: las voces "diseñadas" (ES-/IT-/EN- clonadas con Qwen) están OCULTAS por
+        // género inestable/femenino. Si la voz guardada es una de esas (o un preset retirado),
+        // salta al NUEVO defecto Piper masculino (género fiable). La voz personal real ("chile",
+        // subidas del usuario) sigue siendo válida.
+        const isDesigned = (s: string) => /^(ES|IT|EN)-/.test(s);
         const stored = (typeof localStorage !== "undefined" && localStorage.getItem("aion.voice.name")) || "";
-        const valid = VOICES.some((v) => v.id === stored) || cl.includes(stored);
+        const valid =
+          VOICES.some((v) => v.id === stored) || (cl.includes(stored) && !isDesigned(stored));
         if (stored && !valid) {
-          const best =
-            (cl.includes("chile") ? "chile" : cl.find((c) => c.startsWith("ES-"))) ||
-            cl[0] ||
-            DEFAULT_VOICE_ID;
-          const eng = cl.includes(best) ? "qwen" : VOICES.find((v) => v.id === best)?.engine || "kokoro";
-          save("aion.voice.name", best);
-          save("aion.voice.engine", eng);
-          setVoice(best);
+          save("aion.voice.name", DEFAULT_VOICE_ID);
+          save("aion.voice.engine", "piper");
+          setVoice(DEFAULT_VOICE_ID);
         }
       })
       .catch(() => {});
@@ -303,7 +308,7 @@ function VoiceCard() {
                 </optgroup>
               );
             })}
-            <optgroup label="Voces de catálogo (multiidioma, acento no nativo)">
+            <optgroup label="Catálogo — español nativo (género fiable ✓) y multiidioma">
               {VOICES.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
             </optgroup>
           </select>
@@ -314,8 +319,8 @@ function VoiceCard() {
           </label>
           <input
             type="range"
-            min={0.6}
-            max={1.5}
+            min={0.7}
+            max={1.4}
             step={0.05}
             value={speed}
             disabled={engine === "system"}

@@ -464,13 +464,42 @@ def _join_crossfade(chunks, overlap: int = 256):
     return out
 
 
+# ── Género: este modelo CustomVoice (0.6B) CONVIERTE TODA VOZ CLONADA EN FEMENINA — verificado
+# por F0 (YIN): Diego/Mateo y hasta la voz REAL masculina de Ariel ("chile") salen a ~210-245 Hz
+# (mujer) aunque el clip de referencia sea claramente masculino, y el preset base no lo corrige.
+# Los PRESETS nativos sí tienen género correcto (aiden 144 Hz/ryan 162 Hz = hombre; serena 198/
+# vivian 231 = mujer). Por eso las voces "con género" se sirven con PRESET DIRECTO (sin clonar):
+# garantiza el género y suena natural. Mapa diseñada→preset (2 hombres + 2 mujeres distintos):
+DESIGNED_TO_PRESET = {
+    "ES-Diego": "aiden", "ES-Mateo": "ryan", "ES-Camila": "vivian", "ES-Valentina": "serena",
+    "IT-Marco": "aiden", "IT-Luca": "ryan", "IT-Giulia": "serena", "IT-Sofia": "vivian",
+    "EN-James": "aiden", "EN-Ethan": "ryan", "EN-Emma": "serena", "EN-Charlotte": "vivian",
+}
+# Presets masculinos. El instruct de EMOCIÓN tendía a SUBIR el tono (feminizar) la voz
+# masculina (medido: sin instruct Diego/Mateo salían 133-161 Hz hombre; con instruct, 175-195).
+# Para voces de hombre: ANCLA de género en el instruct + temperatura baja (menos varianza de
+# género run-a-run del modelo 0.6B). No es 100% (el modelo es inestable) pero da la mejor opción.
+MALE_PRESETS = {"aiden", "ryan", "uncle_fu"}
+MALE_ANCHOR = "Habla con VOZ DE HOMBRE, tono grave y masculino, natural y cercano."
+
+
+def _voice_overrides(base_voice, instr):
+    """Para voces masculinas: ancla de género (sustituye la emoción que feminizaba) + temp baja.
+    Devuelve (instruct_efectivo, temperatura)."""
+    if base_voice in MALE_PRESETS:
+        return MALE_ANCHOR, 0.5
+    return instr, 0.8
+
+
 def _generate(text: str, lang: str, voice: str, speed: float):
     """Genera audio. SOLO la llama el hilo trabajador (MLX no es reentrante)."""
     m = model()
     kw = {}
-    ref = clip_path(voice) if voice else None
-    if ref:
-        # Clonar la voz del clip; preset como timbre base que Qwen3 sobrescribe.
+    if voice in DESIGNED_TO_PRESET:
+        # Voz "diseñada": preset directo de género correcto (NO clonar → no se vuelve femenina).
+        kw["voice"] = DESIGNED_TO_PRESET[voice]
+    elif (ref := clip_path(voice) if voice else None):
+        # Clon real subido por el usuario (p. ej. su propia voz). OJO: el modelo lo feminiza.
         kw["ref_audio"] = ref
         rt = ref_text_for(ref)
         if rt:
@@ -479,6 +508,7 @@ def _generate(text: str, lang: str, voice: str, speed: float):
     else:
         kw["voice"] = voice if voice in PRESETS else DEFAULT_PRESET
     instr, sfactor = pick_style(text)  # emoción adaptativa sobre el texto ORIGINAL (signos/léxico)
+    instr, gen_temp = _voice_overrides(kw.get("voice"), instr)  # ancla de género en voces de hombre
     if instr:
         kw["instruct"] = instr
     # Velocidad ADAPTATIVA: el factor de la emoción (animado +, reflexivo −) modula la
@@ -497,6 +527,7 @@ def _generate(text: str, lang: str, voice: str, speed: float):
         text=say,
         lang_code=qwen_lang(lang),
         speed=eff_speed,
+        temperature=gen_temp,
         verbose=False,
         stream=True,
         streaming_interval=0.4,
@@ -511,8 +542,9 @@ def _generate(text: str, lang: str, voice: str, speed: float):
 def _kw_for(voice: str):
     """Construye los kwargs de voz/clon para m.generate (común a normal y streaming)."""
     kw = {}
-    ref = clip_path(voice) if voice else None
-    if ref:
+    if voice in DESIGNED_TO_PRESET:
+        kw["voice"] = DESIGNED_TO_PRESET[voice]  # preset directo de género correcto (no clonar)
+    elif (ref := clip_path(voice) if voice else None):
         kw["ref_audio"] = ref
         rt = ref_text_for(ref)
         if rt:
@@ -529,6 +561,7 @@ def _generate_stream_into(job: "_Job"):
     m = model()
     kw = _kw_for(job.voice)
     instr, sfactor = pick_style(job.text)
+    instr, gen_temp = _voice_overrides(kw.get("voice"), instr)  # ancla de género en voces de hombre
     if instr:
         kw["instruct"] = instr
     eff_speed = max(0.5, min(1.5, (job.speed or 1.0) * sfactor))  # respeta el slider (ver _generate)
@@ -537,6 +570,7 @@ def _generate_stream_into(job: "_Job"):
         text=say,
         lang_code=qwen_lang(job.lang),
         speed=eff_speed,
+        temperature=gen_temp,
         verbose=False,
         stream=True,
         streaming_interval=0.3,
