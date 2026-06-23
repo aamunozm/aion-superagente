@@ -31,8 +31,8 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
-    "externalBin": ["binaries/aion-core", "binaries/aion-control-plane", "binaries/face-probe"],
-    "resources": { "ollama-runtime": "ollama-runtime/", "bootstrap": "bootstrap/", "arcface.onnx": "." },
+    "externalBin": ["binaries/aion-core", "binaries/aion-control-plane"],
+    "resources": { "ollama-runtime": "ollama-runtime/", "bootstrap": "bootstrap/" },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

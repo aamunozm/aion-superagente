@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": ["binaries/aion-core", "binaries/aion-control-plane", "binaries/face-probe"],
+    "resources": {
+      "ollama-runtime": "ollama-runtime/",
+      "bootstrap": "bootstrap/",
+      "arcface.onnx": "."
+    }
+  }
+}
