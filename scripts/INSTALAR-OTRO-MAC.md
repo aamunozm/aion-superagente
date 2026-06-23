@@ -14,16 +14,23 @@ Esta carpeta contiene todo lo necesario:
 
 ## 1) Instalar la app
 
-1. Copia **`AION.app`** a `/Applications`.
-2. Quita la cuarentena de Gatekeeper (la app está firmada *ad-hoc*, no con un
-   Developer ID de Apple). En Terminal:
+1. Abre **`AION.dmg`** y arrastra **AION** sobre la carpeta **Aplicaciones**.
+2. **Ábrela la primera vez** (sin Terminal). Como la app está firmada *ad-hoc*
+   (no con un Developer ID de pago de Apple), Gatekeeper la bloquea el primer
+   arranque. Para autorizarla — **solo hace falta una vez**:
 
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/AION.app
-   ```
+   - **macOS 14 o anterior:** clic derecho sobre **AION** en Aplicaciones →
+     **Abrir** → en el aviso, **Abrir**.
+   - **macOS 15 (Sequoia) o posterior:** haz doble clic (saldrá un aviso) →
+     ve a **Ajustes del Sistema → Privacidad y seguridad** → baja hasta el
+     mensaje sobre AION → pulsa **"Abrir igualmente"** → confirma.
 
-   *(Alternativa sin Terminal: clic derecho sobre AION.app → **Abrir** → **Abrir**
-   en el aviso. Solo hace falta la primera vez.)*
+   A partir de ahí, AION se abre normal con doble clic, como cualquier app.
+
+   > Si (raro) aparece *"está dañada"* en vez de *"no identificada"*, es que el
+   > archivo se transfirió con la firma alterada: vuelve a copiar el `.dmg` sin
+   > recomprimir, o como último recurso ejecuta una vez en Terminal
+   > `xattr -dr com.apple.quarantine /Applications/AION.app`.
 
 3. Abre AION. **Concede los permisos** que pida el sistema:
    - **Micrófono** y **Reconocimiento de voz** (modo voz / dictado).
