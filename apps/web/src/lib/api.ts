@@ -246,6 +246,8 @@ export type ClaudeCodeStats = {
   last_activity?: string | null;
   // Ahorro de la traducción ES→EN del puente (distinto del ahorro del RAG de arriba).
   tokens_saved_translation?: number;
+  /** Tokens servidos SOLO por las rutas de lectura que traducen (denominador honesto del bar). */
+  tokens_served_translation?: number;
   translation_savings_pct?: number;
   by_tool_translation?: Record<string, number>;
   sessions?: {

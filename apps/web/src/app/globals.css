@@ -28,6 +28,11 @@
   --accent-subtle: rgba(200, 169, 81, 0.12);
   --accent-contrast: #2a2410;
 
+  /* Destructivo: terracota apagado que armoniza con la paleta cálida (no rojo chillón) */
+  --danger: #b8543c;
+  --danger-strong: #9c4530;
+  --danger-subtle: rgba(184, 84, 60, 0.10);
+
   /* Pasteles frescos (acentos por módulo) */
   --pastel-mint: #e3f3ec;     --on-mint: #2f9c75;
   --pastel-sky: #e6eefb;      --on-sky: #4f82c4;
@@ -321,6 +326,28 @@
   }
   .btn-gold:hover {
     filter: brightness(1.04);
+  }
+  /* Acción destructiva DISCRETA: ghost neutro que se tiñe de terracota al pasar
+     el cursor. Evita el choque negro+rojo y de-enfatiza la acción peligrosa. */
+  .btn-danger {
+    background: transparent;
+    color: var(--text-2);
+    border: 1px solid var(--border-2);
+    box-shadow: none;
+    font-weight: 500;
+  }
+  .btn-danger:hover {
+    background: var(--danger-subtle);
+    border-color: var(--danger);
+    color: var(--danger);
+    box-shadow: none;
+  }
+  .btn-danger:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+    background: transparent;
+    color: var(--text-3);
   }
 
   .input {

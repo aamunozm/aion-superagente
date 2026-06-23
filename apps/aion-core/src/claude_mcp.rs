@@ -839,11 +839,14 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             let now = chrono::Utc::now().timestamp();
             let mut out = String::new();
             for h in hits {
+                // ES/IT→EN para el puente (fail-open a original; se calienta en 2º plano).
+                // Igual que memory_search: corte de 300 chars, ruta calentada por el warmer.
+                let detail = crate::mcp_compact::compact_dense(h.detail.trim(), 300);
                 out.push_str(&format!(
                     "- hace {} (relevancia {:.2}): {}\n",
                     crate::awareness::humanize_secs(now - h.at),
                     h.score,
-                    h.detail.trim()
+                    detail
                 ));
             }
             Ok(out)

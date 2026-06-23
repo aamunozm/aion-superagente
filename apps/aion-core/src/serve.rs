@@ -7818,6 +7818,10 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
     let mut tokens_saved_tr: u64 = 0;
     let mut by_tool_translation: std::collections::HashMap<String, u64> =
         std::collections::HashMap::new();
+    // Tokens servidos SOLO por las rutas de LECTURA que traducen (denominador honesto del
+    // ahorro EN: las escrituras remember/forget no traducen y NO deben contar como "servido EN",
+    // que era lo que hundía el porcentaje del panel).
+    let mut tokens_served_translation: u64 = 0;
     for e in &entries {
         let tool = e.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
         let tok = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -7826,6 +7830,16 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
         *by_tool_tokens.entry(tool.to_string()).or_insert(0) += tok;
         tokens_served += tok;
         tokens_saved_tr += saved;
+        if matches!(
+            tool,
+            "aion_brief"
+                | "aion_memory_search"
+                | "aion_library_search"
+                | "aion_graph_query"
+                | "aion_episodic_recall"
+        ) {
+            tokens_served_translation += tok;
+        }
         if saved > 0 {
             *by_tool_translation.entry(tool.to_string()).or_insert(0) += saved;
         }
@@ -7841,39 +7855,15 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
     // del hit-rate —y las escrituras remember/forget, que no traducen— anclaban este % en ~0
     // aunque cada llamada nueva ya recorte tokens. La ventana temporal refleja el comportamiento
     // ACTUAL (caché caliente) y descarta el histórico roto sin depender de cuántas llamadas haya.
+    // % de ahorro de la TRADUCCIÓN ES→EN sobre las rutas de LECTURA que de verdad traducen
+    // (brief/search/library/graph/episodic), agregado LIFETIME y CONSISTENTE con el bar de
+    // abajo. Denominador = lo servido por esas rutas en su equivalente español
+    // (servido_en + ahorrado). Las escrituras remember/forget NO entran (no traducen): eran
+    // las que hundían este porcentaje a ~0 al contar como "servido" sin ahorrar nada.
     let translation_savings_pct: u64 = {
-        let translatable = |t: &str| {
-            matches!(
-                t,
-                "aion_brief" | "aion_memory_search" | "aion_library_search" | "aion_graph_query"
-            )
-        };
-        let cutoff = chrono::Utc::now() - chrono::Duration::hours(48);
-        let (served, saved) = entries
-            .iter()
-            .filter(|e| {
-                e.get("tool")
-                    .and_then(|v| v.as_str())
-                    .map(translatable)
-                    .unwrap_or(false)
-            })
-            .filter_map(|e| {
-                let ts = e
-                    .get("ts")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())?
-                    .with_timezone(&chrono::Utc);
-                if ts < cutoff {
-                    return None;
-                }
-                let served = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                let saved = e.get("saved_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                Some((served, saved))
-            })
-            .fold((0u64, 0u64), |(s, v), (srv, sv)| (s + srv, v + sv));
-        let es_equiv = served + saved;
+        let es_equiv = tokens_served_translation + tokens_saved_tr;
         if es_equiv > 0 {
-            (saved as f64 / es_equiv as f64 * 100.0).round() as u64
+            (tokens_saved_tr as f64 / es_equiv as f64 * 100.0).round() as u64
         } else {
             0
         }
@@ -7962,6 +7952,7 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
         "by_tool": by_tool,
         "by_tool_tokens": by_tool_tokens,
         "tokens_served": tokens_served,
+        "tokens_served_translation": tokens_served_translation,
         "writes": writes,
         "errors": errors,
         "full_dump_tokens": full_dump_tokens,

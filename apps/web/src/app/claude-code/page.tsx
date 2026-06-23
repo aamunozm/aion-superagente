@@ -306,7 +306,7 @@ function MemoryByProject() {
               </div>
               {confirmDel?.project === p.project ? (
                 <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <span style={{ color: "#ef4444" }}>
+                  <span style={{ color: "var(--danger)" }}>
                     ¿Borrar {confirmDel.count} recuerdos de «{p.project}»? Se descargará el backup antes.
                   </span>
                   <button className="btn btn-gold text-xs" disabled={busy === p.project} onClick={confirmFree}>
@@ -324,7 +324,7 @@ function MemoryByProject() {
                   <button className="btn text-xs" disabled={!!busy} onClick={() => updateBackup(p)} title="Fusiona la memoria actual del proyecto con un backup existente">
                     ⟳ Actualizar backup
                   </button>
-                  <button className="btn text-xs" disabled={!!busy} onClick={() => askFree(p)} title="Descarga el backup y borra de AION para liberar espacio" style={{ color: "#ef4444" }}>
+                  <button className="btn btn-danger text-xs" disabled={!!busy} onClick={() => askFree(p)} title="Descarga el backup y borra de AION para liberar espacio">
                     🗑 Descargar y liberar
                   </button>
                 </div>
@@ -421,7 +421,7 @@ export default function ClaudeCodePage() {
     if (errorsCount > 0 && errorPct >= 10) {
       return {
         text: t("cc.verdictWarn").replace("{n}", String(errorsCount)).replace("{pct}", String(errorPct)),
-        color: "#ef4444",
+        color: "var(--danger)",
       };
     }
     if (savingsPct >= 85) {
@@ -446,7 +446,7 @@ export default function ClaudeCodePage() {
   // Datos del ahorro de la TRADUCCIÓN ES→EN (distinto del ahorro del RAG del hero).
   const trSaved = stats?.tokens_saved_translation ?? 0;
   const trPct = stats?.translation_savings_pct ?? 0;
-  const trServed = stats?.tokens_served ?? 0;
+  const trServed = stats?.tokens_served_translation ?? stats?.tokens_served ?? 0;
   const trTotal = Math.max(1, trServed + trSaved);
   const sessions = stats?.sessions ?? [];
   const byToolTr: [string, number][] = Object.entries(stats?.by_tool_translation ?? {}).sort((a, b) => b[1] - a[1]);
@@ -594,7 +594,7 @@ export default function ClaudeCodePage() {
                 {
                   label: t("cc.metrics.errors"),
                   value: errorsCount > 0 ? `${errorsCount} (${errorPct}%)` : "0",
-                  accent: errorsCount > 0 ? "#ef4444" : undefined,
+                  accent: errorsCount > 0 ? "var(--danger)" : undefined,
                 },
               ].map((m) => (
                 <div key={m.label} className="card" style={{ padding: "12px 14px" }}>
@@ -771,7 +771,7 @@ export default function ClaudeCodePage() {
                               }}>
                               {toolLabel(e.tool)}
                             </span>
-                            {!e.ok && <span className="text-[10px] ml-1.5" style={{ color: "#ef4444" }}>error</span>}
+                            {!e.ok && <span className="text-[10px] ml-1.5" style={{ color: "var(--danger)" }}>error</span>}
                           </td>
                           <td className="py-1.5 pr-3 max-w-[260px] truncate" style={{ color: "var(--text-2)" }} title={e.query}>
                             {e.query || "—"}
