@@ -97,18 +97,19 @@ fn wrap_untrusted(body: &str) -> String {
     format!("{UNTRUSTED_OPEN}\n{safe}\n{UNTRUSTED_CLOSE}")
 }
 
-/// Sanea un nombre de proyecto antes de incrustarlo como etiqueta `[proyecto: X]`:
-/// una sola línea, sin corchetes/ángulos que rompan delimitadores o la etiqueta, y
-/// acotado a 64 chars. Devuelve cadena vacía si no queda nada útil.
-fn sanitize_project(p: &str) -> String {
-    p.chars()
-        // Fuera delimitadores de etiqueta/fence y TODO carácter de control (incl.
-        // saltos de línea y bidi-overrides unicode que reordenarían el texto).
-        .filter(|c| !c.is_control() && !matches!(c, '[' | ']' | '<' | '>' | '{' | '}'))
-        .take(64)
-        .collect::<String>()
-        .trim()
-        .to_string()
+/// Forma CANÓNICA del proyecto para la etiqueta `[proyecto: X]`. Sustituye al antiguo
+/// `sanitize_project`: `aion_memory::canonical_project` produce un slug estable que unifica
+/// variantes (AION/aion, «Peace Harmony AFC»/peace-harmony) y, al mapear todo carácter no
+/// alfanumérico a `-`, ya neutraliza corchetes/ángulos/control (anti-inyección de etiqueta).
+/// Acotado a 64 chars. `None` si no queda nada útil. Canonicalizar AL ESCRIBIR evita generar
+/// nuevas variantes y hace que medir/exportar/borrar por proyecto capture todo.
+fn project_tag(p: &str) -> Option<String> {
+    let c: String = aion_memory::canonical_project(p).chars().take(64).collect();
+    if c.is_empty() {
+        None
+    } else {
+        Some(c)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +167,14 @@ fn audit_path() -> std::path::PathBuf {
 /// Una línea por tools/call: visible en la página Claude Code de la UI. `saved_chars` son
 /// los caracteres que la traducción ES→EN recortó en esa llamada (0 si no compactó) → se
 /// registran como `saved_tokens` para poder graficar el ahorro de la traducción.
-pub fn audit(tool: &str, query: &str, result_chars: usize, saved_chars: usize, ok: bool) {
+pub fn audit(
+    tool: &str,
+    query: &str,
+    result_chars: usize,
+    saved_chars: usize,
+    ok: bool,
+    project: &str,
+) {
     let q: String = query.chars().take(200).collect();
     let line = json!({
         "ts": chrono::Utc::now().to_rfc3339(),
@@ -176,6 +184,8 @@ pub fn audit(tool: &str, query: &str, result_chars: usize, saved_chars: usize, o
         "est_tokens": result_chars / 4,
         "saved_tokens": saved_chars / 4,
         "ok": ok,
+        // Proyecto canónico de la llamada (vacío si no aplica) → historial de ahorro por proyecto.
+        "project": project,
     });
     let p = audit_path();
     // Rotación: >5 MB → conserva las últimas 5000 líneas.
@@ -304,13 +314,27 @@ pub async fn mcp_post(headers: HeaderMap, Json(req): Json<Value>) -> Response {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            // Proyecto canónico de la llamada (si la tool lo trae) → auditoría con desglose por
+            // proyecto para el historial de ahorro. Vacío cuando no aplica (p. ej. aion_brief).
+            let project = args
+                .get("project")
+                .and_then(|v| v.as_str())
+                .and_then(project_tag)
+                .unwrap_or_default();
             // Envuelto en `metered_scope` para capturar cuántos tokens ahorró la traducción
             // ES→EN dentro de ESTA llamada (lo acumula `mcp_compact::compact_for_bridge`).
             let (result, saved_chars) =
                 crate::mcp_compact::metered_scope(call_tool(name, &args)).await;
             match result {
                 Ok(text) => {
-                    audit(name, &summary, text.chars().count(), saved_chars, true);
+                    audit(
+                        name,
+                        &summary,
+                        text.chars().count(),
+                        saved_chars,
+                        true,
+                        &project,
+                    );
                     rpc_result(
                         id,
                         json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
@@ -318,7 +342,7 @@ pub async fn mcp_post(headers: HeaderMap, Json(req): Json<Value>) -> Response {
                     .into_response()
                 }
                 Err(e) => {
-                    audit(name, &summary, e.chars().count(), 0, false);
+                    audit(name, &summary, e.chars().count(), 0, false, &project);
                     rpc_result(
                         id,
                         json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
@@ -505,11 +529,13 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             // Sesgo de proyecto: la etiqueta [proyecto: X] entra en la consulta y el
             // retrieval multi-señal (léxico + semántico) prioriza recuerdos de ese
             // proyecto sin excluir el contexto general del usuario.
-            let query = match args.get("project").and_then(|v| v.as_str()) {
-                Some(p) if !sanitize_project(p).is_empty() => {
-                    format!("[proyecto: {}] {}", sanitize_project(p), query)
-                }
-                _ => query.to_string(),
+            let query = match args
+                .get("project")
+                .and_then(|v| v.as_str())
+                .and_then(project_tag)
+            {
+                Some(p) => format!("[proyecto: {p}] {query}"),
+                None => query.to_string(),
             };
             let query = query.as_str();
             let k = args
@@ -694,11 +720,13 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             }
             // Etiqueta de proyecto al frente: separa los recuerdos por proyecto en la
             // recuperación (léxica + semántica) sin necesidad de almacenes separados.
-            let content = match args.get("project").and_then(|v| v.as_str()) {
-                Some(p)
-                    if !sanitize_project(p).is_empty() && !content.starts_with("[proyecto:") =>
-                {
-                    format!("[proyecto: {}] {}", sanitize_project(p), content)
+            let content = match args
+                .get("project")
+                .and_then(|v| v.as_str())
+                .and_then(project_tag)
+            {
+                Some(p) if !content.starts_with("[proyecto:") => {
+                    format!("[proyecto: {p}] {content}")
                 }
                 _ => content.to_string(),
             };

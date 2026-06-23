@@ -145,6 +145,150 @@ pub fn compact_for_bridge(content: &str) -> String {
     content.to_string()
 }
 
+/// Trunca `s` a lo sumo `max_chars` SIN cortar a media palabra: si el corte cae pasada la
+/// mitad, retrocede al último espacio. Barato y suficiente para los snippets del puente.
+fn take_words(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max_chars).collect();
+    match truncated.rfind(' ') {
+        // `rfind` da índice de byte; el espacio es 1 byte → el slice cae en frontera de char.
+        Some(i) if i >= truncated.len() / 2 => truncated[..i].to_string(),
+        _ => truncated,
+    }
+}
+
+/// Versión para consumidores que TRUNCAN el recuerdo a un presupuesto de chars (brief=180,
+/// `aion_memory_search`=300, grafo=160…). Traduce el FRAGMENTO que se va a servir (los primeros
+/// `max_chars` en frontera de palabra), NO el recuerdo completo: así lo servido es la traducción
+/// inglesa de ese fragmento (~17% menos tokens que el mismo texto en español). Servir los primeros
+/// `max_chars` de la traducción del completo ocuparía lo mismo (cero ahorro), solo metería más
+/// información — por eso se traduce el fragmento. La clave de caché es el hash del fragmento, y el
+/// warmer precalienta los cortes 180/300 de TODA la memoria, así que acierta desde la 1ª consulta.
+/// Fail-open: en miss sirve el español truncado y calienta el fragmento en segundo plano.
+pub fn compact_take(content: &str, max_chars: usize) -> String {
+    let es_frag = take_words(content, max_chars);
+    if let Some(en) = english_for(&es_frag) {
+        // Ahorro: chars que el inglés recortó frente al español servido. Lo recoge el scope MCP.
+        record_saved(es_frag.chars().count().saturating_sub(en.chars().count()));
+        return en;
+    }
+    // MISS: calienta la traducción de ESTE fragmento para la próxima vez.
+    let owned = es_frag.clone();
+    tokio::spawn(async move {
+        let _ = ensure_english(&owned).await;
+    });
+    es_frag
+}
+
+/// Clave de RESUMEN denso. Lleva prefijo `d{budget}:` porque un resumen depende del presupuesto
+/// objetivo (no colisiona con las claves de traducción fiel, que son 16 hex puros).
+fn dense_key(content: &str, budget: usize) -> String {
+    format!("d{budget}:{}", key(content))
+}
+
+/// Genera (y cachea) un RESUMEN denso en inglés de un recuerdo LARGO: la traducción fiel + el
+/// truncado ciego pierden la cola del recuerdo; un resumen que conserva TODOS los hechos y quita
+/// solo relleno cabe en menos tokens SIN perder información. Solo se aplica a contenido largo
+/// (> 2× el presupuesto). Red de seguridad estricta (mandato de honestidad de Ariel): preserva
+/// nombres/números/fechas/paths literales y se valida con QE back-translation; si la QE no pasa,
+/// NO cachea resumen y el caller cae a la traducción fiel (`compact_take`). Mismo gate de
+/// concurrencia y dedup en vuelo que la traducción.
+async fn ensure_dense(content: &str, budget: usize) -> Option<String> {
+    let k = dense_key(content, budget);
+    if let Some(en) = cached(&k) {
+        return Some(en);
+    }
+    let trimmed = content.trim();
+    // Solo merece resumir lo LARGO; lo corto se sirve con traducción fiel (sin riesgo).
+    if trimmed.chars().count() <= budget * 2 {
+        return None;
+    }
+    if !crate::language_detector::needs_english_translation(trimmed) {
+        return None;
+    }
+    let (tag, body) = split_tag(trimmed);
+    if body.chars().count() < 40 {
+        return None;
+    }
+    if !inflight()
+        .lock()
+        .map(|mut s| s.insert(k.clone()))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let _guard = InflightGuard(k.clone());
+    let _permit = translate_gate().acquire().await.ok()?;
+    if let Some(en) = cached(&k) {
+        return Some(en);
+    }
+    let engine = local_engine()?;
+    let req = GenerateRequest {
+        messages: vec![Message::user(format!(
+            "You are condensing a personal-memory note (written in Spanish or Italian) into the \
+             SHORTEST faithful English summary for another AI agent. First understand what the \
+             author MEANS, then write the densest English that still keeps EVERY distinct fact. \
+             Preserve every name, number, date, path and identifier EXACTLY as written; drop only \
+             filler, repetition and rhetorical padding. Never invent, infer or add anything not in \
+             the note. If everything is already essential, return it faithfully. Output ONLY the \
+             English summary, with no preamble, quotes or notes.\n\n{body}"
+        ))],
+        think: false,
+        temperature: Some(0.1),
+        max_tokens: Some(220),
+    };
+    let en = engine.generate(req).await.ok()?.content.trim().to_string();
+    // Sanidad: vacío o absurdamente corto frente al cuerpo → no sustituye al original.
+    if en.is_empty() || en.chars().count() < 20 {
+        return None;
+    }
+    // QE: el resumen debe seguir significando lo mismo que el ORIGINAL completo. Si no pasa, no
+    // se cachea resumen → el caller sirve traducción fiel (fidelidad por encima del ahorro).
+    if !back_translation_faithful(&engine, body, &en).await {
+        tracing::warn!("mcp_compact: resumen denso rechazado por QE; se servirá traducción fiel");
+        return None;
+    }
+    let full = match tag {
+        Some(t) => format!("{t} {en}"),
+        None => en,
+    };
+    store(&k, &full);
+    Some(full)
+}
+
+/// Como [`compact_take`], pero para recuerdos LARGOS sirve un RESUMEN denso en inglés (que
+/// conserva todos los hechos en menos tokens) en vez de truncar a ciegas. Para recuerdos que
+/// caben holgadamente usa la traducción fiel directa. Fail-open en cascada: sin resumen cacheado
+/// sirve la traducción fiel truncada esta vez y genera el resumen en segundo plano; si la QE del
+/// resumen falla, se queda permanentemente en la traducción fiel. Usado por el brief y
+/// `aion_memory_search`, las dos rutas de mayor volumen.
+pub fn compact_dense(content: &str, max_chars: usize) -> String {
+    // Corto → nada que condensar sin arriesgar: traducción fiel.
+    if content.chars().count() <= max_chars * 2 {
+        return compact_take(content, max_chars);
+    }
+    if let Some(en) = cached(&dense_key(content, max_chars)) {
+        // El resumen ya es denso (≤ presupuesto); el clamp es solo una red de seguridad.
+        let en_served = take_words(&en, max_chars);
+        let es_served = take_words(content, max_chars);
+        record_saved(
+            es_served
+                .chars()
+                .count()
+                .saturating_sub(en_served.chars().count()),
+        );
+        return en_served;
+    }
+    // MISS: genera el resumen en segundo plano y sirve traducción fiel truncada esta vez.
+    let owned = content.to_string();
+    tokio::spawn(async move {
+        let _ = ensure_dense(&owned, max_chars).await;
+    });
+    compact_take(content, max_chars)
+}
+
 /// Compacta un bloque de *grounding* de biblioteca para el puente MCP: traduce SOLO la
 /// prosa de cada pasaje a su versión inglesa cacheada, conservando intacta la ESTRUCTURA
 /// (la cabecera, los prefijos `[N] (fuente: …)` y las líneas `[tema: …]`). Trabaja línea a
@@ -169,30 +313,32 @@ pub fn compact_grounding(blob: &str) -> String {
         .join("\n")
 }
 
-/// Longitudes a las que los consumidores del puente TRUNCAN un recuerdo antes de compactar
-/// (la clave de caché es el hash del texto YA truncado): el brief usa 180, `aion_memory_search`
-/// usa 300. El warmer calienta ambas para que las dos rutas sirvan inglés desde la 1ª consulta.
-/// Si cambias esos cortes en `claude_code.rs`/`claude_mcp.rs`, actualízalos aquí.
+/// Cortes (en chars) a los que los consumidores del puente truncan un recuerdo antes de traducir:
+/// brief usa 180, `aion_memory_search` usa 300. El warmer precalienta AMBOS con el MISMO
+/// `take_words` que usa `compact_take`, para que la clave (hash del fragmento) acierte desde la 1ª
+/// consulta. Si cambias esos cortes en `claude_code.rs`/`claude_mcp.rs`, actualízalos aquí.
 const WARM_PREFIXES: [usize; 2] = [180, 300];
 
-/// WARMER de arranque: pre-traduce un lote de recuerdos para que incluso la PRIMERA consulta
-/// MCP de la sesión sirva inglés (sin esto, el primer hit a un recuerdo aún sin traducir va en
-/// español hasta que la caché se calienta sola). Reusa `ensure_english`, así que respeta caché,
-/// gate de concurrencia (1 traducción a la vez, no compite con el chat), dedup en vuelo y
-/// fail-open. Pensado para una tarea de fondo, sin prisa. Devuelve cuántas tradujo de nuevo.
+/// WARMER de arranque: pre-traduce los FRAGMENTOS (cortes 180/300) de un lote de recuerdos para
+/// que incluso la PRIMERA consulta MCP de la sesión sirva inglés (sin esto, el primer hit a un
+/// recuerdo aún sin traducir va en español hasta que la caché se calienta sola). Cachea por el
+/// hash del fragmento exacto que sirve `compact_take`, así brief (180) y `aion_memory_search` (300)
+/// aciertan desde la 1ª vez. Reusa `ensure_english_inner`: respeta caché, gate de concurrencia (1
+/// traducción a la vez, no compite con el chat), dedup en vuelo y fail-open. Tarea de fondo, sin
+/// prisa. Devuelve cuántas tradujo de nuevo.
 pub async fn warm(contents: Vec<String>) -> usize {
     let mut done = 0usize;
     for c in contents {
         for &n in &WARM_PREFIXES {
-            let t: String = c.chars().take(n).collect();
-            // Si el recuerdo es más corto que el corte, ambas longitudes dan el MISMO texto:
-            // el segundo `ensure_english` es un cache hit barato (no retraduce).
-            if english_for(&t).is_some() {
+            let frag = take_words(&c, n);
+            // Si el recuerdo es más corto que el corte, ambos cortes dan el MISMO fragmento:
+            // el segundo es un cache hit barato (no retraduce).
+            if english_for(&frag).is_some() {
                 continue;
             }
-            // WARMER: sin QE (recuerdos propios + meaning-first fiable); la QE encarece mucho
-            // el arranque y la mantiene el camino reactivo.
-            if ensure_english_inner(&t, false).await.is_some() {
+            // Sin QE (recuerdos propios + meaning-first fiable); la QE encarece el arranque y la
+            // mantiene el camino reactivo.
+            if ensure_english_inner(&frag, false).await.is_some() {
                 done += 1;
             }
         }
@@ -200,7 +346,7 @@ pub async fn warm(contents: Vec<String>) -> usize {
     if done > 0 {
         tracing::info!(
             traducidos = done,
-            "mcp_compact: warmer pre-tradujo recuerdos recientes al inglés"
+            "mcp_compact: warmer pre-tradujo fragmentos de recuerdos al inglés"
         );
     }
     done
@@ -443,6 +589,41 @@ mod tests {
     #[test]
     fn english_for_miss_is_none() {
         assert!(english_for("contenido jamás cacheado xyzzy 9f3a").is_none());
+    }
+
+    #[test]
+    fn take_words_does_not_split_words() {
+        // Cabe entero → intacto.
+        assert_eq!(take_words("hola mundo", 100), "hola mundo");
+        // Trunca retrocediendo al último espacio (no parte la palabra) y no excede el corte.
+        let s = "uno dos tres cuatro cinco seis";
+        let t = take_words(s, 14);
+        assert!(t.chars().count() <= 14, "no excede el presupuesto");
+        assert!(!t.ends_with(' '), "no deja espacio colgando");
+        assert!(s.starts_with(&t), "es un prefijo del original");
+    }
+
+    // Necesita runtime: en cache miss `compact_take` hace `tokio::spawn` del calentado.
+    #[tokio::test]
+    async fn compact_take_miss_serves_spanish_truncated() {
+        // Contenido jamás cacheado → fail-open: español truncado al presupuesto, prefijo fiel.
+        let content =
+            "Este es un recuerdo en español jamás traducido zzqq7f3a que excede el corte.";
+        let out = compact_take(content, 30);
+        assert!(out.chars().count() <= 30);
+        assert!(content.starts_with(&out));
+    }
+
+    // Necesita runtime: en miss `compact_dense` hace `tokio::spawn` (resumen + traducción).
+    #[tokio::test]
+    async fn compact_dense_miss_falls_back_to_faithful_spanish() {
+        // Recuerdo largo jamás cacheado → sin resumen → fail-open a traducción fiel truncada
+        // (español, prefijo fiel) sin exceder el presupuesto. La fidelidad nunca se sacrifica.
+        let content =
+            "Recuerdo largo en español sin traducir wqx84: ".to_string() + &"dato ".repeat(40);
+        let out = compact_dense(&content, 60);
+        assert!(out.chars().count() <= 60);
+        assert!(content.starts_with(&out));
     }
 
     // Necesita runtime: en cache miss `compact_for_bridge` hace `tokio::spawn` del calentado.

@@ -41,6 +41,83 @@ pub fn is_unknown_time(t: DateTime<Utc>) -> bool {
     t.timestamp() <= 0
 }
 
+/// **Forma canónica del nombre de un proyecto.** Unifica variantes (mayúsculas, acentos,
+/// espacios, signos) a un slug estable: `AION`→`aion`, `Peace Harmony`→`peace-harmony`.
+/// Resuelve además alias humanos que NO coinciden por slug (p. ej. «Peace Harmony AFC» y
+/// «peace-harmony» son el MISMO proyecto). Se usa AL ESCRIBIR (para no generar duplicados
+/// nuevos) y en la migración de etiquetas existentes, de modo que medir/exportar/borrar por
+/// proyecto capture TODAS las variantes — y TODAS las ramas, que comparten la etiqueta.
+pub fn canonical_project(name: &str) -> String {
+    let lower = name.trim().to_lowercase();
+    let mut slug = String::with_capacity(lower.len());
+    let mut prev_dash = false;
+    for ch in lower.chars() {
+        let mapped = match ch {
+            'á' | 'à' | 'ä' | 'â' | 'ã' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' | 'õ' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            c if c.is_ascii_alphanumeric() => c,
+            _ => '-',
+        };
+        if mapped == '-' {
+            if !prev_dash && !slug.is_empty() {
+                slug.push('-');
+                prev_dash = true;
+            }
+        } else {
+            slug.push(mapped);
+            prev_dash = false;
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
+    // Alias humanos que no coinciden por slug (mismo proyecto, nombre escrito distinto).
+    match slug.as_str() {
+        "peace-harmony-afc" => "peace-harmony".to_string(),
+        _ => slug,
+    }
+}
+
+/// Extrae la etiqueta `[proyecto: X]` (CRUDA, sin canonicalizar) del inicio del contenido.
+/// `None` si el recuerdo no lleva etiqueta de proyecto (memoria propia de AION).
+fn parse_project_tag(content: &str) -> Option<String> {
+    let rest = content.trim_start().strip_prefix("[proyecto:")?;
+    let end = rest.find(']')?;
+    let raw = rest[..end].trim().to_string();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw)
+    }
+}
+
+/// Resumen de uso de memoria por proyecto (canónico) — alimenta el panel de gestión.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectStat {
+    /// Nombre canónico del proyecto (ver [`canonical_project`]).
+    pub project: String,
+    /// Recuerdos VIGENTES (no obsoletos) etiquetados con este proyecto.
+    pub count: usize,
+    /// Bytes aproximados en el JSONL (suma de registros serializados; lo domina el
+    /// embedding de 1024 floats → ~11 KB/recuerdo).
+    pub bytes: usize,
+    /// Última actividad conocida (created_at más reciente). `None` si es desconocida (epoch).
+    pub last_activity: Option<DateTime<Utc>>,
+}
+
+/// Reporte de la migración de etiquetas de proyecto a su forma canónica.
+#[derive(Debug, Clone, Serialize)]
+pub struct NormalizeReport {
+    /// Registros inspeccionados.
+    pub scanned: usize,
+    /// Registros cuya etiqueta se reescribió a canónica.
+    pub rewritten: usize,
+    /// `(etiqueta_origen, etiqueta_canónica, nº recuerdos)` para las que CAMBIARON.
+    pub mapping: Vec<(String, String, usize)>,
+}
+
 /// Estima la **importancia** de un recuerdo (0..1) por señales deterministas —cero
 /// latencia, sin LLM—: lo etiquetado como aprendizaje/reflexión, las preferencias y
 /// decisiones del usuario, y los datos de identidad pesan más que un comentario de
@@ -199,6 +276,18 @@ impl VectorMemory {
 
     pub fn len(&self) -> usize {
         self.records.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Tamaño aproximado en bytes de TODA la memoria (suma de registros serializados ≈ tamaño
+    /// del JSONL en disco; lo domina el embedding). Para calcular el % que cada proyecto ocupa
+    /// del total en el panel de gestión.
+    pub fn byte_size(&self) -> usize {
+        self.records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|r| serde_json::to_string(r).ok().map(|s| s.len() + 1))
+            .sum()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -514,6 +603,126 @@ impl VectorMemory {
             added += 1;
         }
         Ok(added)
+    }
+
+    /// **Desglose de memoria por proyecto** (canónico), solo recuerdos VIGENTES, ordenado por
+    /// nº de recuerdos desc. La memoria SIN etiqueta (la propia de AION) no entra aquí: el
+    /// panel mide lo atribuible a proyectos. Las ramas se agregan bajo su proyecto (comparten
+    /// etiqueta). Ver [`canonical_project`].
+    pub fn project_breakdown(&self) -> Vec<ProjectStat> {
+        use std::collections::HashMap;
+        let recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map: HashMap<String, ProjectStat> = HashMap::new();
+        for r in recs.iter() {
+            if r.superseded {
+                continue;
+            }
+            let Some(raw) = parse_project_tag(&r.content) else {
+                continue;
+            };
+            let canon = canonical_project(&raw);
+            if canon.is_empty() {
+                continue;
+            }
+            let bytes = serde_json::to_string(r).map(|s| s.len()).unwrap_or(0);
+            let e = map.entry(canon.clone()).or_insert_with(|| ProjectStat {
+                project: canon.clone(),
+                count: 0,
+                bytes: 0,
+                last_activity: None,
+            });
+            e.count += 1;
+            e.bytes += bytes;
+            if !is_unknown_time(r.created_at) {
+                e.last_activity = Some(match e.last_activity {
+                    Some(prev) if prev >= r.created_at => prev,
+                    _ => r.created_at,
+                });
+            }
+        }
+        let mut out: Vec<ProjectStat> = map.into_values().collect();
+        out.sort_by(|a, b| b.count.cmp(&a.count));
+        out
+    }
+
+    /// **Exporta como JSONL los recuerdos de un proyecto** (canónico), INCLUYENDO obsoletos
+    /// para un backup fiel. Cada línea es un `MemoryRecord` completo (con embedding), así la
+    /// restauración por `import_jsonl` no necesita re-embeddings. Captura todas las ramas y
+    /// variantes de etiqueta del proyecto.
+    pub fn export_project_jsonl(&self, project: &str) -> String {
+        let canon = canonical_project(project);
+        let recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        recs.iter()
+            .filter(|r| {
+                parse_project_tag(&r.content)
+                    .map(|raw| canonical_project(&raw) == canon)
+                    .unwrap_or(false)
+            })
+            .filter_map(|r| serde_json::to_string(r).ok())
+            .map(|s| s + "\n")
+            .collect()
+    }
+
+    /// IDs de TODOS los recuerdos (vigentes u obsoletos) de un proyecto canónico. Para borrar
+    /// y liberar espacio: se pasa a [`forget`](Self::forget).
+    pub fn ids_for_project(&self, project: &str) -> Vec<String> {
+        let canon = canonical_project(project);
+        let recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        recs.iter()
+            .filter(|r| {
+                parse_project_tag(&r.content)
+                    .map(|raw| canonical_project(&raw) == canon)
+                    .unwrap_or(false)
+            })
+            .map(|r| r.id.clone())
+            .collect()
+    }
+
+    /// **Migra las etiquetas `[proyecto: X]` existentes a su forma canónica** ([`canonical_project`]).
+    /// Hace BACKUP (`.jsonl.bak`) antes de reescribir. Solo toca el prefijo de proyecto del
+    /// contenido; embedding, id y fechas quedan intactos. Idempotente (si ya es canónico, no
+    /// reescribe). Re-cachea los derivados léxicos del contenido modificado. Devuelve un reporte.
+    pub fn normalize_project_tags(&self) -> Result<NormalizeReport> {
+        use std::collections::HashMap;
+        let mut recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        let scanned = recs.len();
+        let mut rewritten = 0usize;
+        let mut mapping: HashMap<(String, String), usize> = HashMap::new();
+        for r in recs.iter_mut() {
+            let Some(raw) = parse_project_tag(&r.content) else {
+                continue;
+            };
+            let canon = canonical_project(&raw);
+            if canon.is_empty() || canon == raw {
+                continue;
+            }
+            let from = format!("[proyecto: {raw}]");
+            let to = format!("[proyecto: {canon}]");
+            if let Some(pos) = r.content.find(&from) {
+                r.content.replace_range(pos..pos + from.len(), &to);
+                // El contenido cambió → invalidar y recachear léxico/entidades.
+                r.words = None;
+                r.ents = None;
+                r.prime_features();
+                rewritten += 1;
+                *mapping.entry((raw, canon)).or_insert(0) += 1;
+            }
+        }
+        if rewritten > 0 {
+            if let Some(path) = &self.path {
+                if path.exists() {
+                    let bak = path.with_extension("jsonl.bak");
+                    let _ = std::fs::copy(path, &bak);
+                }
+                rewrite_jsonl(path, &recs)?;
+            }
+        }
+        let mapping = mapping.into_iter().map(|((f, t), n)| (f, t, n)).collect();
+        Ok(NormalizeReport {
+            scanned,
+            rewritten,
+            mapping,
+        })
     }
 
     /// Guarda un recuerdo declarando su PROCEDENCIA y un techo de importancia.
@@ -1061,6 +1270,97 @@ mod tests {
         fn model(&self) -> &str {
             "mock"
         }
+    }
+
+    /// Construye un MemoryRecord mínimo para tests de gestión por proyecto.
+    fn mkrec(id: &str, content: &str) -> MemoryRecord {
+        MemoryRecord {
+            id: id.to_string(),
+            content: content.to_string(),
+            embedding: mock_vec(content),
+            fitness: 0.5,
+            access_count: 0,
+            created_at: Utc::now(),
+            superseded: false,
+            superseded_at: None,
+            importance: 0.5,
+            links: Vec::new(),
+            origin: "claude-code".to_string(),
+            words: None,
+            ents: None,
+        }
+    }
+
+    #[test]
+    fn canonical_project_unifies_variants() {
+        assert_eq!(canonical_project("AION"), "aion");
+        assert_eq!(canonical_project("  aion "), "aion");
+        assert_eq!(canonical_project("Peace Harmony"), "peace-harmony");
+        // Alias humano: AFC es el mismo proyecto que peace-harmony.
+        assert_eq!(canonical_project("Peace Harmony AFC"), "peace-harmony");
+        assert_eq!(canonical_project("peace-harmony"), "peace-harmony");
+        // Acentos y signos colapsan a slug estable.
+        assert_eq!(canonical_project("Café   del Día!!"), "cafe-del-dia");
+        // aion-superagente NO se funde con aion (es otro repo).
+        assert_eq!(canonical_project("aion-superagente"), "aion-superagente");
+    }
+
+    #[test]
+    fn parse_project_tag_extracts_raw() {
+        assert_eq!(
+            parse_project_tag("[proyecto: AION] hola").as_deref(),
+            Some("AION")
+        );
+        assert_eq!(
+            parse_project_tag("  [proyecto: Peace Harmony AFC] x").as_deref(),
+            Some("Peace Harmony AFC")
+        );
+        assert_eq!(parse_project_tag("sin etiqueta"), None);
+        assert_eq!(parse_project_tag("[proyecto: ] vacio"), None);
+    }
+
+    #[test]
+    fn breakdown_export_and_ids_group_by_canonical() {
+        let mem = VectorMemory::new(MockEmb);
+        {
+            let mut recs = mem.records.lock().unwrap();
+            recs.push(mkrec("1", "[proyecto: aion] uno"));
+            recs.push(mkrec("2", "[proyecto: AION] dos"));
+            recs.push(mkrec("3", "[proyecto: Peace Harmony AFC] tres"));
+            recs.push(mkrec("4", "[proyecto: peace-harmony] cuatro"));
+            recs.push(mkrec("5", "memoria propia sin proyecto"));
+        }
+        let bd = mem.project_breakdown();
+        // 2 proyectos canónicos (aion=2, peace-harmony=2); el sin-etiqueta no cuenta.
+        assert_eq!(bd.len(), 2);
+        let aion = bd.iter().find(|p| p.project == "aion").unwrap();
+        assert_eq!(aion.count, 2);
+        let ph = bd.iter().find(|p| p.project == "peace-harmony").unwrap();
+        assert_eq!(ph.count, 2);
+        // Export e ids capturan ambas variantes de cada proyecto.
+        assert_eq!(mem.ids_for_project("AION").len(), 2);
+        assert_eq!(mem.ids_for_project("peace-harmony").len(), 2);
+        assert_eq!(mem.export_project_jsonl("aion").lines().count(), 2);
+    }
+
+    #[test]
+    fn normalize_rewrites_variant_tags() {
+        let mem = VectorMemory::new(MockEmb);
+        {
+            let mut recs = mem.records.lock().unwrap();
+            recs.push(mkrec("1", "[proyecto: AION] uno"));
+            recs.push(mkrec("2", "[proyecto: aion] dos"));
+            recs.push(mkrec("3", "[proyecto: Peace Harmony AFC] tres"));
+        }
+        let report = mem.normalize_project_tags().unwrap();
+        // Se reescriben AION→aion y Peace Harmony AFC→peace-harmony (2), aion ya canónico (0).
+        assert_eq!(report.rewritten, 2);
+        // Idempotente: una segunda pasada no cambia nada.
+        assert_eq!(mem.normalize_project_tags().unwrap().rewritten, 0);
+        // Tras normalizar, todo aion bajo una etiqueta.
+        let recs = mem.records.lock().unwrap();
+        assert!(recs[0].content.starts_with("[proyecto: aion]"));
+        assert!(recs[2].content.starts_with("[proyecto: peace-harmony]"));
     }
 
     /// BENCHMARK (ignored: correr con `cargo test -p aion-memory --release bench_retrieve

@@ -250,6 +250,74 @@ export async function claudeCodeStats(): Promise<ClaudeCodeStats | null> {
   }
 }
 
+// ── Memoria por proyecto (medidor + backup/restore + liberar espacio) ─────────
+export type ProjectMemory = {
+  project: string;
+  count: number;
+  bytes: number;
+  pct: number;
+  last_activity?: string | null;
+  calls: number;
+  tokens_served: number;
+  tokens_saved: number;
+};
+export type MemoryProjects = {
+  projects: ProjectMemory[];
+  total_bytes: number;
+  total_count: number;
+  tagged_bytes: number;
+  untagged_bytes: number;
+};
+export async function memoryProjects(): Promise<MemoryProjects> {
+  try {
+    return await fetch(`${BRIDGE_URL}/api/memory/projects`).then((x) => x.json());
+  } catch {
+    return { projects: [], total_bytes: 0, total_count: 0, tagged_bytes: 0, untagged_bytes: 0 };
+  }
+}
+/** Descarga el JSONL de un proyecto (o de toda la memoria si project es vacío). vía blob. */
+export async function downloadMemory(project?: string): Promise<string | null> {
+  try {
+    const qs = project ? `?project=${encodeURIComponent(project)}` : "";
+    const res = await fetch(`${BRIDGE_URL}/api/memory/export${qs}`);
+    if (!res.ok) return null;
+    const text = await res.text();
+    const blob = new Blob([text], { type: "application/x-ndjson" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = project ? `aion-memory-${project}.jsonl` : "aion-memory.jsonl";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    return text;
+  } catch {
+    return null;
+  }
+}
+/** Cuántos recuerdos borraría (confirm:false) o los borra de verdad (confirm:true). */
+export const forgetProject = (project: string, confirm: boolean) =>
+  jpost<{ ok: boolean; confirm_required?: boolean; would_remove?: number; removed?: number; count?: number; error?: string }>(
+    "/api/memory/forget-project",
+    { project, confirm },
+  );
+/** Normaliza las etiquetas de proyecto a su forma canónica (con backup). */
+export const memoryNormalize = () =>
+  jpost<{ ok: boolean; scanned?: number; rewritten?: number; mapping?: { from: string; to: string; count: number }[]; error?: string }>(
+    "/api/memory/normalize",
+    {},
+  );
+/** Fusiona la memoria actual del proyecto con un backup existente (dedup por id). */
+export const backupMerge = (project: string, existing_jsonl: string) =>
+  jpost<{ ok: boolean; jsonl?: string; total?: number; from_current?: number; from_backup?: number; error?: string }>(
+    "/api/memory/backup-merge",
+    { project, existing_jsonl },
+  );
+/** Restaura/fusiona memoria desde un JSONL (subido por el usuario). */
+export const importMemory = (jsonl: string) =>
+  jpost<{ ok?: boolean; added?: number; count?: number; error?: string }>("/api/memory/import", { jsonl });
+
 export type AionIdentity = { id: string; name: string; born_at: string };
 export async function getIdentity(): Promise<AionIdentity | null> {
   try {

@@ -13,7 +13,8 @@ mod vector;
 
 pub use embedder::OllamaEmbedder;
 pub use vector::{
-    is_unknown_time, ConsolidationConfig, ConsolidationReport, MemoryRecord, VectorMemory,
+    canonical_project, is_unknown_time, ConsolidationConfig, ConsolidationReport, MemoryRecord,
+    NormalizeReport, ProjectStat, VectorMemory,
 };
 
 /// Calcula la similitud coseno entre dos vectores. Devuelve 0.0 si las
