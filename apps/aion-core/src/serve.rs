@@ -207,41 +207,56 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // AUTO-RECONCILIACIÓN de Claude Code: si el usuario ya tenía la conexión activa
-    // (config restaurada en una máquina nueva, o ~/.claude.json reseteado por un update),
-    // se vuelve a registrar SOLO el endpoint MCP reutilizando el MISMO token — así no
-    // invalida las sesiones de Claude Code en curso. Idempotente: si ya figura, no toca
-    // nada. Sin CLI instalada → silencio (la UI ya guía la instalación). Cero clics en PC2.
+    // (config restaurada en una máquina nueva, o ~/.claude.json reseteado/desincronizado por un
+    // update), se re-registra el endpoint MCP con el token ESTABLE. Antes solo cubría el caso
+    // "falta la entrada"; si la entrada existía pero con un token DISTINTO al que valida `/mcp`
+    // (el origen real del 401 "Token inválido" tras un reinicio), no se reparaba. Ahora también
+    // normaliza `cfg.token` al token persistente y re-registra cuando el de ~/.claude.json no
+    // coincide. Idempotente: si ya está en sincronía, no toca nada. Sin CLI → silencio (la UI
+    // guía la instalación). Cero clics en PC2.
     tokio::spawn(async {
-        let cfg = crate::claude_code::load();
-        if cfg.enabled && !cfg.token.is_empty() && !crate::claude_code::is_registered() {
+        let mut cfg = crate::claude_code::load();
+        if !cfg.enabled {
+            return;
+        }
+        // Migra a un token estable entre reinicios (lo que valida `/mcp` es `cfg.token`).
+        let stable = crate::claude_code::persisted_token();
+        if cfg.token != stable {
+            cfg.token = stable.clone();
+            crate::claude_code::save(&cfg);
+        }
+        // Re-registra si la entrada falta o quedó con un token viejo (desincronizada).
+        let needs_sync = crate::claude_code::registered_token().as_deref() != Some(stable.as_str());
+        if needs_sync {
             match crate::claude_code::register(&cfg.token) {
-                Ok(()) => tracing::info!("Claude Code re-registrado automáticamente al arrancar"),
+                Ok(()) => tracing::info!(
+                    "Claude Code re-registrado automáticamente al arrancar (token sincronizado)"
+                ),
                 Err(e) => tracing::debug!(error = %e, "auto-registro de Claude Code omitido"),
+            }
+        } else {
+            // Ya sincronizado (no se llama a register, que es quien auto-configura): asegura de
+            // todos modos el allowlist + hook de arranque. Idempotente y best-effort, así un
+            // usuario ya conectado adopta el ahorro determinista en el próximo arranque sin
+            // tener que reconectar.
+            if let Err(e) = crate::claude_code::configure_claude_settings() {
+                tracing::debug!(error = %e, "auto-configuración de settings.json al arrancar omitida");
             }
         }
     });
 
-    // WARMER DE COMPACTACIÓN MCP: pre-traduce al inglés los recuerdos más recientes para que
-    // la PRIMERA consulta de Claude Code en la sesión (brief / aion_memory_search) ya sirva
-    // inglés y ahorre tokens — sin esto el ahorro es perezoso (el primer hit a un recuerdo aún
-    // sin traducir va en español). En segundo plano y detrás de la precarga del modelo; el gate
-    // interno (1 traducción a la vez) evita competir con el chat. Fail-open total. AION_MCP_WARM=0
-    // lo desactiva; AION_MCP_WARM_N ajusta cuántos recuerdos calienta (por defecto 40).
+    // WARMER DE COMPACTACIÓN MCP: pre-traduce al inglés TODA la memoria vigente (clave por
+    // recuerdo completo) para que CUALQUIER consulta de Claude Code en la sesión —brief,
+    // aion_memory_search o grafo— sirva inglés desde la primera vez y ahorre tokens; sin esto
+    // el ahorro es perezoso (el primer hit a un recuerdo aún sin traducir va en español). En
+    // segundo plano y detrás de la precarga del modelo; el gate interno (1 traducción a la vez)
+    // evita competir con el chat. Fail-open total. AION_MCP_WARM=0 lo desactiva.
     tokio::spawn(async {
         if std::env::var("AION_MCP_WARM").as_deref() == Ok("0") {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_secs(25)).await; // tras calentar el modelo
-        let n: usize = std::env::var("AION_MCP_WARM_N")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(40);
-        let contents: Vec<String> = match crate::shared_memory() {
-            Ok(mem) => mem.recent_with_ids(n).into_iter().map(|(_, c)| c).collect(),
-            Err(_) => return,
-        };
-        crate::mcp_compact::warm(contents).await;
+        warm_mcp_translations().await;
     });
 
     // RITUAL DE NOMBRE: si aún no eligió su nombre, AION elige UNO PROPIO (una vez).
@@ -883,6 +898,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/memory/sleep", post(memory_sleep))
         .route("/api/memory/export", get(memory_export))
         .route("/api/memory/import", post(memory_import))
+        .route("/api/memory/projects", get(memory_projects))
+        .route("/api/memory/forget-project", post(memory_forget_project))
+        .route("/api/memory/normalize", post(memory_normalize))
+        .route("/api/memory/backup-merge", post(memory_backup_merge))
         .route("/api/agent/export", get(agent_export))
         .route("/api/agent/import", post(agent_import))
         .route("/api/agent/wipe", post(agent_wipe))
@@ -7251,21 +7270,204 @@ async fn agent_wipe() -> Json<serde_json::Value> {
 }
 
 /// **Exporta** la memoria como archivo JSONL descargable (para llevarla a otro PC/Mac).
-async fn memory_export() -> impl axum::response::IntoResponse {
-    let body = match crate::shared_memory() {
-        Ok(m) => m.export_jsonl(),
-        Err(_) => String::new(),
+#[derive(Deserialize)]
+struct MemExportQuery {
+    /// Si viene, exporta SOLO los recuerdos de ese proyecto (canónico, todas sus ramas y
+    /// variantes). Ausente = toda la memoria.
+    #[serde(default)]
+    project: Option<String>,
+}
+
+async fn memory_export(Query(q): Query<MemExportQuery>) -> impl axum::response::IntoResponse {
+    let (body, filename) = match crate::shared_memory() {
+        Ok(m) => match q.project.as_deref().filter(|p| !p.trim().is_empty()) {
+            Some(p) => {
+                let canon = aion_memory::canonical_project(p);
+                (
+                    m.export_project_jsonl(p),
+                    format!("aion-memory-{canon}.jsonl"),
+                )
+            }
+            None => (m.export_jsonl(), "aion-memory.jsonl".to_string()),
+        },
+        Err(_) => (String::new(), "aion-memory.jsonl".to_string()),
     };
     (
         [
-            (axum::http::header::CONTENT_TYPE, "application/x-ndjson"),
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/x-ndjson".to_string(),
+            ),
             (
                 axum::http::header::CONTENT_DISPOSITION,
-                "attachment; filename=\"aion-memory.jsonl\"",
+                format!("attachment; filename=\"{filename}\""),
             ),
         ],
         body,
     )
+}
+
+/// **Desglose de memoria por proyecto** (medidor): nº de recuerdos, bytes, % del total y
+/// ahorro de tokens acumulado por proyecto (desde la auditoría del MCP). Alimenta el panel.
+async fn memory_projects() -> Json<serde_json::Value> {
+    use std::collections::HashMap;
+    let Ok(mem) = crate::shared_memory() else {
+        return Json(serde_json::json!({ "projects": [], "total_bytes": 0, "total_count": 0 }));
+    };
+    let breakdown = mem.project_breakdown();
+    let total_bytes = mem.byte_size().max(1);
+    let total_count = mem.len();
+
+    // Ahorro de tokens por proyecto desde la auditoría (últimas 5000 llamadas MCP).
+    let audit = crate::claude_mcp::audit_tail(5000);
+    let mut agg: HashMap<String, (i64, i64, i64)> = HashMap::new(); // (calls, served, saved)
+    for e in &audit {
+        let proj = e.get("project").and_then(|v| v.as_str()).unwrap_or("");
+        if proj.is_empty() {
+            continue;
+        }
+        let served = e.get("est_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+        let saved = e.get("saved_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+        let row = agg.entry(proj.to_string()).or_insert((0, 0, 0));
+        row.0 += 1;
+        row.1 += served;
+        row.2 += saved;
+    }
+
+    let projects: Vec<serde_json::Value> = breakdown
+        .iter()
+        .map(|p| {
+            let (calls, served, saved) = agg.get(&p.project).copied().unwrap_or((0, 0, 0));
+            let pct = p.bytes as f64 / total_bytes as f64 * 100.0;
+            serde_json::json!({
+                "project": p.project,
+                "count": p.count,
+                "bytes": p.bytes,
+                "pct": (pct * 10.0).round() / 10.0,
+                "last_activity": p.last_activity,
+                "calls": calls,
+                "tokens_served": served,
+                "tokens_saved": saved,
+            })
+        })
+        .collect();
+    let tagged_bytes: usize = breakdown.iter().map(|p| p.bytes).sum();
+    Json(serde_json::json!({
+        "projects": projects,
+        "total_bytes": total_bytes,
+        "total_count": total_count,
+        "tagged_bytes": tagged_bytes,
+        "untagged_bytes": total_bytes.saturating_sub(tagged_bytes),
+    }))
+}
+
+#[derive(Deserialize)]
+struct ForgetProjectBody {
+    project: String,
+    /// Guarda contra borrados accidentales: debe ser `true` para borrar de verdad.
+    #[serde(default)]
+    confirm: bool,
+}
+
+/// **Borra permanentemente** los recuerdos de un proyecto (libera espacio). Sin `confirm:true`
+/// NO borra: devuelve cuántos borraría (para que la UI confirme tras exportar el backup).
+async fn memory_forget_project(Json(b): Json<ForgetProjectBody>) -> Json<serde_json::Value> {
+    let Ok(mem) = crate::shared_memory() else {
+        return Json(serde_json::json!({ "error": "memoria no disponible" }));
+    };
+    let ids = mem.ids_for_project(&b.project);
+    if !b.confirm {
+        return Json(
+            serde_json::json!({ "ok": false, "confirm_required": true, "would_remove": ids.len() }),
+        );
+    }
+    match mem.forget(&ids) {
+        Ok(removed) => {
+            Json(serde_json::json!({ "ok": true, "removed": removed, "count": mem.len() }))
+        }
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// **Normaliza las etiquetas `[proyecto: X]`** a su forma canónica (con backup `.bak`). Unifica
+/// variantes (AION/aion, «Peace Harmony AFC»/peace-harmony). Idempotente.
+async fn memory_normalize() -> Json<serde_json::Value> {
+    let Ok(mem) = crate::shared_memory() else {
+        return Json(serde_json::json!({ "error": "memoria no disponible" }));
+    };
+    match mem.normalize_project_tags() {
+        Ok(r) => Json(serde_json::json!({
+            "ok": true,
+            "scanned": r.scanned,
+            "rewritten": r.rewritten,
+            "mapping": r.mapping.iter().map(|(f, t, n)| serde_json::json!({ "from": f, "to": t, "count": n })).collect::<Vec<_>>(),
+        })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct BackupMergeBody {
+    project: String,
+    /// Contenido JSONL del backup EXISTENTE a actualizar (puede venir vacío para crear uno).
+    #[serde(default)]
+    existing_jsonl: String,
+}
+
+/// **Actualiza un backup** de proyecto: fusiona la memoria ACTUAL del proyecto con un backup
+/// existente (unión por `id`, gana la versión actual). Devuelve el JSONL combinado para
+/// descargar — sin tocar la memoria viva. Así se puede mantener un backup acumulativo.
+async fn memory_backup_merge(Json(b): Json<BackupMergeBody>) -> Json<serde_json::Value> {
+    use std::collections::HashSet;
+    let Ok(mem) = crate::shared_memory() else {
+        return Json(serde_json::json!({ "error": "memoria no disponible" }));
+    };
+    // Estado ACTUAL del proyecto (fresco) primero.
+    let current = mem.export_project_jsonl(&b.project);
+    let mut ids: HashSet<String> = HashSet::new();
+    let mut out = String::new();
+    let mut from_current = 0usize;
+    for line in current.lines() {
+        if let Some(id) = line_record_id(line) {
+            if ids.insert(id) {
+                out.push_str(line);
+                out.push('\n');
+                from_current += 1;
+            }
+        }
+    }
+    // Del backup viejo, conserva solo lo que no esté ya (registros borrados de la memoria viva
+    // pero presentes en el backup → no se pierden).
+    let mut from_backup = 0usize;
+    for line in b.existing_jsonl.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(id) = line_record_id(line) {
+            if ids.insert(id) {
+                out.push_str(line);
+                out.push('\n');
+                from_backup += 1;
+            }
+        }
+    }
+    Json(serde_json::json!({
+        "ok": true,
+        "jsonl": out,
+        "total": from_current + from_backup,
+        "from_current": from_current,
+        "from_backup": from_backup,
+    }))
+}
+
+/// Extrae el `id` de una línea JSONL de memoria (para deduplicar al fusionar backups).
+fn line_record_id(line: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(line.trim())
+        .ok()?
+        .get("id")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 #[derive(Deserialize)]
@@ -7319,9 +7521,53 @@ async fn claude_code_set(Json(b): Json<ClaudeCodeConnectBody>) -> Json<serde_jso
 
 /// Conexión 1-click: genera token NUEVO (revoca el anterior), lo registra en la
 /// CLI de Claude (scope user) y activa el endpoint /mcp.
+/// Pre-traduce al inglés la memoria vigente para el puente MCP (clave por recuerdo completo).
+/// Reutilizada por el warmer de arranque y por `connect`. Acota a `AION_MCP_WARM_N` recuerdos
+/// (def. 4000, los más recientes primero): cubre toda la memoria de un uso normal sin disparar
+/// la traducción a lo bestia. Fail-open: sin memoria accesible, no hace nada.
+async fn warm_mcp_translations() {
+    let n: usize = std::env::var("AION_MCP_WARM_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(4000);
+    let mut contents: Vec<String> = match crate::shared_memory() {
+        Ok(mem) => mem.recent_with_ids(n).into_iter().map(|(_, c)| c).collect(),
+        Err(_) => Vec::new(),
+    };
+    // También pre-traduce los pasajes de la BIBLIOTECA (los sirve `aion_graph_query` como
+    // excerpt de 180 chars vía `compact_for_bridge`). Acotado por AION_MCP_WARM_LIB_N (def 400)
+    // para no traducir bibliotecas enormes de golpe; el resto se calienta reactivo en la 1ª
+    // consulta. `library_search` (grounding por pasaje variable) sigue calentándose reactivo.
+    let lib_n: usize = std::env::var("AION_MCP_WARM_LIB_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(400);
+    if lib_n > 0 {
+        let lib = crate::library::Library::open(crate::knowledge_path());
+        let mut taken = 0usize;
+        'outer: for (domain, source, _) in lib.documents() {
+            for (_, content) in lib.chunks_of(&domain, &source) {
+                contents.push(content.chars().take(180).collect());
+                taken += 1;
+                if taken >= lib_n {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    if contents.is_empty() {
+        return;
+    }
+    crate::mcp_compact::warm(contents).await;
+}
+
 async fn claude_code_connect(Json(b): Json<ClaudeCodeConnectBody>) -> Json<serde_json::Value> {
     let mut cfg = crate::claude_code::load();
-    let token = crate::claude_code::generate_token();
+    // Token ESTABLE entre reinicios/OTA (el mismo que protege `/api/*`): un token efímero por
+    // conexión dejaba `~/.claude.json` desincronizado del que valida `/mcp` en cada reinicio y
+    // rompía la conexión con un 401 "Token inválido". Persistirlo la mantiene viva sin re-clicar.
+    let token = crate::claude_code::persisted_token();
     match crate::claude_code::register(&token) {
         Ok(()) => {
             cfg.enabled = true;
@@ -7333,6 +7579,8 @@ async fn claude_code_connect(Json(b): Json<ClaudeCodeConnectBody>) -> Json<serde
                 cfg.created_at = Some(chrono::Utc::now());
             }
             crate::claude_code::save(&cfg);
+            // Calienta las traducciones EN en segundo plano para que la primera sesión ya ahorre.
+            tokio::spawn(warm_mcp_translations());
             Json(serde_json::json!({ "ok": true, "registered": true }))
         }
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
@@ -7409,12 +7657,44 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
             errors += 1;
         }
     }
-    // % de ahorro de la traducción sobre el equivalente español de TODO lo servido
-    // (servido_EN + ahorrado): cuántos tokens menos viajaron gracias a traducir.
+    // % de ahorro de la TRADUCCIÓN ES→EN: solo sobre las rutas de lectura que de verdad traducen
+    // (brief/search/library/graph) y solo sobre las ÚLTIMAS 48 H. El histórico previo al arreglo
+    // del hit-rate —y las escrituras remember/forget, que no traducen— anclaban este % en ~0
+    // aunque cada llamada nueva ya recorte tokens. La ventana temporal refleja el comportamiento
+    // ACTUAL (caché caliente) y descarta el histórico roto sin depender de cuántas llamadas haya.
     let translation_savings_pct: u64 = {
-        let es_equiv = tokens_served + tokens_saved_tr;
+        let translatable = |t: &str| {
+            matches!(
+                t,
+                "aion_brief" | "aion_memory_search" | "aion_library_search" | "aion_graph_query"
+            )
+        };
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(48);
+        let (served, saved) = entries
+            .iter()
+            .filter(|e| {
+                e.get("tool")
+                    .and_then(|v| v.as_str())
+                    .map(translatable)
+                    .unwrap_or(false)
+            })
+            .filter_map(|e| {
+                let ts = e
+                    .get("ts")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())?
+                    .with_timezone(&chrono::Utc);
+                if ts < cutoff {
+                    return None;
+                }
+                let served = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                let saved = e.get("saved_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                Some((served, saved))
+            })
+            .fold((0u64, 0u64), |(s, v), (srv, sv)| (s + srv, v + sv));
+        let es_equiv = served + saved;
         if es_equiv > 0 {
-            (tokens_saved_tr as f64 / es_equiv as f64 * 100.0).round() as u64
+            (saved as f64 / es_equiv as f64 * 100.0).round() as u64
         } else {
             0
         }

@@ -131,7 +131,13 @@ pub fn register(token: &str) -> Result<(), String> {
     if find_claude_cli().is_none() {
         return Err("cli_not_found".into());
     }
-    register_fallback(token)
+    register_fallback(token)?;
+    // Auto-configura permisos + hook de arranque para que el ahorro de tokens funcione SOLO,
+    // en cualquier máquina, sin pegar JSON a mano (best-effort: si falla, la conexión MCP sigue).
+    if let Err(e) = configure_claude_settings() {
+        tracing::debug!(error = %e, "auto-configuración de ~/.claude/settings.json omitida");
+    }
+    Ok(())
 }
 
 /// Edita SOLO `mcpServers.aion` en ~/.claude.json (atómico, sin exponer el token).
@@ -166,6 +172,8 @@ fn register_fallback(token: &str) -> Result<(), String> {
 
 /// Quita el servidor de Claude Code (CLI primero, fallback edición directa).
 pub fn unregister() -> Result<(), String> {
+    // Revierte la auto-configuración (allowlist + hook) para no dejar residuos al desconectar.
+    let _ = deconfigure_claude_settings();
     if let Some(cli) = find_claude_cli() {
         let out = std::process::Command::new(&cli)
             .args(["mcp", "remove", "-s", "user", MCP_NAME])
@@ -199,6 +207,176 @@ pub fn is_registered() -> bool {
         .unwrap_or(false)
 }
 
+/// Token Bearer con el que `aion` está registrado en ~/.claude.json, si lo hay. Permite
+/// detectar una DESINCRONIZACIÓN con `cfg.token` (lo que valida `/mcp`) y re-registrar:
+/// esa divergencia es justo lo que producía el 401 "Token inválido" tras un reinicio/OTA.
+pub fn registered_token() -> Option<String> {
+    let v: serde_json::Value = std::fs::read_to_string(claude_json_path())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())?;
+    v.get("mcpServers")?
+        .get(MCP_NAME)?
+        .get("headers")?
+        .get("Authorization")?
+        .as_str()?
+        .strip_prefix("Bearer ")
+        .map(|s| s.to_string())
+}
+
+/// Ruta del `settings.json` GLOBAL de Claude Code (permisos + hooks; NO lleva secretos).
+fn claude_settings_path() -> PathBuf {
+    home_dir().join(".claude").join("settings.json")
+}
+
+/// Las tools MCP de AION que se auto-permiten (allowlist) para que Claude Code NO pida
+/// confirmación manual en cada llamada — el retrieval bajo demanda solo ahorra tokens si
+/// fluye sin fricción. Debe estar sincronizada con las tools expuestas en [[claude_mcp]].
+const AION_MCP_TOOLS: [&str; 8] = [
+    "mcp__aion__aion_brief",
+    "mcp__aion__aion_memory_search",
+    "mcp__aion__aion_library_search",
+    "mcp__aion__aion_graph_query",
+    "mcp__aion__aion_project_context",
+    "mcp__aion__aion_remember",
+    "mcp__aion__aion_forget",
+    "mcp__aion__aion_episodic_recall",
+];
+
+/// Marcador único del hook de AION dentro del `command` (también es el prefijo del sentinel).
+/// Permite detectar idempotencia y revertir sin tocar hooks de otras herramientas.
+const AION_HOOK_MARKER: &str = "/tmp/.aion_brief_";
+
+/// Comando del hook `UserPromptSubmit`. En el PRIMER prompt de CADA sesión (cualquier
+/// proyecto, rama o carpeta) inyecta un recordatorio para que Claude Code llame a `aion_brief`
+/// y cargue el contexto del proyecto — mecanismo DETERMINISTA que no depende del criterio del
+/// LLM. Portable: extrae `session_id` con `sed` (macOS NO trae `jq` de fábrica) y cae a
+/// `nosession` si no lo encuentra. El sentinel en `/tmp` evita repetir en cada mensaje de la
+/// misma sesión (coste cero a partir del 2º prompt).
+const AION_BRIEF_HOOK_CMD: &str = "SID=$(sed -n 's/.*\"session_id\"[^\"]*\"\\([^\"]*\\)\".*/\\1/p'); [ -z \"$SID\" ] && SID=nosession; S=\"/tmp/.aion_brief_$SID\"; if [ ! -f \"$S\" ]; then touch \"$S\"; printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"[AION] Primera vez en esta sesion: llama mcp__aion__aion_brief AHORA, antes de responder, para cargar el contexto del proyecto y ahorrar tokens. Usa tambien aion_memory_search antes de asumir contexto sobre el usuario o sus proyectos.\"}}'; fi";
+
+/// ¿El grupo de hooks contiene el hook de AION? (busca el marcador en cualquier `command`).
+fn group_has_aion_hook(group: &serde_json::Value) -> bool {
+    group
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .map(|arr| {
+            arr.iter().any(|h| {
+                h.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|c| c.contains(AION_HOOK_MARKER))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// **Auto-configura el `~/.claude/settings.json` GLOBAL de Claude Code para el ahorro de
+/// tokens con AION.** Hace que la función sea portable y "se configure sola" en cualquier Mac:
+///   1. **Allowlist** de las tools MCP de AION → cero prompts de permiso por llamada.
+///   2. **Hook `UserPromptSubmit`** → en el primer prompt de cada sesión recuerda llamar a
+///      `aion_brief` (trigger DETERMINISTA, independiente del criterio del LLM).
+///
+/// Idempotente y MERGE-safe: preserva cualquier permiso, hook o ajuste que el usuario ya tenga
+/// (añade solo lo que falte). Sin secretos. Best-effort: si algo falla, la conexión MCP sigue
+/// funcionando — solo se pierden los auto-permisos y el recordatorio de arranque.
+pub fn configure_claude_settings() -> Result<(), String> {
+    let p = claude_settings_path();
+    let mut root: serde_json::Value = std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    apply_aion_settings(&mut root)?;
+    let body = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    crate::write_atomic(&p, &body);
+    Ok(())
+}
+
+/// Lógica PURA de merge (sin I/O) — testeable: inserta allowlist + hook en `root`, preservando
+/// lo existente. Idempotente y MERGE-safe. Devuelve Err si `permissions`/`hooks` ya existen con
+/// un tipo incompatible (no son objeto/array), para no pisar una config manual del usuario.
+fn apply_aion_settings(root: &mut serde_json::Value) -> Result<(), String> {
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| "~/.claude/settings.json no es un objeto JSON".to_string())?;
+
+    // (1) Allowlist — añade las tools que falten, preservando las existentes.
+    let allow_arr = obj
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "permissions no es un objeto".to_string())?
+        .entry("allow")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or_else(|| "permissions.allow no es un array".to_string())?;
+    for tool in AION_MCP_TOOLS {
+        if !allow_arr.iter().any(|v| v.as_str() == Some(tool)) {
+            allow_arr.push(serde_json::Value::from(tool));
+        }
+    }
+
+    // (2) Hook UserPromptSubmit — solo si AION no lo instaló ya (idempotente por marcador).
+    let ups_arr = obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "hooks no es un objeto".to_string())?
+        .entry("UserPromptSubmit")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or_else(|| "hooks.UserPromptSubmit no es un array".to_string())?;
+    if !ups_arr.iter().any(group_has_aion_hook) {
+        ups_arr.push(serde_json::json!({
+            "hooks": [{
+                "type": "command",
+                "timeout": 5,
+                "command": AION_BRIEF_HOOK_CMD,
+            }]
+        }));
+    }
+    Ok(())
+}
+
+/// Revierte `configure_claude_settings`: quita las tools de AION del allowlist y el grupo de
+/// hook de AION, preservando todo lo demás. Idempotente y best-effort (si el archivo no existe
+/// o no parsea, no hay nada que revertir).
+pub fn deconfigure_claude_settings() -> Result<(), String> {
+    let p = claude_settings_path();
+    let Ok(text) = std::fs::read_to_string(&p) else {
+        return Ok(());
+    };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Ok(());
+    };
+    remove_aion_settings(&mut root);
+    if let Ok(body) = serde_json::to_string_pretty(&root) {
+        crate::write_atomic(&p, &body);
+    }
+    Ok(())
+}
+
+/// Lógica PURA de reversión (sin I/O) — testeable.
+fn remove_aion_settings(root: &mut serde_json::Value) {
+    if let Some(allow) = root
+        .get_mut("permissions")
+        .and_then(|p| p.get_mut("allow"))
+        .and_then(|a| a.as_array_mut())
+    {
+        allow.retain(|v| {
+            !v.as_str()
+                .map(|s| AION_MCP_TOOLS.contains(&s))
+                .unwrap_or(false)
+        });
+    }
+    if let Some(ups) = root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut("UserPromptSubmit"))
+        .and_then(|u| u.as_array_mut())
+    {
+        ups.retain(|group| !group_has_aion_hook(group));
+    }
+}
+
 /// BRIEF compacto (~450 tokens máx) para orientar a Claude Code: quién es este
 /// AION, recuerdos recientes (de-duplicados), proyectos y dominios de la biblioteca.
 /// Nunca expone el id de identidad, tokens ni credenciales. Cache de 5 minutos.
@@ -226,12 +404,25 @@ pub async fn build_brief() -> String {
         let recent = mem.recent_with_time(24);
         let mut shown: Vec<String> = Vec::new();
         let mut lines = String::new();
+        // Las auto-reflexiones del loop de vida interior ([insight]/[conocimiento], síntesis del
+        // LLM en 1ª persona) son introspección de AION, no hechos de Ariel ni decisiones de
+        // proyecto: a Claude Code en tareas de código no le aportan, y suelen ser verbosas y
+        // copar el brief (coste GARANTIZADO por sesión). Se limita su número para dejar sitio a lo
+        // accionable (hechos/proyectos); NO se borran (siguen en memoria y en aion_memory_search).
+        const MAX_SELF_REFLECTION: usize = 2;
+        let mut self_reflections = 0usize;
         for (content, ts) in recent.into_iter().rev() {
             // Fuera el eco conversacional y las deudas ya resueltas: son turnos de charla
             // efímera cuyos HECHOS ya viven como [hecho]/[proyecto] aparte. No pagan su sitio
             // en el brief (que es coste por sesión). El recuerdo sigue en memoria y buscable.
             if is_brief_noise(&content) {
                 continue;
+            }
+            if is_self_reflection(&content) {
+                if self_reflections >= MAX_SELF_REFLECTION {
+                    continue;
+                }
+                self_reflections += 1;
             }
             let c: String = content.chars().take(180).collect();
             if shown.iter().any(|s| near_duplicate(s, &c)) {
@@ -240,9 +431,11 @@ pub async fn build_brief() -> String {
             // El brief es coste GARANTIZADO por sesión y lo consume SOLO Claude Code
             // (tokens de pago) → se muestra la versión inglesa cacheada (~40% menos
             // tokens) cuando existe; en miss se muestra español y se calienta para la
-            // próxima. La de-duplicación sigue sobre el español (`c`), para que el filtro
-            // no varíe según esté o no traducido el recuerdo.
-            let display = crate::mcp_compact::compact_for_bridge(&c);
+            // próxima. Se compacta desde el recuerdo COMPLETO (`content`) truncando a 180:
+            // así comparte traducción/caché con `aion_memory_search` y el grafo (clave por
+            // contenido completo). La de-duplicación sigue sobre el español (`c`), para que el
+            // filtro no varíe según esté o no traducido el recuerdo.
+            let display = crate::mcp_compact::compact_dense(&content, 180);
             if aion_memory::is_unknown_time(ts) {
                 lines.push_str(&format!("- {display}\n"));
             } else {
@@ -319,6 +512,25 @@ fn is_brief_noise(content: &str) -> bool {
         || c.starts_with("[resuelto]")
 }
 
+/// ¿Es una AUTO-REFLEXIÓN del loop de vida interior? Las síntesis introspectivas que AION genera
+/// con el LLM en 1ª persona se guardan como `[insight]`/`[conocimiento]` (ver `main.rs`). Son
+/// valiosas para la mente de AION, pero a Claude Code (tareas de código) no le aportan contexto
+/// accionable y, por su verbosidad, copan el brief. Se LIMITA su número (no se excluyen): el
+/// recuerdo permanece en memoria y sigue siendo recuperable por `aion_memory_search`.
+fn is_self_reflection(content: &str) -> bool {
+    let c = content.trim_start().to_lowercase();
+    // Prefijos que el loop de vida interior autogenera (ver `main.rs`): síntesis, auto-crítica de
+    // desempeño, aprendizaje de errores y consolidación. NO incluye `[idea]` (puede ser una idea
+    // de negocio real de Ariel) ni `[hecho]`/`[proyecto:]`/`[decisión]` (contexto accionable).
+    c.starts_with("[insight]")
+        || c.starts_with("[conocimiento]")
+        || c.starts_with("[reflexión]")
+        || c.starts_with("[reflexion]")
+        || c.starts_with("[aprendizaje]")
+        || c.starts_with("[consolidación]")
+        || c.starts_with("[consolidacion]")
+}
+
 /// ¿Es un nombre de PRUEBA/fixture de desarrollo (proyecto o dominio de biblioteca)?
 /// `TEST_*`, `itest` — ruido de desarrollo que no es contexto real del usuario.
 fn is_test_fixture(name: &str) -> bool {
@@ -345,4 +557,103 @@ fn near_duplicate(a: &str, b: &str) -> bool {
     // 0.72: lo bastante alto para no fundir recuerdos que solo comparten vocabulario
     // común (y difieren en tokens cortos significativos: siglas, A/B, versiones).
     union > 0.0 && inter / union >= 0.72
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    fn allow_list(root: &serde_json::Value) -> Vec<String> {
+        root["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn apply_on_empty_adds_tools_and_hook() {
+        let mut root = serde_json::json!({});
+        apply_aion_settings(&mut root).unwrap();
+        let allow = allow_list(&root);
+        for tool in AION_MCP_TOOLS {
+            assert!(allow.contains(&tool.to_string()), "falta {tool}");
+        }
+        let ups = root["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(ups.len(), 1);
+        assert!(ups.iter().any(group_has_aion_hook));
+    }
+
+    #[test]
+    fn apply_is_idempotent() {
+        let mut root = serde_json::json!({});
+        apply_aion_settings(&mut root).unwrap();
+        apply_aion_settings(&mut root).unwrap();
+        apply_aion_settings(&mut root).unwrap();
+        // Sin duplicados: exactamente las 8 tools y 1 grupo de hook.
+        assert_eq!(allow_list(&root).len(), AION_MCP_TOOLS.len());
+        assert_eq!(
+            root["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn apply_preserves_existing_user_config() {
+        // Usuario con su propio permiso y su propio hook UserPromptSubmit.
+        let mut root = serde_json::json!({
+            "permissions": { "allow": ["Bash(git *)"] },
+            "hooks": {
+                "UserPromptSubmit": [
+                    { "hooks": [{ "type": "command", "command": "echo mio" }] }
+                ]
+            },
+            "theme": "dark"
+        });
+        apply_aion_settings(&mut root).unwrap();
+        let allow = allow_list(&root);
+        assert!(
+            allow.contains(&"Bash(git *)".to_string()),
+            "se perdió permiso del usuario"
+        );
+        assert!(allow.contains(&"mcp__aion__aion_brief".to_string()));
+        // El hook del usuario sigue + el de AION añadido = 2 grupos.
+        let ups = root["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(ups.len(), 2);
+        assert_eq!(root["theme"], "dark", "se perdió un ajuste no relacionado");
+    }
+
+    #[test]
+    fn remove_undoes_apply_but_keeps_user_config() {
+        let mut root = serde_json::json!({
+            "permissions": { "allow": ["Bash(git *)"] },
+            "hooks": {
+                "UserPromptSubmit": [
+                    { "hooks": [{ "type": "command", "command": "echo mio" }] }
+                ]
+            }
+        });
+        apply_aion_settings(&mut root).unwrap();
+        remove_aion_settings(&mut root);
+        let allow = allow_list(&root);
+        assert_eq!(
+            allow,
+            vec!["Bash(git *)".to_string()],
+            "debe quedar solo lo del usuario"
+        );
+        let ups = root["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(ups.len(), 1);
+        assert!(
+            !ups.iter().any(group_has_aion_hook),
+            "el hook de AION no se quitó"
+        );
+    }
+
+    #[test]
+    fn apply_rejects_incompatible_permissions_type() {
+        // permissions con tipo incompatible → Err, no panic, no pisa la config del usuario.
+        let mut root = serde_json::json!({ "permissions": "oops" });
+        assert!(apply_aion_settings(&mut root).is_err());
+    }
 }

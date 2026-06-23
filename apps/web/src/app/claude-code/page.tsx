@@ -5,6 +5,7 @@ import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
 import { useT } from "@/lib/i18n";
 import {
+  backupMerge,
   claudeCodeAudit,
   claudeCodeConnect,
   claudeCodeDisconnect,
@@ -12,9 +13,16 @@ import {
   claudeCodeSet,
   claudeCodeStats,
   claudeCodeTest,
+  downloadMemory,
+  forgetProject,
+  importMemory,
+  memoryNormalize,
+  memoryProjects,
   type ClaudeCodeAuditEntry,
   type ClaudeCodeStats,
   type ClaudeCodeStatus,
+  type MemoryProjects,
+  type ProjectMemory,
 } from "@/lib/api";
 
 const INSTALL_CMD = "npm install -g @anthropic-ai/claude-code";
@@ -106,6 +114,225 @@ function SavingsMeter({ pct }: { pct: number }) {
       <span className="absolute text-sm font-bold" style={{ color }}>
         {pct}%
       </span>
+    </div>
+  );
+}
+
+function fmtBytes(n: number): string {
+  if (n >= 1_048_576) return `${(n / 1_048_576).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${n} B`;
+}
+
+/** Abre el selector de archivos y devuelve el texto del archivo elegido (o null). */
+function pickFileText(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".jsonl,application/x-ndjson,text/plain";
+    input.onchange = () => {
+      const f = input.files?.[0];
+      if (!f) return resolve(null);
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.onerror = () => resolve(null);
+      reader.readAsText(f);
+    };
+    input.click();
+  });
+}
+
+function downloadText(text: string, filename: string) {
+  const blob = new Blob([text], { type: "application/x-ndjson" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** Panel de gestión de memoria POR PROYECTO: medidor de uso, ahorro acumulado, y backup /
+ *  actualizar backup / descargar+liberar (con confirmación) / restaurar. Reúne todo lo que
+ *  pidió Ariel: medir por proyecto, hacer backup para liberar espacio sin saturar AION, y
+ *  restaurar cuando quiera reactivarlo — para cualquier proyecto, viejo o nuevo. */
+function MemoryByProject() {
+  const [data, setData] = useState<MemoryProjects | null>(null);
+  const [busy, setBusy] = useState("");
+  const [note, setNote] = useState("");
+  const [confirmDel, setConfirmDel] = useState<{ project: string; count: number } | null>(null);
+
+  const load = useCallback(() => {
+    memoryProjects().then(setData).catch(() => {});
+  }, []);
+  useEffect(() => {
+    load();
+    const iv = setInterval(load, 20_000);
+    return () => clearInterval(iv);
+  }, [load]);
+
+  const projects = data?.projects ?? [];
+  const maxBytes = Math.max(1, ...projects.map((p) => p.bytes));
+
+  async function download(p: ProjectMemory) {
+    setBusy(p.project);
+    const ok = await downloadMemory(p.project);
+    setNote(ok ? `✓ Backup de «${p.project}» descargado (${p.count} recuerdos)` : "⚠️ No se pudo exportar");
+    setBusy("");
+  }
+
+  async function updateBackup(p: ProjectMemory) {
+    const existing = await pickFileText();
+    if (existing == null) return;
+    setBusy(p.project);
+    const r = await backupMerge(p.project, existing).catch(() => null);
+    if (r?.ok && r.jsonl != null) {
+      downloadText(r.jsonl, `aion-memory-${p.project}.jsonl`);
+      setNote(`✓ Backup actualizado: ${r.total} recuerdos (${r.from_current} actuales + ${r.from_backup} solo en el backup)`);
+    } else {
+      setNote("⚠️ No se pudo actualizar el backup");
+    }
+    setBusy("");
+  }
+
+  async function askFree(p: ProjectMemory) {
+    setBusy(p.project);
+    const r = await forgetProject(p.project, false).catch(() => null);
+    setBusy("");
+    if (r && typeof r.would_remove === "number") {
+      setConfirmDel({ project: p.project, count: r.would_remove });
+    } else {
+      setNote("⚠️ No se pudo consultar");
+    }
+  }
+
+  async function confirmFree() {
+    if (!confirmDel) return;
+    const { project } = confirmDel;
+    setBusy(project);
+    // Seguridad: SIEMPRE descarga el backup antes de borrar.
+    const backed = await downloadMemory(project);
+    if (!backed) {
+      setNote("⚠️ Aborté: no pude descargar el backup antes de borrar");
+      setBusy("");
+      setConfirmDel(null);
+      return;
+    }
+    const r = await forgetProject(project, true).catch(() => null);
+    setNote(r?.ok ? `✓ Liberados ${r.removed} recuerdos de «${project}» (backup descargado primero)` : "⚠️ No se pudo borrar");
+    setConfirmDel(null);
+    setBusy("");
+    load();
+  }
+
+  async function restore() {
+    const jsonl = await pickFileText();
+    if (jsonl == null) return;
+    setBusy("__restore");
+    const r = await importMemory(jsonl).catch(() => null);
+    setNote(r?.ok ? `✓ Restaurados ${r.added} recuerdos (total: ${r.count})` : "⚠️ No se pudo restaurar");
+    setBusy("");
+    load();
+  }
+
+  async function normalize() {
+    setBusy("__normalize");
+    const r = await memoryNormalize().catch(() => null);
+    setNote(r?.ok ? `✓ Etiquetas normalizadas: ${r.rewritten} reescritas de ${r.scanned}` : "⚠️ No se pudo normalizar");
+    setBusy("");
+    load();
+  }
+
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="t-section" style={{ color: "var(--text-2)" }}>Memoria por proyecto</h2>
+        <div className="flex gap-2">
+          <button className="btn text-xs" disabled={!!busy} onClick={restore} title="Restaurar/fusionar memoria desde un .jsonl">
+            ⬆︎ Restaurar
+          </button>
+          <button className="btn text-xs" disabled={!!busy} onClick={normalize} title="Unifica etiquetas (AION/aion, Peace Harmony AFC/peace-harmony)">
+            Normalizar
+          </button>
+        </div>
+      </div>
+      <p className="text-xs mb-4 leading-relaxed" style={{ color: "var(--text-3)" }}>
+        Mide cuánta memoria ocupa cada proyecto y su ahorro de tokens. Haz backup para liberar
+        espacio sin saturar AION; restaura cuando quieras reactivarlo. El backup incluye todas
+        las ramas del proyecto.
+      </p>
+
+      {data && (
+        <div className="flex flex-wrap gap-4 mb-4 text-xs" style={{ color: "var(--text-3)" }}>
+          <span>Total: <b style={{ color: "var(--text-2)" }}>{data.total_count}</b> recuerdos · {fmtBytes(data.total_bytes)}</span>
+          <span>Atribuible a proyectos: <b style={{ color: "var(--text-2)" }}>{fmtBytes(data.tagged_bytes)}</b></span>
+          <span>Propia de AION (sin proyecto): {fmtBytes(data.untagged_bytes)}</span>
+        </div>
+      )}
+
+      {note && (
+        <p className="text-xs mb-3 px-3 py-2 rounded-lg" style={{ background: "var(--surface-1)", color: "var(--text-2)" }}>{note}</p>
+      )}
+
+      {projects.length === 0 ? (
+        <p className="text-sm" style={{ color: "var(--text-3)" }}>
+          Aún no hay recuerdos etiquetados por proyecto. Cuando Claude Code use{" "}
+          <code className="font-mono text-xs">aion_remember</code> con un proyecto, aparecerán aquí.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {projects.map((p) => (
+            <div key={p.project} className="rounded-lg p-3" style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}>
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <div className="min-w-0">
+                  <span className="font-mono text-sm font-medium" style={{ color: "var(--text-1)" }}>{p.project}</span>
+                  <span className="text-xs ml-2" style={{ color: "var(--text-3)" }}>
+                    {p.count} recuerdos · {fmtBytes(p.bytes)} · {p.pct}% del total
+                  </span>
+                </div>
+                {p.tokens_saved > 0 && (
+                  <span className="text-xs whitespace-nowrap" style={{ color: "var(--accent)" }} title="Tokens ahorrados (auditoría MCP)">
+                    ~{fmtTokens(p.tokens_saved)} tok ahorrados
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-3 mb-2.5">
+                <Bar value={p.bytes} max={maxBytes} />
+                <span className="text-[10px] tabular-nums shrink-0" style={{ color: "var(--text-3)" }}>
+                  {p.last_activity ? new Date(p.last_activity).toLocaleDateString() : "sin fecha"}
+                </span>
+              </div>
+              {confirmDel?.project === p.project ? (
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span style={{ color: "#ef4444" }}>
+                    ¿Borrar {confirmDel.count} recuerdos de «{p.project}»? Se descargará el backup antes.
+                  </span>
+                  <button className="btn btn-gold text-xs" disabled={busy === p.project} onClick={confirmFree}>
+                    Descargar y borrar
+                  </button>
+                  <button className="btn text-xs" disabled={busy === p.project} onClick={() => setConfirmDel(null)}>
+                    Cancelar
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  <button className="btn text-xs" disabled={!!busy} onClick={() => download(p)}>
+                    ⬇︎ Descargar backup
+                  </button>
+                  <button className="btn text-xs" disabled={!!busy} onClick={() => updateBackup(p)} title="Fusiona la memoria actual del proyecto con un backup existente">
+                    ⟳ Actualizar backup
+                  </button>
+                  <button className="btn text-xs" disabled={!!busy} onClick={() => askFree(p)} title="Descarga el backup y borra de AION para liberar espacio" style={{ color: "#ef4444" }}>
+                    🗑 Descargar y liberar
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -510,6 +737,9 @@ export default function ClaudeCodePage() {
                 <p className="text-sm" style={{ color: "var(--text-3)" }}>{t("cc.tr.empty")}</p>
               )}
             </div>
+
+            {/* ── Memoria por proyecto (medidor + backup/restore + liberar) ── */}
+            <MemoryByProject />
 
             {/* ── Auditoría ── */}
             <div className="card">
