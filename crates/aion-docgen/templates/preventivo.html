@@ -1,0 +1,86 @@
+{# Preventivo / propuesta comercial (it). Añade datos del cliente y bloque de firma. #}
+{% extends "_layout.html" %}
+
+{% block extra_style %}
+  .client-card {
+    background: var(--soft);
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 18px;
+    display: flex;
+    justify-content: space-between;
+    gap: 24px;
+  }
+  .client-card .label {
+    font-size: 7.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin-bottom: 3px;
+  }
+  .client-card .who { font-size: 11pt; font-weight: 600; color: var(--ink); }
+  .client-card .meta { font-size: 9pt; color: var(--muted); line-height: 1.4; }
+
+  /* Bloque de firma: nunca debe partirse entre páginas. */
+  .signature {
+    margin-top: 26px;
+    padding-top: 14px;
+    border-top: 1px solid var(--hair);
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  .signature .accept {
+    font-size: 9pt;
+    color: var(--muted);
+    margin-bottom: 26px;
+  }
+  .signature .lines {
+    display: flex;
+    justify-content: space-between;
+    gap: 40px;
+  }
+  .signature .line {
+    flex: 1;
+    border-top: 1px solid var(--ink);
+    padding-top: 5px;
+    font-size: 8pt;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+{% endblock %}
+
+{% block before_content %}
+  {% if client %}
+  <section class="client-card">
+    <div>
+      <div class="label">Spett.le</div>
+      <div class="who">{{ client.company or client.name }}</div>
+      <div class="meta">
+        {% if client.company and client.name %}{{ client.name }}<br>{% endif %}
+        {% if client.address %}{{ client.address }}<br>{% endif %}
+        {% if client.email %}{{ client.email }}{% endif %}
+      </div>
+    </div>
+    <div style="text-align:right">
+      <div class="label">Preventivo</div>
+      <div class="who" style="color:var(--accent)">{{ number or "—" }}</div>
+      <div class="meta">{{ date }}</div>
+    </div>
+  </section>
+  {% endif %}
+{% endblock %}
+
+{% block after_content %}
+  <section class="signature">
+    <div class="accept">
+      Per accettazione del presente preventivo, datare e firmare nello spazio sottostante.
+      Validità dell'offerta: 30 giorni dalla data di emissione.
+    </div>
+    <div class="lines">
+      <div class="line">Data</div>
+      <div class="line">Firma per accettazione</div>
+    </div>
+  </section>
+{% endblock %}

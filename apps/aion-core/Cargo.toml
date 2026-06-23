@@ -20,6 +20,7 @@ aion-orchestrator.workspace = true
 aion-skills.workspace = true
 aion-evolution.workspace = true
 aion-browser.workspace = true
+aion-docgen.workspace = true
 aion-cognition.workspace = true
 aion-sync.workspace = true
 aion-computer.workspace = true

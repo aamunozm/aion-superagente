@@ -9,7 +9,7 @@ use aion_kernel::traits::{GenerateRequest, LlmEngine, MemoryStore, SkillHost};
 use aion_kernel::types::Message;
 use aion_llm::OllamaEngine;
 use aion_memory::VectorMemory;
-use aion_orchestrator::Tool;
+use aion_orchestrator::{Tool, ToolCategory};
 use aion_skills::{SkillManifest, WasmSkillHost};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -1322,6 +1322,163 @@ fn open_file(path: &std::path::Path, text_in_textedit: bool) {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (path, text_in_textedit);
+    }
+}
+
+/// Ruta del perfil de marca (logo/colores/numeración) usado por los documentos branded.
+pub(crate) fn brand_profile_path() -> std::path::PathBuf {
+    crate::app_data_dir().join("brand_profile.json")
+}
+
+/// Fecha legible para el idioma de salida (es/it con mes en palabras; resto ISO).
+pub(crate) fn human_date(lang: &str) -> String {
+    use chrono::Datelike;
+    let now = chrono::Local::now();
+    let (d, m, y) = (now.day(), now.month() as usize, now.year());
+    const IT: [&str; 13] = [
+        "",
+        "gennaio",
+        "febbraio",
+        "marzo",
+        "aprile",
+        "maggio",
+        "giugno",
+        "luglio",
+        "agosto",
+        "settembre",
+        "ottobre",
+        "novembre",
+        "dicembre",
+    ];
+    const ES: [&str; 13] = [
+        "",
+        "enero",
+        "febrero",
+        "marzo",
+        "abril",
+        "mayo",
+        "junio",
+        "julio",
+        "agosto",
+        "septiembre",
+        "octubre",
+        "noviembre",
+        "diciembre",
+    ];
+    match lang {
+        "it" => format!("{d} {} {y}", IT[m]),
+        "es" => format!("{d} de {} de {y}", ES[m]),
+        _ => format!("{y:04}-{m:02}-{d:02}"),
+    }
+}
+
+/// **Generador de documentos con MARCA** (PDF/Word profesional). Sustituye a `make_document`
+/// para entregables: usa el motor `aion-docgen` (Markdown → HTML branded con los design
+/// tokens de AION/tu marca → PDF vía el Chromium local). Multiplataforma.
+pub struct GenerateDocumentTool;
+impl GenerateDocumentTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for GenerateDocumentTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[async_trait]
+impl Tool for GenerateDocumentTool {
+    fn name(&self) -> &str {
+        "generate_document"
+    }
+    fn description(&self) -> &str {
+        "Crea un DOCUMENTO PROFESIONAL con tu MARCA (logo/colores) y lo abre: preventivos, \
+         propuestas, informes en PDF o Word. Entrada: «Título ::: contenido en Markdown ::: \
+         formato ::: plantilla». Formatos: pdf (def.), docx, html. Plantillas: base (def.), \
+         preventivo (con datos de cliente y firma). TÚ redactas el contenido en Markdown \
+         (usa TABLAS para precios/servicios). Requiere Google Chrome para el PDF."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let parts: Vec<&str> = input.splitn(4, ":::").collect();
+        if parts.len() < 2 {
+            return Err("usa «Título ::: contenido en Markdown ::: formato ::: plantilla»".into());
+        }
+        let title = parts[0].trim();
+        let body = parts[1].trim();
+        let fmt = parts
+            .get(2)
+            .and_then(|s| aion_docgen::DocFormat::parse(s))
+            .unwrap_or(aion_docgen::DocFormat::Pdf);
+        let template = parts
+            .get(3)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("base");
+        if body.is_empty() {
+            return Err("falta el contenido (Markdown) del documento".into());
+        }
+        if !aion_docgen::available_templates().contains(&template) {
+            return Err(format!(
+                "plantilla «{template}» desconocida (usa: {})",
+                aion_docgen::available_templates().join(", ")
+            ));
+        }
+
+        let bp = brand_profile_path();
+        let mut brand = aion_docgen::BrandProfile::load(&bp);
+        let mut req = aion_docgen::DocRequest::new(template, title, body);
+        req.meta.date = human_date(&brand.lang);
+        // Preventivo: numeración correlativa automática (PREV-AÑO-NNN), persistida.
+        if template == "preventivo" {
+            use chrono::Datelike;
+            let year = chrono::Local::now().year();
+            req.meta.number = Some(brand.next_number("preventivo", "PREV", year));
+            let _ = brand.save(&bp);
+        }
+        req.brand = brand;
+
+        let bytes: Vec<u8> = match fmt {
+            aion_docgen::DocFormat::Pdf => {
+                aion_docgen::render_pdf(&req, &aion_docgen::PdfOptions::default()).await?
+            }
+            aion_docgen::DocFormat::Docx => aion_docgen::render_docx(&req)?,
+            aion_docgen::DocFormat::Html => aion_docgen::render_html(&req)?.into_bytes(),
+            aion_docgen::DocFormat::Markdown => body.as_bytes().to_vec(),
+        };
+
+        let home =
+            std::env::var("HOME").map_err(|_| "no encuentro tu carpeta de usuario".to_string())?;
+        let safe: String = title
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let name = {
+            let t = safe.trim().trim_matches(|c| c == '_' || c == ' ');
+            if t.is_empty() {
+                "Documento".to_string()
+            } else {
+                t.chars().take(60).collect::<String>()
+            }
+        };
+        let path = std::path::Path::new(&home)
+            .join("Desktop")
+            .join(format!("{name}.{}", fmt.ext()));
+        std::fs::write(&path, &bytes).map_err(|e| format!("no pude escribir el documento: {e}"))?;
+        open_file(&path, false);
+        Ok(format!(
+            "documento {} con tu marca creado y abierto en el Escritorio: {}",
+            fmt.ext(),
+            path.display()
+        ))
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Creation
     }
 }
 

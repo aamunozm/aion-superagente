@@ -196,7 +196,25 @@ impl<'a> ReActAgent<'a> {
         stats
     }
 
-    fn system_prompt(&self) -> String {
+    /// Bloque de herramientas para el prompt. Por defecto, el catálogo COMPLETO (prefijo
+    /// estable → mejor reutilización del KV-cache entre tareas). Si `AION_TOOL_DISCLOSURE`
+    /// está activo y hay muchas herramientas, aplica *progressive disclosure*: solo las más
+    /// relevantes a la tarea van con descripción completa (abarata el contexto en LLMs
+    /// locales). Es OPT-IN para no alterar el enrutado afinado ni la caché por defecto.
+    fn tools_block(&self, task: &str) -> String {
+        const DISCLOSURE_MIN_TOOLS: usize = 16;
+        const DISCLOSURE_TOP_N: usize = 12;
+        let enabled = std::env::var("AION_TOOL_DISCLOSURE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if enabled && !task.trim().is_empty() && self.tools.len() > DISCLOSURE_MIN_TOOLS {
+            self.tools.describe_relevant(task, DISCLOSURE_TOP_N)
+        } else {
+            self.tools.describe()
+        }
+    }
+
+    fn system_prompt(&self, task: &str) -> String {
         format!(
             "Eres un agente de IA AUTÓNOMO y LOCAL que vive en el Mac de tu usuario (tu NOMBRE e \
 identidad únicos te los doy en el contexto de abajo — úsalos; no te llames «AION» a secas). \
@@ -307,7 +325,7 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
              fuente. Insiste hasta conseguir lo que falta o agotar de verdad las vías; solo \
              entonces di con honestidad que no se pudo. Aprender lo que no sabías es parte de tu \
              trabajo, no una excepción.{context}",
-            tools = self.tools.describe(),
+            tools = self.tools_block(task),
             context = match &self.context {
                 Some(c) => format!(
                     "\n\nCONOCIMIENTO QUE YA TIENES (aplícalo a esta tarea para hacerlo mejor):\n{c}"
@@ -347,7 +365,7 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
         // no depende del scratchpad. Construirlo una sola vez evita reformatearlo y
         // recorrer todas las herramientas hasta `max_steps` veces, y mantiene el
         // prefijo estable → mejor reutilización del KV-cache de Ollama (prefill barato).
-        let system_msg = Message::system(self.system_prompt());
+        let system_msg = Message::system(self.system_prompt(task));
 
         // Reloj del presupuesto de tiempo (ver `deadline`). `steps_taken` recuerda
         // cuántos pasos llegamos a dar para reportarlo en la síntesis de rescate.

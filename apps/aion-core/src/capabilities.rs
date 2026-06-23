@@ -17,6 +17,7 @@ const TOOL_FAMILIES: &[(&str, &str)] = &[
     ("Web", "buscar en internet, leer páginas, clima y lugares (search, web, weather, place_lookup)"),
     ("Navegador", "abrir/leer/clicar/escribir en webs y entrar con credenciales (browser_*, credential_login)"),
     ("Archivos y sistema", "listar/crear archivos, leerlos, ejecutar comandos, crear documentos y notas (files, file_read, run_command, make_document, make_note)"),
+    ("Documentos con marca", "crear ENTREGABLES profesionales con tu marca en PDF o Word —preventivos, propuestas, informes— a partir de Markdown, con plantillas y numeración (generate_document; plantilla 'preventivo' para clientes)"),
     ("Red", "inspeccionar la red local (net)"),
     ("Pantalla y PC", "ver la pantalla, sus elementos y controlar ratón/teclado del Mac (screen_see, screen_elements, pc_click, pc_type, pc_key)"),
     ("Comunicaciones", "mirar la agenda y crear eventos, buscar contactos, leer y enviar Mensajes (iMessage/SMS) y abrir WhatsApp Web — SOLO con los contactos que Ariel ha permitido en el menú Comunicaciones, y pidiendo confirmación antes de enviar (calendar_list, calendar_create, contacts_search, messages_read, messages_send, whatsapp_open)"),

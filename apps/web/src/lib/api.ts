@@ -560,6 +560,60 @@ export const projectStudioGenerate = (project_id: string, kind: string) =>
 export const projectStudioRemove = (project_id: string, id: string) =>
   jpost<{ ok: boolean }>("/api/project/studio/remove", { project_id, id });
 
+export type DocFormat = "pdf" | "docx" | "html";
+
+/** Dispara la descarga de un `Response` binario, tomando el nombre de Content-Disposition. */
+async function downloadBlob(res: Response, fallbackName: string): Promise<void> {
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(t || `error ${res.status}`);
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get("content-disposition") ?? "";
+  const m = /filename="?([^"]+)"?/.exec(cd);
+  const name = m?.[1] ?? fallbackName;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** Exporta una salida de Studio a un documento branded (PDF/Word/HTML) y lo descarga. */
+export async function projectStudioExport(
+  project_id: string,
+  output_id: string,
+  format: DocFormat,
+): Promise<void> {
+  const res = await fetch(`${BRIDGE_URL}/api/project/studio/export`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ project_id, output_id, format }),
+  });
+  await downloadBlob(res, `documento.${format}`);
+}
+
+/** Genera un documento branded desde Markdown arbitrario y lo descarga. */
+export async function documentsGenerate(req: {
+  title: string;
+  markdown: string;
+  format: DocFormat;
+  template?: string;
+  subtitle?: string;
+  number?: string;
+  client?: { name: string; company?: string; email?: string; address?: string };
+}): Promise<void> {
+  const res = await fetch(`${BRIDGE_URL}/api/documents/generate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...req, lang: lang() }),
+  });
+  await downloadBlob(res, `${req.title || "documento"}.${req.format}`);
+}
+
 /** Reinicia el hilo de una conversación en el backend (nuevo chat). */
 export async function chatReset(convoId: string): Promise<void> {
   await fetch(`${BRIDGE_URL}/api/chat/new`, {

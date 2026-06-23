@@ -188,6 +188,11 @@ pub fn remove_source(pid: &str, sid: &str) {
 
 // ── Studio (salidas) ──────────────────────────────────────────────────────────
 
+/// Devuelve una salida de Studio concreta por su id (para exportarla a documento).
+pub fn output(pid: &str, oid: &str) -> Option<Output> {
+    outputs(pid).into_iter().find(|o| o.id == oid)
+}
+
 pub fn outputs(pid: &str) -> Vec<Output> {
     read_vec(&studio_path(pid))
 }

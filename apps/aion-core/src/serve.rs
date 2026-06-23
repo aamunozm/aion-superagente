@@ -953,6 +953,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/project/studio/audio", post(project_studio_audio))
         .route("/api/project/audio", get(project_audio))
         .route("/api/project/studio/remove", post(project_studio_remove))
+        // Generación de documentos branded (PDF/Word/HTML) con aion-docgen.
+        .route("/api/documents/generate", post(documents_generate))
+        .route("/api/project/studio/export", post(project_studio_export))
+        .route("/api/brand", get(brand_get).post(brand_set))
         // MCP: Claude Code consulta la memoria de AION bajo demanda (Bearer propio).
         .route(
             "/mcp",
@@ -2864,6 +2868,7 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::PcTypeTool::new()));
         tools.register(Arc::new(crate::agent_tools::PcKeyTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
+        tools.register(Arc::new(crate::agent_tools::GenerateDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
         // 📘 SkillBook (Hermes): memoria PROCEDIMENTAL — cómo hacer cosas que ya funcionaron.
@@ -3338,6 +3343,7 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::PcTypeTool::new()));
         tools.register(Arc::new(crate::agent_tools::PcKeyTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
+        tools.register(Arc::new(crate::agent_tools::GenerateDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
         // 💬 COMUNICACIONES en modo autónomo: SOLO lectura (agenda y contactos) para que el
@@ -6466,6 +6472,179 @@ struct OutRemove {
 async fn project_studio_remove(Json(b): Json<OutRemove>) -> Json<serde_json::Value> {
     crate::projects::remove_output(&b.project_id, &b.id);
     Json(serde_json::json!({ "ok": true }))
+}
+
+// ── Generación de documentos branded (aion-docgen) ───────────────────────────
+
+#[derive(Deserialize)]
+struct DocClient {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    company: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    address: String,
+}
+#[derive(Deserialize)]
+struct DocGenReq {
+    #[serde(default = "doc_tmpl_base")]
+    template: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    markdown: String,
+    #[serde(default = "doc_fmt_pdf")]
+    format: String,
+    #[serde(default)]
+    subtitle: Option<String>,
+    #[serde(default)]
+    date: Option<String>,
+    #[serde(default)]
+    number: Option<String>,
+    #[serde(default)]
+    lang: Option<String>,
+    #[serde(default)]
+    client: Option<DocClient>,
+}
+fn doc_tmpl_base() -> String {
+    "base".into()
+}
+fn doc_fmt_pdf() -> String {
+    "pdf".into()
+}
+
+fn doc_filename(title: &str) -> String {
+    let t: String = title
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let t = t.trim().trim_matches(|c| c == '_' || c == ' ');
+    if t.is_empty() {
+        "documento".into()
+    } else {
+        t.chars().take(60).collect()
+    }
+}
+
+fn doc_error(e: String) -> axum::response::Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "ok": false, "error": e })),
+    )
+        .into_response()
+}
+
+/// Renderiza un `DocRequest` al formato pedido y lo devuelve como descarga (attachment).
+async fn render_document_response(
+    req: &aion_docgen::DocRequest,
+    fmt: aion_docgen::DocFormat,
+    title: &str,
+) -> axum::response::Response {
+    let (bytes, ctype): (Vec<u8>, &str) = match fmt {
+        aion_docgen::DocFormat::Pdf => {
+            match aion_docgen::render_pdf(req, &aion_docgen::PdfOptions::default()).await {
+                Ok(b) => (b, "application/pdf"),
+                Err(e) => return doc_error(e),
+            }
+        }
+        aion_docgen::DocFormat::Docx => match aion_docgen::render_docx(req) {
+            Ok(b) => (
+                b,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+            Err(e) => return doc_error(e),
+        },
+        aion_docgen::DocFormat::Html => match aion_docgen::render_html(req) {
+            Ok(s) => (s.into_bytes(), "text/html; charset=utf-8"),
+            Err(e) => return doc_error(e),
+        },
+        aion_docgen::DocFormat::Markdown => (
+            req.body_markdown.clone().into_bytes(),
+            "text/markdown; charset=utf-8",
+        ),
+    };
+    let filename = format!("{}.{}", doc_filename(title), fmt.ext());
+    (
+        [
+            (header::CONTENT_TYPE, ctype.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// Perfil de marca actual (logo/colores/idioma/numeración) usado por los documentos.
+async fn brand_get() -> Json<serde_json::Value> {
+    let brand = aion_docgen::BrandProfile::load(crate::agent_tools::brand_profile_path());
+    Json(serde_json::json!({ "ok": true, "brand": brand }))
+}
+/// Guarda el perfil de marca (lo configura el usuario una vez; se aplica a cada documento).
+async fn brand_set(Json(b): Json<aion_docgen::BrandProfile>) -> Json<serde_json::Value> {
+    match b.save(crate::agent_tools::brand_profile_path()) {
+        Ok(_) => Json(serde_json::json!({ "ok": true, "brand": b })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+/// Genera un documento branded (PDF/Word/HTML) desde Markdown y lo devuelve como descarga.
+async fn documents_generate(Json(b): Json<DocGenReq>) -> axum::response::Response {
+    if b.markdown.trim().is_empty() {
+        return doc_error("falta el contenido (markdown) del documento".into());
+    }
+    let fmt = aion_docgen::DocFormat::parse(&b.format).unwrap_or(aion_docgen::DocFormat::Pdf);
+    let mut brand = aion_docgen::BrandProfile::load(crate::agent_tools::brand_profile_path());
+    if let Some(l) = b.lang.as_deref().filter(|s| !s.is_empty()) {
+        brand.lang = l.to_string();
+    }
+    let date = b
+        .date
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| crate::agent_tools::human_date(&brand.lang));
+    let mut req = aion_docgen::DocRequest::new(&b.template, &b.title, &b.markdown);
+    req.brand = brand;
+    req.meta.subtitle = b.subtitle.clone();
+    req.meta.date = date;
+    req.meta.number = b.number.clone();
+    req.meta.client = b.client.as_ref().map(|c| aion_docgen::ClientInfo {
+        name: c.name.clone(),
+        company: c.company.clone(),
+        email: c.email.clone(),
+        address: c.address.clone(),
+    });
+    render_document_response(&req, fmt, &b.title).await
+}
+
+#[derive(Deserialize)]
+struct StudioExport {
+    project_id: String,
+    output_id: String,
+    #[serde(default = "doc_fmt_pdf")]
+    format: String,
+}
+/// Exporta una salida de Studio (Markdown) a un documento branded descargable.
+async fn project_studio_export(Json(b): Json<StudioExport>) -> axum::response::Response {
+    let Some(out) = crate::projects::output(&b.project_id, &b.output_id) else {
+        return doc_error("salida no encontrada".into());
+    };
+    let fmt = aion_docgen::DocFormat::parse(&b.format).unwrap_or(aion_docgen::DocFormat::Pdf);
+    let brand = aion_docgen::BrandProfile::load(crate::agent_tools::brand_profile_path());
+    let mut req = aion_docgen::DocRequest::new("base", &out.title, &out.content);
+    req.meta.date = out.created.chars().take(10).collect();
+    req.brand = brand;
+    render_document_response(&req, fmt, &out.title).await
 }
 
 /// **Audio Overview**: genera un GUION hablado de las fuentes y lo sintetiza a audio
