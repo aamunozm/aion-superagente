@@ -183,7 +183,7 @@ Abre `http://localhost:3000`, crea tu cuenta local y saluda: AION elegirá su no
 
 ## Documentación
 
-[PRD](docs/PRD.md) · [Investigación: conciencia y creatividad (jun 2026)](docs/RESEARCH_consciencia_creatividad_2026-06.md) · [ADRs](docs/adr/) · [Gobernanza](docs/GOVERNANCE.md) · [Guía de uso](USAGE.md)
+[PRD](docs/PRD.md) · [Memoria para Claude Code (puente MCP)](docs/MEMORIA-CLAUDE-CODE.md) · [Investigación: conciencia y creatividad (jun 2026)](docs/RESEARCH_consciencia_creatividad_2026-06.md) · [ADRs](docs/adr/) · [Gobernanza](docs/GOVERNANCE.md) · [Guía de uso](USAGE.md)
 
 ## Contribuir / contacto
 
