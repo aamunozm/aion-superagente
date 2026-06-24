@@ -18,11 +18,16 @@ import {
   importMemory,
   memoryNormalize,
   memoryProjects,
+  vaultGet,
+  vaultList,
+  vaultRemove,
+  vaultSet,
   type ClaudeCodeAuditEntry,
   type ClaudeCodeStats,
   type ClaudeCodeStatus,
   type MemoryProjects,
   type ProjectMemory,
+  type VaultSecret,
 } from "@/lib/api";
 
 const INSTALL_CMD = "npm install -g @anthropic-ai/claude-code";
@@ -315,6 +320,107 @@ function PrivacyPanel() {
   );
 }
 
+/** Bóveda de secretos: claves/datos bancarios cifrados en el Llavero de macOS. El valor NUNCA
+ *  llega a ningún LLM ni al puente — solo se revela aquí, bajo acción local explícita. */
+function VaultPanel() {
+  const [secrets, setSecrets] = useState<VaultSecret[]>([]);
+  const [name, setName] = useState("");
+  const [value, setValue] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [revealed, setRevealed] = useState<Record<string, string>>({});
+
+  const load = useCallback(() => {
+    vaultList().then(setSecrets).catch(() => {});
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function add() {
+    if (!name.trim() || !value.trim() || busy) return;
+    setBusy(true);
+    const r = await vaultSet(name.trim(), value, note.trim()).catch(() => ({ ok: false, error: "sin respuesta" }));
+    if (r.ok) {
+      setName(""); setValue(""); setNote("");
+      setMsg(`✓ Guardado en el Llavero (cifrado, fuera de la memoria)`);
+      load();
+    } else {
+      setMsg(`⚠️ ${r.error ?? "no se pudo guardar"}`);
+    }
+    setBusy(false);
+  }
+  async function reveal(n: string) {
+    if (revealed[n] !== undefined) {
+      setRevealed((m) => { const c = { ...m }; delete c[n]; return c; });
+      return;
+    }
+    const r = await vaultGet(n).catch(() => ({ ok: false, value: undefined as string | undefined }));
+    if (r.ok && r.value !== undefined) setRevealed((m) => ({ ...m, [n]: r.value as string }));
+  }
+  async function del(n: string) {
+    if (!confirm(`¿Eliminar el secreto «${n}» del Llavero?`)) return;
+    await vaultRemove(n).catch(() => {});
+    setRevealed((m) => { const c = { ...m }; delete c[n]; return c; });
+    load();
+  }
+
+  return (
+    <div className="card" style={{ border: "1px solid var(--border)" }}>
+      <div className="flex items-center gap-2 mb-1">
+        <span style={{ fontSize: 16 }}>🗝️</span>
+        <h2 className="t-section" style={{ color: "var(--text-2)" }}>Bóveda de secretos</h2>
+      </div>
+      <p className="text-xs mb-4 leading-relaxed" style={{ color: "var(--text-3)" }}>
+        Claves, datos bancarios y tokens cifrados en el <b>Llavero de macOS</b>. El valor vive solo
+        ahí — <b>nunca</b> entra en la memoria de AION, ni se embebe, ni se sirve a Claude Code o a un
+        LLM externo. Solo se revela aquí, en tu Mac, bajo tu acción.
+      </p>
+
+      {msg && (
+        <p className="text-xs mb-3 px-3 py-2 rounded-lg" style={{ background: "var(--surface-1)", color: "var(--text-2)" }}>{msg}</p>
+      )}
+
+      {/* Alta */}
+      <div className="flex flex-wrap gap-2 mb-4">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="nombre (ej. banco-santander)"
+          className="text-sm px-3 py-2 rounded-lg" style={{ background: "var(--surface-1)", border: "1px solid var(--border)", color: "var(--text-1)", minWidth: 180, flex: 1 }} />
+        <input value={value} onChange={(e) => setValue(e.target.value)} type="password" placeholder="valor (clave / nº de cuenta)"
+          className="text-sm px-3 py-2 rounded-lg" style={{ background: "var(--surface-1)", border: "1px solid var(--border)", color: "var(--text-1)", minWidth: 180, flex: 1 }} />
+        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="nota (opcional)"
+          className="text-sm px-3 py-2 rounded-lg" style={{ background: "var(--surface-1)", border: "1px solid var(--border)", color: "var(--text-1)", minWidth: 120, flex: 1 }} />
+        <button className="btn btn-gold text-sm" disabled={busy || !name.trim() || !value.trim()} onClick={add}>Guardar</button>
+      </div>
+
+      {/* Lista */}
+      {secrets.length === 0 ? (
+        <p className="text-sm" style={{ color: "var(--text-3)" }}>Aún no hay secretos guardados.</p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {secrets.map((s) => (
+            <div key={s.name} className="flex items-center gap-3 rounded-lg p-2.5" style={{ background: "var(--surface-1)" }}>
+              <div className="min-w-0 flex-1">
+                <span className="font-mono text-sm" style={{ color: "var(--text-1)" }}>{s.name}</span>
+                {s.note && <span className="text-xs ml-2" style={{ color: "var(--text-3)" }}>{s.note}</span>}
+                {revealed[s.name] !== undefined && (
+                  <div className="font-mono text-xs mt-1 px-2 py-1 rounded break-all" style={{ background: "var(--surface-2)", color: "var(--accent)" }}>
+                    {revealed[s.name]}
+                  </div>
+                )}
+              </div>
+              <button className="btn text-xs shrink-0" onClick={() => reveal(s.name)}>
+                {revealed[s.name] !== undefined ? "Ocultar" : "Revelar"}
+              </button>
+              <button className="btn text-xs shrink-0" style={{ color: "var(--danger)" }} onClick={() => del(s.name)}>Eliminar</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ClaudeCodePage() {
   const { t } = useT();
   const [cc, setCc] = useState<ClaudeCodeStatus | null>(null);
@@ -518,6 +624,9 @@ export default function ClaudeCodePage() {
 
             {/* ── Privacidad y datos confidenciales ── */}
             <PrivacyPanel />
+
+            {/* ── Bóveda de secretos (Llavero macOS) ── */}
+            <VaultPanel />
 
             {/* ── Métricas en grid 3×2 ── */}
             <div className="grid grid-cols-3 gap-3">

@@ -900,6 +900,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/a2a/send", post(a2a_send))
         .route("/api/inbox", get(inbox_list))
         .route("/api/inbox/read", post(inbox_read))
+        .route("/api/vault", get(vault_list))
+        .route("/api/vault/set", post(vault_set))
+        .route("/api/vault/get", post(vault_get))
+        .route("/api/vault/remove", post(vault_remove))
         .route("/api/library", get(library_list))
         .route("/api/library/ingest", post(library_ingest))
         .route("/api/library/upload", post(library_upload))
@@ -7634,6 +7638,51 @@ fn line_record_id(line: &str) -> Option<String> {
         .get("id")?
         .as_str()
         .map(|s| s.to_string())
+}
+
+// ── Bóveda de secretos (Llavero macOS; NUNCA expuesta al LLM ni al puente MCP) ──────────
+
+/// Lista los secretos de la bóveda (nombre + nota + fecha). NUNCA devuelve valores.
+async fn vault_list() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "secrets": crate::vault::list() }))
+}
+
+#[derive(Deserialize)]
+struct VaultSetBody {
+    name: String,
+    value: String,
+    #[serde(default)]
+    note: String,
+}
+
+/// Guarda un secreto en el Llavero. El valor jamás se persiste en disco plano ni se sirve al LLM.
+async fn vault_set(Json(b): Json<VaultSetBody>) -> Json<serde_json::Value> {
+    match crate::vault::set(&b.name, &b.value, &b.note) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct VaultNameBody {
+    name: String,
+}
+
+/// Revela el VALOR de un secreto. Solo por acción LOCAL explícita (local_guard protege la ruta);
+/// NO hay tool MCP equivalente → Claude Code no puede leer la bóveda.
+async fn vault_get(Json(b): Json<VaultNameBody>) -> Json<serde_json::Value> {
+    match crate::vault::get(&b.name) {
+        Some(value) => Json(serde_json::json!({ "ok": true, "value": value })),
+        None => Json(serde_json::json!({ "ok": false, "error": "no encontrado" })),
+    }
+}
+
+/// Elimina un secreto (Llavero + índice).
+async fn vault_remove(Json(b): Json<VaultNameBody>) -> Json<serde_json::Value> {
+    match crate::vault::remove(&b.name) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
 }
 
 #[derive(Deserialize)]

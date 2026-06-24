@@ -346,6 +346,24 @@ export const backupMerge = (project: string, existing_jsonl: string) =>
 export const importMemory = (jsonl: string) =>
   jpost<{ ok?: boolean; added?: number; count?: number; error?: string }>("/api/memory/import", { jsonl });
 
+// ── Bóveda de secretos (Llavero macOS; el valor NUNCA llega al LLM ni al puente) ──────────────
+export type VaultSecret = { name: string; note: string; created_at: string };
+export async function vaultList(): Promise<VaultSecret[]> {
+  try {
+    const r = await fetch(`${BRIDGE_URL}/api/vault`).then((x) => x.json());
+    return (r.secrets as VaultSecret[]) ?? [];
+  } catch {
+    return [];
+  }
+}
+export const vaultSet = (name: string, value: string, note: string) =>
+  jpost<{ ok: boolean; error?: string }>("/api/vault/set", { name, value, note });
+/** Revela el valor de un secreto (acción local explícita). */
+export const vaultGet = (name: string) =>
+  jpost<{ ok: boolean; value?: string; error?: string }>("/api/vault/get", { name });
+export const vaultRemove = (name: string) =>
+  jpost<{ ok: boolean; error?: string }>("/api/vault/remove", { name });
+
 export type AionIdentity = { id: string; name: string; born_at: string };
 export async function getIdentity(): Promise<AionIdentity | null> {
   try {
