@@ -60,6 +60,7 @@ mod research_memory;
 mod self_model;
 mod senses;
 mod sensors;
+mod seo_audit;
 mod serve;
 mod skill_store;
 mod skill_tool;

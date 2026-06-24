@@ -1696,6 +1696,44 @@ impl Tool for GenerateOffertaTool {
     }
 }
 
+/// **Skill experta: auditoría SEO.** Lee una URL (HTML + render headless), la puntúa y entrega PDF.
+pub struct SeoAuditTool;
+impl SeoAuditTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for SeoAuditTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[async_trait]
+impl Tool for SeoAuditTool {
+    fn name(&self) -> &str {
+        "seo_audit"
+    }
+    fn description(&self) -> &str {
+        "Auditoría SEO técnica on-page de una URL: descarga el HTML y RENDERIZA el JavaScript \
+         (sitios SPA/WordPress), y puntúa title, meta description, encabezados, móvil/viewport, \
+         datos estructurados, contenido, etc. Genera un PDF con la puntuación y acciones. Entrada: \
+         la URL del sitio (p. ej. «https://ejemplo.com»). Requiere Chrome."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let url = input.trim();
+        if url.is_empty() {
+            return Err("indica la URL del sitio a auditar".into());
+        }
+        let (path, score, final_url) = crate::seo_audit::audit_to_desktop(url).await?;
+        Ok(format!(
+            "Auditoría SEO de {final_url} ({score}/100) guardada en el Escritorio: {path}"
+        ))
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Creation
+    }
+}
+
 /// **Terminal real**: ejecuta un comando de shell y devuelve su salida. Es la forma
 /// ROBUSTA de "control del terminal" (no puppetea Terminal.app ni necesita permisos
 /// de Accesibilidad/Pantalla). Cada comando pasa por confirmación HITL (fail-closed).

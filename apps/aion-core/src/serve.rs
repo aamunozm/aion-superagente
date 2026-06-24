@@ -2676,6 +2676,34 @@ async fn agent(
             // Sin oferta con servicios en el contexto → cae al flujo normal (ReAct/charla).
         }
 
+        // 🔎 FAST-PATH SEO: «auditoría SEO de X» (o, en un proyecto, de su web). Lee la página de
+        // verdad (HTML crudo + render headless), la puntúa y entrega un PDF. Determinista.
+        if is_seo_audit(&body.task) {
+            crate::inner_state::set_focus("agente", "auditoría SEO");
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "thought", "text": "Hago la auditoría SEO: leo la página (incluido el render del JavaScript) y la puntúo." }).to_string(),
+                ))
+                .await;
+            if let Some(answer) = try_seo_audit(&body).await {
+                crate::awareness::record_outcome(!answer.contains("no pude completarla"));
+                agent_perceive_and_remember(body.task.clone(), answer.clone());
+                let _ = tx
+                    .send(
+                        Event::default().data(
+                            serde_json::json!({ "kind": "answer", "text": answer, "steps": 1 })
+                                .to_string(),
+                        ),
+                    )
+                    .await;
+                let _ = tx
+                    .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                    .await;
+                return;
+            }
+            // Sin URL que auditar → sigue el flujo normal.
+        }
+
         // ROUTER SEMÁNTICO (#4): para TODO mensaje que no fue charla trivial, decidimos por
         // SIGNIFICADO con embeddings (no por palabras). Solo si el margen es estrecho —de
         // verdad ambiguo— pedimos al clasificador LLM que lea el contexto completo.
@@ -2930,6 +2958,7 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::GenerateDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::GenerateOffertaTool::new()));
+        tools.register(Arc::new(crate::agent_tools::SeoAuditTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
         // 📘 SkillBook (Hermes): memoria PROCEDIMENTAL — cómo hacer cosas que ya funcionaron.
@@ -3406,6 +3435,7 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::GenerateDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::GenerateOffertaTool::new()));
+        tools.register(Arc::new(crate::agent_tools::SeoAuditTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
         // 💬 COMUNICACIONES en modo autónomo: SOLO lectura (agenda y contactos) para que el
@@ -7260,6 +7290,61 @@ async fn try_offerta_to_doc(engine: &dyn LlmEngine, body: &AgentBody) -> Option<
         ext.to_uppercase(),
         path.display()
     ))
+}
+
+/// ¿La tarea pide una AUDITORÍA SEO? (mención de SEO/posicionamiento + verbo de auditar/analizar).
+fn is_seo_audit(task: &str) -> bool {
+    let t = task.to_lowercase();
+    let seo = t.contains("seo") || t.contains("posicionamiento");
+    let audit = t.contains("audit")
+        || t.contains("analiz")
+        || t.contains("analís")
+        || t.contains("revis")
+        || t.contains("evalúa")
+        || t.contains("evalua")
+        || t.contains("informe")
+        || t.contains("diagnos")
+        || t.contains("chequea")
+        || t.contains("mejora");
+    seo && audit
+}
+
+/// Resuelve la URL a auditar: la de la tarea, o —si viene de un proyecto— la primera fuente WEB
+/// activa del proyecto. `None` si no hay ninguna.
+fn resolve_seo_url(body: &AgentBody) -> Option<String> {
+    if let Some(u) = extract_url(&body.task) {
+        return Some(u);
+    }
+    let pid = body.project_id.as_ref()?;
+    crate::projects::sources(pid)
+        .into_iter()
+        .find(|s| s.active && s.kind == "web")
+        .map(|s| {
+            let cand = if s.content.trim().starts_with("http") {
+                s.content.trim().to_string()
+            } else {
+                s.title.trim().to_string()
+            };
+            if cand.starts_with("http") {
+                cand
+            } else {
+                format!("https://{cand}")
+            }
+        })
+}
+
+/// FAST-PATH determinista de AUDITORÍA SEO: lee la URL (HTML crudo + render headless), la puntúa
+/// y entrega un PDF con la marca. Devuelve el mensaje con la ruta o `None` (→ flujo normal).
+async fn try_seo_audit(body: &AgentBody) -> Option<String> {
+    let url = resolve_seo_url(body)?;
+    match crate::seo_audit::audit_to_desktop(&url).await {
+        Ok((path, score, final_url)) => Some(format!(
+            "Auditoría SEO de {final_url} lista — **puntuación {score}/100**. La guardé en tu Escritorio:\n{path}"
+        )),
+        Err(e) => Some(format!(
+            "Intenté la auditoría SEO de {url} pero no pude completarla: {e}"
+        )),
+    }
 }
 
 /// Genera un documento branded (PDF/Word/HTML) desde Markdown y lo devuelve como descarga.
