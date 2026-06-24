@@ -349,6 +349,28 @@
     background: transparent;
     color: var(--text-3);
   }
+  /* Botón secundario LIGERO (ghost neutro): mismo lenguaje que .btn-danger pero sin peligro.
+     Para acciones no destructivas que no necesitan el peso del negro sólido. */
+  .btn-ghost {
+    background: transparent;
+    color: var(--text-2);
+    border: 1px solid var(--border-2);
+    box-shadow: none;
+    font-weight: 500;
+  }
+  .btn-ghost:hover {
+    background: var(--surface-1);
+    border-color: var(--text-3);
+    color: var(--text-1);
+    box-shadow: none;
+  }
+  .btn-ghost:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+    background: transparent;
+    color: var(--text-3);
+  }
 
   .input {
     width: 100%;

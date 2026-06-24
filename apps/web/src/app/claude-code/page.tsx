@@ -250,10 +250,10 @@ function MemoryByProject() {
       <div className="flex items-center justify-between mb-1">
         <h2 className="t-section" style={{ color: "var(--text-2)" }}>Memoria por proyecto</h2>
         <div className="flex gap-2">
-          <button className="btn text-xs" disabled={!!busy} onClick={restore} title="Restaurar/fusionar memoria desde un .jsonl">
+          <button className="btn btn-ghost text-xs" disabled={!!busy} onClick={restore} title="Restaurar/fusionar memoria desde un .jsonl">
             ⬆︎ Restaurar
           </button>
-          <button className="btn text-xs" disabled={!!busy} onClick={normalize} title="Unifica etiquetas (AION/aion, Peace Harmony AFC/peace-harmony)">
+          <button className="btn btn-ghost text-xs" disabled={!!busy} onClick={normalize} title="Unifica etiquetas (AION/aion, Peace Harmony AFC/peace-harmony)">
             Normalizar
           </button>
         </div>
@@ -312,16 +312,16 @@ function MemoryByProject() {
                   <button className="btn btn-gold text-xs" disabled={busy === p.project} onClick={confirmFree}>
                     Descargar y borrar
                   </button>
-                  <button className="btn text-xs" disabled={busy === p.project} onClick={() => setConfirmDel(null)}>
+                  <button className="btn btn-ghost text-xs" disabled={busy === p.project} onClick={() => setConfirmDel(null)}>
                     Cancelar
                   </button>
                 </div>
               ) : (
                 <div className="flex flex-wrap gap-2">
-                  <button className="btn text-xs" disabled={!!busy} onClick={() => download(p)}>
+                  <button className="btn btn-ghost text-xs" disabled={!!busy} onClick={() => download(p)}>
                     ⬇︎ Descargar backup
                   </button>
-                  <button className="btn text-xs" disabled={!!busy} onClick={() => updateBackup(p)} title="Fusiona la memoria actual del proyecto con un backup existente">
+                  <button className="btn btn-ghost text-xs" disabled={!!busy} onClick={() => updateBackup(p)} title="Fusiona la memoria actual del proyecto con un backup existente">
                     ⟳ Actualizar backup
                   </button>
                   <button className="btn btn-danger text-xs" disabled={!!busy} onClick={() => askFree(p)} title="Descarga el backup y borra de AION para liberar espacio">
