@@ -15,6 +15,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Cache ORT binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ort.pyke.io
+          key: ort-${{ runner.arch }}-2.0.0-rc.12
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
