@@ -16,8 +16,10 @@ import {
   downloadMemory,
   forgetProject,
   importMemory,
+  claudeCodeCost,
   memoryNormalize,
   memoryProjects,
+  setTokenPrices,
   vaultGet,
   vaultList,
   vaultRemove,
@@ -25,8 +27,10 @@ import {
   type ClaudeCodeAuditEntry,
   type ClaudeCodeStats,
   type ClaudeCodeStatus,
+  type CostData,
   type MemoryProjects,
   type ProjectMemory,
+  type TokenPrices,
   type VaultSecret,
 } from "@/lib/api";
 
@@ -274,6 +278,206 @@ function MemoryByProject() {
               )}
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+type ChartPoint = { label: string; value: number };
+
+/** Gráfico de área estilo bursátil (SVG puro): gradiente, rejilla, ejes y crosshair al hover. */
+function AreaChart({ data, color, fmtVal }: { data: ChartPoint[]; color: string; fmtVal: (v: number) => string }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const W = 720, H = 200, pl = 12, pr = 12, pt = 16, pb = 24;
+  const innerW = W - pl - pr, innerH = H - pt - pb;
+  const n = data.length;
+  if (n === 0) return <p className="text-sm py-6 text-center" style={{ color: "var(--text-3)" }}>Sin datos aún.</p>;
+  const max = Math.max(1e-9, ...data.map((d) => d.value));
+  const X = (i: number) => (n <= 1 ? pl + innerW / 2 : pl + (i * innerW) / (n - 1));
+  const Y = (v: number) => pt + innerH - (v / max) * innerH;
+  const line = data.map((d, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(d.value).toFixed(1)}`).join(" ");
+  const area = `${line} L${X(n - 1).toFixed(1)},${(pt + innerH).toFixed(1)} L${X(0).toFixed(1)},${(pt + innerH).toFixed(1)} Z`;
+  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - r.left) / r.width) * W;
+    const i = Math.max(0, Math.min(n - 1, Math.round(((x - pl) / innerW) * (n - 1))));
+    setHover(i);
+  };
+  const tipX = hover === null ? 0 : Math.min(Math.max(X(hover), 58), W - 58);
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block" }} onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+      <defs>
+        <linearGradient id="areafill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.30" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {[0, 0.5, 1].map((f) => (
+        <g key={f}>
+          <line x1={pl} x2={W - pr} y1={pt + innerH * (1 - f)} y2={pt + innerH * (1 - f)} stroke="var(--border)" strokeWidth="1" strokeDasharray="3 4" />
+          <text x={W - pr} y={pt + innerH * (1 - f) - 3} textAnchor="end" fontSize="9" fill="var(--text-3)">{fmtVal(max * f)}</text>
+        </g>
+      ))}
+      <path d={area} fill="url(#areafill)" />
+      <path d={line} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={X(n - 1)} cy={Y(data[n - 1].value)} r="3" fill={color} />
+      {[...new Set([0, Math.floor((n - 1) / 2), n - 1])].map((i) => (
+        <text key={i} x={X(i)} y={H - 6} textAnchor={i === 0 ? "start" : i === n - 1 ? "end" : "middle"} fontSize="9" fill="var(--text-3)">{data[i].label}</text>
+      ))}
+      {hover !== null && (
+        <g>
+          <line x1={X(hover)} x2={X(hover)} y1={pt} y2={pt + innerH} stroke={color} strokeWidth="1" strokeDasharray="2 3" opacity="0.6" />
+          <circle cx={X(hover)} cy={Y(data[hover].value)} r="4" fill={color} stroke="#fff" strokeWidth="1.5" />
+          <g transform={`translate(${tipX},${pt + 6})`}>
+            <rect x="-54" y="-4" width="108" height="32" rx="6" fill="#11110f" opacity="0.94" />
+            <text x="0" y="8" textAnchor="middle" fontSize="9" fill="#cbb78a">{data[hover].label}</text>
+            <text x="0" y="21" textAnchor="middle" fontSize="11" fontWeight="bold" fill="#fff">{fmtVal(data[hover].value)}</text>
+          </g>
+        </g>
+      )}
+    </svg>
+  );
+}
+
+/** Barras verticales con gradiente (mensual). */
+function MoneyBars({ data, color, fmtVal }: { data: ChartPoint[]; color: string; fmtVal: (v: number) => string }) {
+  if (data.length === 0) return <p className="text-sm py-4 text-center" style={{ color: "var(--text-3)" }}>Sin datos aún.</p>;
+  const max = Math.max(1e-9, ...data.map((d) => d.value));
+  return (
+    <div className="flex items-end gap-3" style={{ height: 130 }}>
+      {data.map((d, i) => (
+        <div key={i} className="flex-1 flex flex-col items-center justify-end" style={{ height: "100%" }} title={`${d.label}: ${fmtVal(d.value)}`}>
+          <span className="text-[10px] mb-1 tabular-nums" style={{ color: "var(--text-2)" }}>{fmtVal(d.value)}</span>
+          <div className="w-full rounded-t transition-all" style={{ height: `${Math.max(4, (d.value / max) * 100)}%`, background: `linear-gradient(180deg, ${color}, ${color}44)` }} />
+          <span className="text-[10px] mt-1.5" style={{ color: "var(--text-3)" }}>{d.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const CURRENCIES: ("USD" | "EUR" | "CLP")[] = ["CLP", "USD", "EUR"];
+
+/** Panel de COSTE y AHORRO en 3 monedas con gráficos en tiempo real. Honesto: coste REAL de los
+ *  tokens de memoria servidos (verificable en la factura) + ahorro ESTIMADO vs cargar todo el corpus. */
+function CostPanel({ stats }: { stats: ClaudeCodeStats | null }) {
+  const [cost, setCost] = useState<CostData | null>(null);
+  const [cur, setCur] = useState<"USD" | "EUR" | "CLP">("CLP");
+  const [model, setModel] = useState("claude-sonnet");
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<TokenPrices | null>(null);
+
+  const load = useCallback(() => { claudeCodeCost().then((c) => { if (c) setCost(c); }).catch(() => {}); }, []);
+  useEffect(() => { load(); const iv = setInterval(load, 15_000); return () => clearInterval(iv); }, [load]);
+
+  if (!cost) return null;
+  const fx = cost.fx;
+  const price = cost.prices.models.find((m) => m.model === model) ?? cost.prices.models[0];
+  const usdPerTok = (price?.input_per_m ?? 0) / 1e6;
+  const toCur = (usd: number) => (cur === "USD" ? usd : cur === "EUR" ? usd * fx.usd_eur : usd * fx.usd_clp);
+  const fmt = (usd: number) =>
+    new Intl.NumberFormat(cur === "CLP" ? "es-CL" : cur === "EUR" ? "de-DE" : "en-US", {
+      style: "currency", currency: cur, maximumFractionDigits: cur === "CLP" ? 0 : 2, minimumFractionDigits: cur === "CLP" ? 0 : 2,
+    }).format(toCur(usd));
+
+  const monthKey = new Date().toISOString().slice(0, 7);
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const monthTokens = cost.monthly.find((m) => m.month === monthKey)?.tokens ?? 0;
+  const todayTokens = cost.daily.find((d) => d.day === todayKey)?.tokens ?? 0;
+  const corpus = stats?.corpus_tokens ?? 0;
+  const avg = stats?.avg_tokens_per_call ?? 0;
+  const calls = stats?.total_calls ?? 0;
+  const savedUSD = Math.max(0, corpus - avg) * calls * usdPerTok;
+
+  const dailyMoney: ChartPoint[] = cost.daily.map((d) => ({ label: d.day.slice(5), value: d.tokens * usdPerTok }));
+  const monthlyMoney: ChartPoint[] = cost.monthly.map((m) => ({ label: m.month, value: m.tokens * usdPerTok }));
+
+  return (
+    <div className="card" style={{ border: "1px solid var(--border)" }}>
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+        <div className="flex items-center gap-2">
+          <span style={{ fontSize: 16 }}>💹</span>
+          <h2 className="t-section" style={{ color: "var(--text-2)" }}>Coste y ahorro en tiempo real</h2>
+        </div>
+        <div className="flex items-center gap-2">
+          {/* Moneda */}
+          <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid var(--border)" }}>
+            {CURRENCIES.map((c) => (
+              <button key={c} onClick={() => setCur(c)} className="text-xs px-2.5 py-1"
+                style={{ background: cur === c ? "var(--accent)" : "transparent", color: cur === c ? "#fff" : "var(--text-2)" }}>{c}</button>
+            ))}
+          </div>
+          {/* Modelo (para el precio del puente) */}
+          <select value={model} onChange={(e) => setModel(e.target.value)} className="text-xs px-2 py-1 rounded-lg"
+            style={{ background: "var(--surface-1)", border: "1px solid var(--border)", color: "var(--text-2)" }}>
+            {cost.prices.models.filter((m) => m.model !== "local").map((m) => (
+              <option key={m.model} value={m.model}>{m.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <p className="text-xs mb-4 leading-relaxed" style={{ color: "var(--text-3)" }}>
+        Lo que la <b>memoria de AION</b> le cuesta a Claude Code: tokens servidos × precio de entrada del
+        modelo. Coste <b>real</b> (verificable en tu factura); el ahorro es una <b>estimación</b> vs. cargar
+        todo el corpus en cada consulta.
+      </p>
+
+      {/* Héroes */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+        {[
+          { k: "Coste total", v: fmt(cost.total_tokens * usdPerTok), s: `${fmtTokens(cost.total_tokens)} tok servidos`, accent: "var(--text-1)" },
+          { k: "Este mes", v: fmt(monthTokens * usdPerTok), s: `${fmtTokens(monthTokens)} tok`, accent: "var(--text-1)" },
+          { k: "Hoy", v: fmt(todayTokens * usdPerTok), s: `${fmtTokens(todayTokens)} tok`, accent: "var(--text-1)" },
+          { k: "Ahorro estimado", v: fmt(savedUSD), s: "vs. cargar todo el corpus", accent: "var(--accent)" },
+        ].map((h) => (
+          <div key={h.k} className="rounded-lg p-3" style={{ background: "var(--surface-1)" }}>
+            <div className="text-xl font-bold tabular-nums" style={{ color: h.accent }}>{h.v}</div>
+            <div className="text-[11px] mt-0.5" style={{ color: "var(--text-2)" }}>{h.k}</div>
+            <div className="text-[10px]" style={{ color: "var(--text-3)" }}>{h.s}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Gráfico diario (área bursátil) */}
+      <div className="mb-5">
+        <div className="text-xs font-medium uppercase tracking-wide mb-1" style={{ color: "var(--text-3)" }}>Coste diario</div>
+        <AreaChart data={dailyMoney} color="var(--accent)" fmtVal={fmt} />
+      </div>
+
+      {/* Gráfico mensual (barras) */}
+      <div className="mb-4">
+        <div className="text-xs font-medium uppercase tracking-wide mb-2" style={{ color: "var(--text-3)" }}>Coste mensual</div>
+        <MoneyBars data={monthlyMoney} color="var(--accent)" fmtVal={fmt} />
+      </div>
+
+      {/* Pie: FX + precios */}
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]" style={{ color: "var(--text-3)" }}>
+        <span>
+          FX {fx.live ? "en vivo" : "caché"}: 1 USD = {fx.usd_clp.toFixed(0)} CLP · {fx.usd_eur.toFixed(3)} EUR
+          {fx.fetched_at ? ` · ${new Date(fx.fetched_at).toLocaleDateString()}` : ""}
+        </span>
+        <button className="btn text-xs" onClick={() => { setDraft(JSON.parse(JSON.stringify(cost.prices))); setEditing((v) => !v); }}>
+          {editing ? "Cerrar" : "Editar precios"}
+        </button>
+      </div>
+
+      {editing && draft && (
+        <div className="mt-3 rounded-lg p-3" style={{ background: "var(--surface-1)" }}>
+          <p className="text-[11px] mb-2" style={{ color: "var(--text-3)" }}>
+            Precio de ENTRADA (USD por 1M tokens). Anthropic no tiene API pública de precios → ajústalos
+            con los vigentes. {cost.prices.updated_at}
+          </p>
+          {draft.models.map((m, i) => (
+            <div key={m.model} className="flex items-center gap-2 mb-1.5 text-sm">
+              <span className="w-44 shrink-0 truncate" style={{ color: "var(--text-2)" }}>{m.label}</span>
+              <input type="number" step="0.01" value={m.input_per_m}
+                onChange={(e) => setDraft((d) => { if (!d) return d; const c = { ...d, models: [...d.models] }; c.models[i] = { ...m, input_per_m: parseFloat(e.target.value) || 0 }; return c; })}
+                className="w-28 text-sm px-2 py-1 rounded" style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text-1)" }} />
+              <span className="text-[10px]" style={{ color: "var(--text-3)" }}>USD/1M</span>
+            </div>
+          ))}
+          <button className="btn btn-gold text-sm mt-2" onClick={async () => { if (draft) { await setTokenPrices(draft).catch(() => {}); setEditing(false); load(); } }}>Guardar precios</button>
         </div>
       )}
     </div>
@@ -621,6 +825,9 @@ export default function ClaudeCodePage() {
                 </div>
               </div>
             </div>
+
+            {/* ── Coste y ahorro en tiempo real (USD/EUR/CLP) ── */}
+            <CostPanel stats={stats} />
 
             {/* ── Privacidad y datos confidenciales ── */}
             <PrivacyPanel />

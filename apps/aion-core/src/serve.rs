@@ -966,6 +966,8 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/claude-code/test", post(claude_code_test))
         .route("/api/claude-code/audit", get(claude_code_audit))
         .route("/api/claude-code/stats", get(claude_code_stats))
+        .route("/api/claude-code/cost", get(claude_code_cost))
+        .route("/api/claude-code/prices", post(claude_code_set_prices))
         // Bootstrap del token local: la UI lo pide una vez al arrancar (GET, Origin local).
         .route("/api/auth/token", get(api_auth_token))
         .route("/api/apikeys", get(apikeys_list).post(apikeys_set))
@@ -7901,6 +7903,50 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
         "last_activity": last,
         "sessions": sessions_tail,
     }))
+}
+
+/// **Coste y ahorro** del puente: serie diaria/mensual de tokens servidos + tabla de precios
+/// (editable) + tipos de cambio en vivo. El frontend calcula el dinero (3 monedas, por modelo).
+async fn claude_code_cost() -> Json<serde_json::Value> {
+    use std::collections::BTreeMap;
+    let entries = crate::claude_mcp::audit_tail(5000);
+    let mut by_day: BTreeMap<String, u64> = BTreeMap::new();
+    let mut by_month: BTreeMap<String, u64> = BTreeMap::new();
+    let mut total: u64 = 0;
+    for e in &entries {
+        let tok = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        total += tok;
+        if let Some(ts) = e.get("ts").and_then(|v| v.as_str()) {
+            // ts RFC3339 → "YYYY-MM-DD" y "YYYY-MM" por prefijo (estable, sin parseo de fecha).
+            if ts.len() >= 10 {
+                *by_day.entry(ts[..10].to_string()).or_insert(0) += tok;
+            }
+            if ts.len() >= 7 {
+                *by_month.entry(ts[..7].to_string()).or_insert(0) += tok;
+            }
+        }
+    }
+    let daily: Vec<serde_json::Value> = by_day
+        .iter()
+        .map(|(d, t)| serde_json::json!({ "day": d, "tokens": t }))
+        .collect();
+    let monthly: Vec<serde_json::Value> = by_month
+        .iter()
+        .map(|(m, t)| serde_json::json!({ "month": m, "tokens": t }))
+        .collect();
+    Json(serde_json::json!({
+        "total_tokens": total,
+        "daily": daily,
+        "monthly": monthly,
+        "prices": crate::pricing::load(),
+        "fx": crate::pricing::fx().await,
+    }))
+}
+
+/// Actualiza la tabla de precios por token (editable desde la UI, sin API oficial de Anthropic).
+async fn claude_code_set_prices(Json(p): Json<crate::pricing::Prices>) -> Json<serde_json::Value> {
+    crate::pricing::save(&p);
+    Json(serde_json::json!({ "ok": true }))
 }
 
 // ── Bandeja de AION (mensajes proactivos del agente hacia ti) ───────────────
