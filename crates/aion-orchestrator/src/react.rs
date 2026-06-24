@@ -918,6 +918,39 @@ const ACTION_VERBS: &[&str] = &[
 /// expresiones legítimas («reconozco que…», «puedo reconocerte») como mentira.
 const ACTION_CLAIMS: &[(&str, &[&str], &[&str])] = &[
     (
+        "crear o abrir un documento/archivo",
+        &[
+            "documento está en tu escritorio",
+            "documento en tu escritorio",
+            "lo dejé en tu escritorio",
+            "lo dejé en el escritorio",
+            "lo guardé en el escritorio",
+            "lo guardé en tu escritorio",
+            "archivo en el escritorio",
+            "guardado en tu escritorio",
+            "documento creado",
+            "he creado el documento",
+            "he creado el pdf",
+            "generé el documento",
+            "generé el pdf",
+            "creé el pdf",
+            "el pdf está en",
+            ".pdf en tu escritorio",
+            "ya deberías tener el pdf",
+            "lo he abierto",
+            "ya está abierto",
+            "✅ abierto",
+            "✅ listo",
+        ],
+        &[
+            "generate_document",
+            "make_document",
+            "make_note",
+            "run_command",
+            "shell",
+        ],
+    ),
+    (
         "ejecutar un comando en la terminal",
         &[
             "ejecuté el comando",

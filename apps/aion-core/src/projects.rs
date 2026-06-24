@@ -236,6 +236,51 @@ pub fn remove_output(pid: &str, oid: &str) {
     write_vec(&studio_path(pid), &all);
 }
 
+// ── Conversación del proyecto (persistente) ───────────────────────────────────
+
+/// Un turno de la conversación del proyecto. Se persiste para que NO se pierda al salir y
+/// volver al proyecto (antes el chat vivía solo en memoria del endpoint /api/chat).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMsg {
+    pub role: String,
+    pub text: String,
+    pub at: String,
+}
+
+fn chat_path(pid: &str) -> PathBuf {
+    base().join(pid).join("chat.json")
+}
+
+/// Historial de conversación del proyecto (vacío si nunca se habló).
+pub fn chat_history(pid: &str) -> Vec<ChatMsg> {
+    read_vec(&chat_path(pid))
+}
+
+/// Añade un turno a la conversación del proyecto. Acota a los últimos turnos para no crecer
+/// sin fin. Devuelve el mensaje guardado.
+pub fn add_chat_msg(pid: &str, role: &str, text: &str) -> ChatMsg {
+    let m = ChatMsg {
+        role: role.trim().to_string(),
+        text: text.trim().to_string(),
+        at: now(),
+    };
+    let mut all = chat_history(pid);
+    all.push(m.clone());
+    let n = all.len();
+    if n > 200 {
+        all.drain(0..n - 200);
+    }
+    write_vec(&chat_path(pid), &all);
+    touch(pid);
+    m
+}
+
+/// Borra la conversación del proyecto (nuevo chat).
+pub fn clear_chat(pid: &str) {
+    write_vec(&chat_path(pid), &Vec::<ChatMsg>::new());
+    touch(pid);
+}
+
 /// Contexto de anclaje (grounding) del proyecto para el chat/agente: el objetivo
 /// más el texto de las fuentes ACTIVAS (recortado). Así el agente responde con
 /// foco en el material del proyecto, no en general.

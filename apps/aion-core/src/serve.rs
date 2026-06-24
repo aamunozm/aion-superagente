@@ -949,6 +949,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Generación de documentos branded (PDF/Word/HTML) con aion-docgen.
         .route("/api/documents/generate", post(documents_generate))
         .route("/api/project/studio/export", post(project_studio_export))
+        // Conversación PERSISTENTE del proyecto (no se pierde al salir y volver).
+        .route("/api/project/chat/history", post(project_chat_history))
+        .route("/api/project/chat/append", post(project_chat_append))
+        .route("/api/project/chat/clear", post(project_chat_clear))
         .route("/api/brand", get(brand_get).post(brand_set))
         // MCP: Claude Code consulta la memoria de AION bajo demanda (Bearer propio).
         .route(
@@ -2456,6 +2460,10 @@ struct AgentBody {
     /// el modelo ALUCINA el antecedente.
     #[serde(default)]
     context: Option<String>,
+    /// Si la petición viene del workspace de un PROYECTO: se anclan (grounding) sus fuentes
+    /// activas en el contexto. Así el agente del proyecto razona fundamentado en sus fuentes.
+    #[serde(default)]
+    project_id: Option<String>,
 }
 
 /// Extrae la primera URL http(s) de un texto (para el fast-path de lectura web).
@@ -2527,6 +2535,20 @@ async fn agent(
     // FEEDBACK CORRECTIVO RETROACTIVO: si este mensaje desmiente la última tarea
     // que se dio por buena, el desenlace se reescribe como fallo antes de seguir.
     maybe_apply_corrective_feedback(&body.task);
+
+    // PROYECTO: si viene del workspace de un proyecto, anclar sus fuentes activas en el
+    // contexto del agente (grounding), para que razone fundamentado en el proyecto.
+    let mut body = body;
+    if let Some(pid) = body.project_id.clone() {
+        let g = crate::projects::grounding(&pid);
+        if !g.trim().is_empty() {
+            body.context = Some(match body.context.take() {
+                Some(c) if !c.trim().is_empty() => format!("{g}\n\n{c}"),
+                _ => g,
+            });
+        }
+    }
+
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
 
     let engine = active_engine();
@@ -6577,6 +6599,33 @@ async fn render_document_response(
         bytes,
     )
         .into_response()
+}
+
+#[derive(Deserialize)]
+struct ProjChatRef {
+    project_id: String,
+}
+/// Historial persistente de la conversación de un proyecto (para restaurarla al abrirlo).
+async fn project_chat_history(Json(b): Json<ProjChatRef>) -> Json<serde_json::Value> {
+    Json(
+        serde_json::json!({ "ok": true, "messages": crate::projects::chat_history(&b.project_id) }),
+    )
+}
+#[derive(Deserialize)]
+struct ProjChatAppend {
+    project_id: String,
+    role: String,
+    text: String,
+}
+/// Persiste un turno (lo llama el workspace tras cada mensaje del usuario y del agente).
+async fn project_chat_append(Json(b): Json<ProjChatAppend>) -> Json<serde_json::Value> {
+    crate::projects::add_chat_msg(&b.project_id, &b.role, &b.text);
+    Json(serde_json::json!({ "ok": true }))
+}
+/// Borra la conversación de un proyecto (nuevo chat).
+async fn project_chat_clear(Json(b): Json<ProjChatRef>) -> Json<serde_json::Value> {
+    crate::projects::clear_chat(&b.project_id);
+    Json(serde_json::json!({ "ok": true }))
 }
 
 /// Perfil de marca actual (logo/colores/idioma/numeración) usado por los documentos.

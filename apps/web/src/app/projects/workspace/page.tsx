@@ -17,7 +17,10 @@ import {
   projectAudioUrl,
   projectStudioRemove,
   projectStudioExport,
-  chatStream,
+  agentStream,
+  projectChatHistory,
+  projectChatAppend,
+  confirmDecision,
   type Project,
   type ProjectSource,
   type ProjectOutput,
@@ -65,10 +68,12 @@ export default function ProjectWorkspace() {
   const [highlightSrc, setHighlightSrc] = useState<string | null>(null);
   const srcRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
-  // Chat
+  // Chat (AGENTE con todas las herramientas + grounding del proyecto)
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  const [status, setStatus] = useState(""); // pensamiento/acción en vivo del agente
+  const [confirm, setConfirm] = useState<{ id: string; text: string } | null>(null); // HITL
   const endRef = useRef<HTMLDivElement>(null);
 
   // Studio
@@ -88,6 +93,14 @@ export default function ProjectWorkspace() {
     setProject(r.project);
     setSources(r.sources ?? []);
     setOutputs(r.outputs ?? []);
+    // Restaura la conversación PERSISTIDA del proyecto (ya no se pierde al salir y volver).
+    projectChatHistory(id)
+      .then((h) =>
+        setMessages(
+          h.map((m) => ({ role: m.role === "user" ? "user" : "assistant", text: m.text }) as Msg),
+        ),
+      )
+      .catch(() => {});
   }
   useEffect(() => {
     if (id) load();
@@ -164,27 +177,49 @@ export default function ProjectWorkspace() {
     setInput("");
     setMessages((m) => [...m, { role: "user", text: q }, { role: "assistant", text: "" }]);
     setStreaming(true);
-    await chatStream(
+    setStatus("");
+    projectChatAppend(id, "user", q).catch(() => {});
+    const setLast = (text: string) =>
+      setMessages((m) => {
+        const copy = [...m];
+        copy[copy.length - 1] = { role: "assistant", text };
+        return copy;
+      });
+    let finalText = "";
+    // AGENTE con grounding del proyecto: razona, USA herramientas reales (crea PDF/Word, busca…),
+    // y NO puede fingir (el honesty_guard corre sobre acciones reales).
+    await agentStream(
       q,
-      false,
       (ev) => {
-        if (ev.kind === "answer")
-          setMessages((m) => {
-            const copy = [...m];
-            copy[copy.length - 1] = { role: "assistant", text: copy[copy.length - 1].text + ev.text };
-            return copy;
-          });
-        else if (ev.kind === "error")
-          setMessages((m) => {
-            const copy = [...m];
-            copy[copy.length - 1] = { role: "assistant", text: `⚠️ ${ev.text}` };
-            return copy;
-          });
+        if (ev.kind === "thought" || ev.kind === "action") {
+          setStatus(ev.text || "");
+        } else if (ev.kind === "observation") {
+          setStatus("");
+        } else if (ev.kind === "answer" || ev.kind === "ask") {
+          finalText = ev.text;
+          setStatus("");
+          setLast(ev.text);
+        } else if (ev.kind === "confirm") {
+          setConfirm({ id: ev.id, text: ev.text });
+        } else if (ev.kind === "error") {
+          finalText = `⚠️ ${ev.text}`;
+          setStatus("");
+          setLast(`⚠️ ${ev.text}`);
+        }
       },
-      `proj:${id}`,
+      undefined,
+      undefined,
       id,
     );
     setStreaming(false);
+    setStatus("");
+    if (finalText) projectChatAppend(id, "assistant", finalText).catch(() => {});
+  }
+
+  async function decide(approved: boolean) {
+    if (!confirm) return;
+    await confirmDecision(confirm.id, approved).catch(() => {});
+    setConfirm(null);
   }
 
   async function generate(kind: string) {
@@ -434,13 +469,41 @@ export default function ProjectWorkspace() {
                       {m.text}
                     </Markdown>
                   ) : (
-                    m.text || (streaming && i === messages.length - 1 ? "…" : "")
+                    m.text ||
+                    (streaming && i === messages.length - 1 ? (
+                      <span className="italic" style={{ color: "var(--text-3)" }}>
+                        {status ? `⚙️ ${status}` : "pensando…"}
+                      </span>
+                    ) : (
+                      ""
+                    ))
                   )}
                 </div>
               </div>
             ))}
             <div ref={endRef} />
           </div>
+          {confirm && (
+            <div
+              className="px-6 py-3 shrink-0"
+              style={{ borderTop: "1px solid var(--border)", background: "var(--surface-1)" }}
+            >
+              <p className="text-xs mb-1" style={{ color: "var(--text-2)" }}>
+                AION pide tu OK para una acción sensible:
+              </p>
+              <p className="text-sm mb-2" style={{ color: "var(--text-1)" }}>
+                {confirm.text}
+              </p>
+              <div className="flex gap-2">
+                <button className="btn btn-gold text-xs" onClick={() => decide(true)}>
+                  Aprobar
+                </button>
+                <button className="btn btn-ghost text-xs" onClick={() => decide(false)}>
+                  Rechazar
+                </button>
+              </div>
+            </div>
+          )}
           <form
             onSubmit={(e) => {
               e.preventDefault();

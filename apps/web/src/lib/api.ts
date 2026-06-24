@@ -654,15 +654,30 @@ export async function agentStream(
   onEvent: (e: AgentEvent) => void,
   context?: string,
   signal?: AbortSignal,
+  projectId?: string,
 ): Promise<void> {
   const res = await fetch(`${BRIDGE_URL}/api/agent`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ task, lang: lang(), context }),
+    body: JSON.stringify({ task, lang: lang(), context, project_id: projectId }),
     signal,
   });
   await readSse(res, onEvent);
 }
+
+/** Conversación persistente de un proyecto. */
+export type ProjectChatMsg = { role: string; text: string; at: string };
+export async function projectChatHistory(project_id: string): Promise<ProjectChatMsg[]> {
+  const r = await jpost<{ ok: boolean; messages?: ProjectChatMsg[] }>(
+    "/api/project/chat/history",
+    { project_id },
+  );
+  return r.messages ?? [];
+}
+export const projectChatAppend = (project_id: string, role: string, text: string) =>
+  jpost<{ ok: boolean }>("/api/project/chat/append", { project_id, role, text });
+export const projectChatClear = (project_id: string) =>
+  jpost<{ ok: boolean }>("/api/project/chat/clear", { project_id });
 
 /** Equipo multiagente: orquestador + especialistas. Emite la actividad por rol. */
 export async function crewStream(
