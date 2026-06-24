@@ -1501,13 +1501,23 @@ impl Tool for GenerateOffertaTool {
         "generate_offerta"
     }
     fn description(&self) -> &str {
-        "Crea una OFERTA/propuesta comercial RICA en PDF (estilo agencia: hero, tarjetas, tabla \
-         de precios, comparativa de costes, beneficios, firma) y la abre. Úsala para «hazme una \
-         oferta/propuesta para [cliente]». Entrada: una línea por dato, formato «clave: valor». \
+        "Crea una OFERTA/propuesta comercial RICA en PDF (estilo agencia: hero, tabla de precios, \
+         comparativa de costes, beneficios, condiciones y firma) y la abre. Úsala para «hazme una \
+         oferta/propuesta para [cliente]». ENTRADA: una línea por dato, «clave: valor». OBLIGATORIO \
+         incluir el cliente Y TODOS los servicios con su precio EN LA MISMA llamada (no en pasos \
+         separados). Ejemplo COMPLETO que debes replicar:\n\
+         cliente: Caffè Roma\n\
+         titular: Più clienti per il tuo locale\n\
+         estilo: Plasma · teal\n\
+         servizio: Sito web vetrina | 900€ | una tantum\n\
+         servizio: Gestione SEO | 150€ | / mese\n\
+         comparativa: Agenzia | 450€/mese | 100\n\
+         comparativa: ProntoClick | 150€/mese | 35\n\
          Claves simples: cliente, titular, pitch, subtitulo, canone (precio recurrente), estilo \
-         (Slate · oro | Plasma · teal | Editoriale · serif | Notte · bold). Claves REPETIBLES: \
-         servizio: Título | precio | nota · valore: Lead | texto · tarjeta: Título | descripción \
-         · comparativa: Etiqueta | valor | porcentaje. TÚ redactas los datos. Requiere Chrome."
+         (Slate · oro | Plasma · teal | Editoriale · serif | Notte · bold). REPETIBLES: \
+         «servizio: Título | precio | nota» (UNA por servicio, AL MENOS UNA), «valore: Lead | texto», \
+         «tarjeta: Título | descripción», «comparativa: Etiqueta | valor | porcentaje». TÚ redactas \
+         los datos. Requiere Chrome."
     }
     async fn run(&self, input: &str) -> Result<String, String> {
         let mut f = aion_docgen::OffertaFacts {
@@ -1535,12 +1545,25 @@ impl Tool for GenerateOffertaTool {
                     f.recurring_value = val;
                     f.recurring_label = "Dal 2° mese (IVA esclusa)".into();
                 }
-                "servizio" | "servicio" | "service" => f.services.push(aion_docgen::OfferRow {
-                    title: p(0),
-                    desc: String::new(),
-                    price: p(1),
-                    price_note: p(2),
-                }),
+                // «servizio: Título | precio | nota» o, con descripción, «Título | desc | precio | nota».
+                "servizio" | "servicio" | "service" => {
+                    let row = if parts.len() >= 4 {
+                        aion_docgen::OfferRow {
+                            title: p(0),
+                            desc: p(1),
+                            price: p(2),
+                            price_note: p(3),
+                        }
+                    } else {
+                        aion_docgen::OfferRow {
+                            title: p(0),
+                            desc: String::new(),
+                            price: p(1),
+                            price_note: p(2),
+                        }
+                    };
+                    f.services.push(row);
+                }
                 "valore" | "valor" | "beneficio" => f.benefits.push(aion_docgen::Benefit {
                     lead: p(0),
                     body: p(1),
@@ -1558,8 +1581,23 @@ impl Tool for GenerateOffertaTool {
                 _ => {}
             }
         }
-        if f.client.is_empty() && f.services.is_empty() {
-            return Err("necesito al menos «cliente:» y un «servizio: Título | precio» (ver formato en la descripción)".into());
+        // Una oferta SIN servicios no es una oferta (saldría un PDF vacío de precios). Si faltan,
+        // NO generamos un documento degradado en silencio: devolvemos un error que ENSEÑA el formato
+        // para que el agente reintente incluyendo los servicios en la MISMA llamada (auto-corrección).
+        if f.services.is_empty() {
+            return Err(
+                "la oferta necesita AL MENOS un servicio con su precio. Vuelve a llamar a \
+                 generate_offerta incluyendo una línea «servizio:» por cada servicio (todo en la \
+                 misma llamada), por ejemplo:\n\
+                 cliente: Caffè Roma\n\
+                 servizio: Sito web vetrina | 900€ | una tantum\n\
+                 servizio: Gestione SEO | 150€ | / mese\n\
+                 (formato por servicio: Título | precio | nota)."
+                    .into(),
+            );
+        }
+        if f.client.is_empty() {
+            f.client = "Spett.le Cliente".into();
         }
         // Tono automático para barras sin tono: la más cara roja, la más barata (última) verde.
         let n = f.comparison.len();

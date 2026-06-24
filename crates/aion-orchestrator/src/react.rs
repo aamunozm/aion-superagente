@@ -273,7 +273,9 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
              por defecto txt). TÚ redactas todo el contenido. Para una NOTA en la app Notas usa \
              make_note «Título ::: contenido». Para una OFERTA o propuesta comercial a un cliente \
              usa generate_offerta (genera un PDF RICO: hero, tabla de precios, comparativa y firma; \
-             entrada «clave: valor», ver su descripción). Para un documento PROFESIONAL con tu marca \
+             entrada «clave: valor»). En UNA sola llamada incluye el cliente Y una línea «servizio: \
+             Título | precio | nota» por CADA servicio con su precio (sin los servicios la oferta \
+             sale vacía); ver el ejemplo completo en su descripción. Para un documento PROFESIONAL con tu marca \
              en PDF/Word usa generate_document. Son robustos y NO necesitan ver la pantalla ni \
              teclear. NUNCA uses screen_see/screen_elements/pc_type para redactar un documento o nota.\n\
              • PREGUNTAR AL USUARIO: si te falta un dato que SOLO el usuario tiene (qué app o \
