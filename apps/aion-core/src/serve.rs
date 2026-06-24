@@ -954,6 +954,14 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/project/chat/append", post(project_chat_append))
         .route("/api/project/chat/clear", post(project_chat_clear))
         .route("/api/brand", get(brand_get).post(brand_set))
+        // Estilos de documento (galería tipo Canva): listar/guardar/borrar/extraer + oferta.
+        .route(
+            "/api/doc-styles",
+            get(doc_styles_list).post(doc_styles_save),
+        )
+        .route("/api/doc-styles/remove", post(doc_styles_remove))
+        .route("/api/doc-styles/extract", post(doc_styles_extract))
+        .route("/api/documents/offerta", post(documents_offerta))
         // MCP: Claude Code consulta la memoria de AION bajo demanda (Bearer propio).
         .route(
             "/mcp",
@@ -6638,6 +6646,207 @@ async fn brand_set(Json(b): Json<aion_docgen::BrandProfile>) -> Json<serde_json:
     match b.save(crate::agent_tools::brand_profile_path()) {
         Ok(_) => Json(serde_json::json!({ "ok": true, "brand": b })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+// ── Estilos de documento (galería + extracción + guardado) ───────────────────
+
+fn doc_styles_dir() -> std::path::PathBuf {
+    let d = crate::app_data_dir().join("doc_styles");
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+fn style_slug(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    s.trim_matches('-').to_string()
+}
+
+/// Lista los estilos disponibles: presets de fábrica + los guardados por el usuario.
+async fn doc_styles_list() -> Json<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = aion_docgen::style_presets()
+        .into_iter()
+        .map(|s| serde_json::json!({ "name": s.name, "builtin": true, "style": s }))
+        .collect();
+    if let Ok(rd) = std::fs::read_dir(doc_styles_dir()) {
+        for e in rd.flatten() {
+            if e.path().extension().map(|x| x == "json").unwrap_or(false) {
+                let s = aion_docgen::DocStyle::load(e.path());
+                out.push(serde_json::json!({ "name": s.name, "builtin": false, "style": s }));
+            }
+        }
+    }
+    Json(serde_json::json!({ "ok": true, "styles": out }))
+}
+
+#[derive(Deserialize)]
+struct StyleSave {
+    style: aion_docgen::DocStyle,
+}
+/// Guarda un estilo con nombre (galería del usuario).
+async fn doc_styles_save(Json(b): Json<StyleSave>) -> Json<serde_json::Value> {
+    let slug = style_slug(&b.style.name);
+    if slug.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "el estilo necesita un nombre" }));
+    }
+    let p = doc_styles_dir().join(format!("{slug}.json"));
+    match b.style.save(&p) {
+        Ok(_) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct StyleRemove {
+    name: String,
+}
+async fn doc_styles_remove(Json(b): Json<StyleRemove>) -> Json<serde_json::Value> {
+    let p = doc_styles_dir().join(format!("{}.json", style_slug(&b.name)));
+    let _ = std::fs::remove_file(p);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// Renderiza la 1ª página de un PDF a PNG (macOS: QuickLook) para extraer su paleta.
+fn pdf_to_png(pdf: &[u8]) -> Result<Vec<u8>, String> {
+    let dir = std::env::temp_dir();
+    let stem = format!("aion-ref-{}", uuid::Uuid::new_v4());
+    let pdf_path = dir.join(format!("{stem}.pdf"));
+    std::fs::write(&pdf_path, pdf).map_err(|e| format!("no pude escribir el PDF: {e}"))?;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("qlmanage")
+            .args(["-t", "-s", "1400", "-o"])
+            .arg(&dir)
+            .arg(&pdf_path)
+            .status();
+        let png = dir.join(format!("{stem}.pdf.png"));
+        let bytes = std::fs::read(&png)
+            .map_err(|_| "no pude renderizar el PDF a imagen (QuickLook)".to_string())?;
+        let _ = std::fs::remove_file(&pdf_path);
+        let _ = std::fs::remove_file(&png);
+        Ok(bytes)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pdf_path;
+        Err("el render de PDF a imagen solo está en macOS; sube una imagen del documento".into())
+    }
+}
+
+#[derive(Deserialize)]
+struct StyleExtract {
+    content_b64: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    name: String,
+}
+/// Extrae un DocStyle de un documento de referencia (PDF o imagen) — paleta + fuentes.
+async fn doc_styles_extract(Json(b): Json<StyleExtract>) -> Json<serde_json::Value> {
+    use base64::Engine;
+    let bytes =
+        match base64::engine::general_purpose::STANDARD.decode(b.content_b64.trim().as_bytes()) {
+            Ok(v) => v,
+            Err(e) => {
+                return Json(
+                    serde_json::json!({ "ok": false, "error": format!("base64 inválido: {e}") }),
+                )
+            }
+        };
+    let name = if b.name.trim().is_empty() {
+        "Estilo extraído".to_string()
+    } else {
+        b.name.clone()
+    };
+    let is_pdf = b.kind.eq_ignore_ascii_case("pdf") || bytes.starts_with(b"%PDF");
+    let (img, pdf_for_fonts): (Vec<u8>, Option<&[u8]>) = if is_pdf {
+        match pdf_to_png(&bytes) {
+            Ok(png) => (png, Some(bytes.as_slice())),
+            Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+        }
+    } else {
+        (bytes.clone(), None)
+    };
+    match aion_docgen::extract_style(&img, pdf_for_fonts, &name) {
+        Ok(ex) => Json(serde_json::json!({
+            "ok": true, "style": ex.style, "palette": ex.palette, "fonts": ex.fonts
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct OffertaGen {
+    facts: aion_docgen::OffertaFacts,
+    #[serde(default)]
+    style: Option<aion_docgen::DocStyle>,
+    #[serde(default)]
+    style_name: Option<String>,
+    #[serde(default = "doc_fmt_pdf")]
+    format: String,
+}
+/// Genera una OFERTA rica (skill `offerta`) con el estilo elegido y la devuelve como descarga.
+async fn documents_offerta(Json(b): Json<OffertaGen>) -> axum::response::Response {
+    let brand = aion_docgen::BrandProfile::load(crate::agent_tools::brand_profile_path());
+    let style = b
+        .style
+        .clone()
+        .or_else(|| {
+            b.style_name
+                .as_deref()
+                .and_then(aion_docgen::style::by_name)
+        })
+        .unwrap_or_default();
+    let content = aion_docgen::build_offerta(&b.facts);
+    let title = if b.facts.client.trim().is_empty() {
+        "offerta".to_string()
+    } else {
+        doc_filename(&b.facts.client)
+    };
+    if b.format.eq_ignore_ascii_case("html") {
+        return match aion_docgen::render_offerta_html(&brand, &style, &content) {
+            Ok(s) => (
+                [
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{title}.html\""),
+                    ),
+                ],
+                s.into_bytes(),
+            )
+                .into_response(),
+            Err(e) => doc_error(e),
+        };
+    }
+    match aion_docgen::render_offerta_pdf(
+        &brand,
+        &style,
+        &content,
+        &aion_docgen::PdfOptions::default(),
+    )
+    .await
+    {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "application/pdf".to_string()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{title}.pdf\""),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => doc_error(e),
     }
 }
 

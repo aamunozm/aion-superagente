@@ -14,6 +14,7 @@ type Dict = Record<string, string>;
 const ES: Dict = {
   "nav.chat": "Chat",
   "nav.projects": "Proyectos",
+  "nav.documents": "Documentos",
   "nav.tools": "Herramientas",
   "nav.workflows": "Flujos",
   "nav.memory": "Memoria",
@@ -173,6 +174,7 @@ const ES: Dict = {
 const IT: Dict = {
   "nav.chat": "Chat",
   "nav.projects": "Progetti",
+  "nav.documents": "Documenti",
   "nav.tools": "Strumenti",
   "nav.workflows": "Flussi",
   "nav.memory": "Memoria",
@@ -332,6 +334,7 @@ const IT: Dict = {
 const EN: Dict = {
   "nav.chat": "Chat",
   "nav.projects": "Projects",
+  "nav.documents": "Documents",
   "nav.tools": "Tools",
   "nav.workflows": "Workflows",
   "nav.memory": "Memory",

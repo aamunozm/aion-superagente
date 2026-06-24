@@ -14,6 +14,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: "/chat", key: "nav.chat", icon: "chat" },
       { href: "/inbox", key: "nav.inbox", icon: "bell", badgeKey: "inbox" },
       { href: "/projects", key: "nav.projects", icon: "folder" },
+      { href: "/documents", key: "nav.documents", icon: "folder" },
       { href: "/communications", key: "nav.communications", icon: "message" },
     ],
   },

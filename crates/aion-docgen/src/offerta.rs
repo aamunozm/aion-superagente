@@ -140,7 +140,7 @@ pub struct OffertaContent {
 /// firma, cierre— lo rellena la skill con su scaffolding estándar. Es la mitad DETERMINISTA
 /// del modo híbrido: tú das los hechos, [`build_offerta`] monta el documento; el LLM local
 /// (en aion-core) solo pule la prosa después, si quieres.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OffertaFacts {
     pub kicker: String,
     pub subtitle: String,

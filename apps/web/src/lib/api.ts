@@ -619,6 +619,54 @@ export async function projectStudioExport(
   await downloadBlob(res, `documento.${format}`);
 }
 
+// ── Estilos de documento (galería tipo Canva) ────────────────────────────────
+export type DocStyleT = {
+  name: string;
+  ink: string;
+  accent: string;
+  paper: string;
+  text: string;
+  muted: string;
+  hair: string;
+  soft: string;
+  cream: string;
+  font: string;
+  font_display: string;
+  radius: number;
+  caps_headings: boolean;
+};
+export type StyleEntry = { name: string; builtin: boolean; style: DocStyleT };
+
+export async function docStylesList(): Promise<StyleEntry[]> {
+  const r = await fetch(`${BRIDGE_URL}/api/doc-styles`)
+    .then((x) => x.json())
+    .catch(() => ({ styles: [] }));
+  return (r.styles ?? []) as StyleEntry[];
+}
+export const docStyleSave = (style: DocStyleT) =>
+  jpost<{ ok: boolean; error?: string }>("/api/doc-styles", { style });
+export const docStyleRemove = (name: string) =>
+  jpost<{ ok: boolean }>("/api/doc-styles/remove", { name });
+export const docStyleExtract = (content_b64: string, kind: string, name: string) =>
+  jpost<{ ok: boolean; style?: DocStyleT; palette?: string[]; fonts?: string[]; error?: string }>(
+    "/api/doc-styles/extract",
+    { content_b64, kind, name },
+  );
+
+/** Genera una oferta rica con el estilo elegido y descarga el archivo. */
+export async function documentsOfferta(
+  facts: Record<string, unknown>,
+  style: DocStyleT | null,
+  format: "pdf" | "html" = "pdf",
+): Promise<void> {
+  const res = await fetch(`${BRIDGE_URL}/api/documents/offerta`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ facts, style, format }),
+  });
+  await downloadBlob(res, `offerta.${format}`);
+}
+
 /** Genera un documento branded desde Markdown arbitrario y lo descarga. */
 export async function documentsGenerate(req: {
   title: string;
