@@ -550,12 +550,13 @@ mod tests {
 
     #[test]
     fn parsea_title_meta_y_cuenta_encabezados() {
-        let html = r#"<html lang="it"><head>«title»Hola Mundo</title>
-            <meta name="description" content="una descripción"/>
-            <meta property="og:title" content="OG"/>
-            <link rel="canonical" href="https://x.it/"/></head>
-            <body>«H1»A</h1><h2>B</h2><img src="a.jpg"/><img src="b.jpg" alt="ok"/></body></html>"#;
-        assert_eq!(first_title(html), "Hola Mundo");
+        let html = "<html lang=\"it\"><head><title>Hola &amp; Mundo</title>\
+            <meta name=\"description\" content=\"una descripción\"/>\
+            <meta property=\"og:title\" content=\"OG\"/>\
+            <link rel=\"canonical\" href=\"https://x.it/\"/></head>\
+            <body><h1>A</h1><h2>B</h2><img src=\"a.jpg\"/><img src=\"b.jpg\" alt=\"ok\"/></body></html>";
+        // El título trae una entidad: debe decodificarse.
+        assert_eq!(first_title(html), "Hola & Mundo");
         let metas = tags(html, "meta");
         assert_eq!(
             meta(&metas, "name", "description").as_deref(),
