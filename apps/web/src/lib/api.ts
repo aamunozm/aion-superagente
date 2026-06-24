@@ -667,6 +667,20 @@ export async function documentsOfferta(
   await downloadBlob(res, `offerta.${format}`);
 }
 
+/** Devuelve el HTML de la oferta (para previsualizar en una pestaña, sin descargar). */
+export async function offertaPreviewHtml(
+  facts: Record<string, unknown>,
+  style: DocStyleT | null,
+): Promise<string> {
+  const res = await fetch(`${BRIDGE_URL}/api/documents/offerta`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ facts, style, format: "html" }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `error ${res.status}`);
+  return res.text();
+}
+
 /** Genera un documento branded desde Markdown arbitrario y lo descarga. */
 export async function documentsGenerate(req: {
   title: string;
