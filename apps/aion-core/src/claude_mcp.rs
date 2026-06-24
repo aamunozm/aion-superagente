@@ -164,9 +164,14 @@ fn audit_path() -> std::path::PathBuf {
     crate::app_data_dir().join("claude_code_audit.jsonl")
 }
 
-/// Una línea por tools/call: visible en la página Claude Code de la UI.
+/// Una línea por tools/call: visible en la página Claude Code de la UI. El `query` se REDACTA
+/// antes de registrarse: aunque la auditoría es local (nunca sale a Claude), no debe guardar
+/// secretos en claro en disco (higiene de privacidad).
 pub fn audit(tool: &str, query: &str, result_chars: usize, ok: bool, project: &str) {
-    let q: String = query.chars().take(200).collect();
+    let q: String = crate::redact::redact_secrets(query)
+        .chars()
+        .take(200)
+        .collect();
     let line = json!({
         "ts": chrono::Utc::now().to_rfc3339(),
         "tool": tool,
