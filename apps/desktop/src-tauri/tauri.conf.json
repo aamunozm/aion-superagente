@@ -25,14 +25,14 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8765 http://127.0.0.1:8787 https://fonts.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8765 http://127.0.0.1:8768 http://127.0.0.1:8787 https://fonts.googleapis.com; media-src 'self' data: blob: http://127.0.0.1:8765; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["app"],
-    "externalBin": ["binaries/aion-core", "binaries/aion-control-plane", "binaries/face-probe"],
-    "resources": { "ollama-runtime": "ollama-runtime/", "bootstrap": "bootstrap/", "arcface.onnx": "." },
+    "externalBin": ["binaries/aion-core", "binaries/aion-control-plane"],
+    "resources": { "ollama-runtime": "ollama-runtime/", "bootstrap": "bootstrap/" },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

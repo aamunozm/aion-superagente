@@ -7,6 +7,7 @@ members = [
     "crates/aion-memory",
     "crates/aion-orchestrator",
     "crates/aion-skills",
+    "crates/aion-docgen",
     "crates/aion-cognition",
     "crates/aion-evolution",
     "crates/aion-browser",
@@ -50,6 +51,7 @@ aion-llm = { path = "crates/aion-llm" }
 aion-memory = { path = "crates/aion-memory" }
 aion-orchestrator = { path = "crates/aion-orchestrator" }
 aion-skills = { path = "crates/aion-skills" }
+aion-docgen = { path = "crates/aion-docgen" }
 aion-cognition = { path = "crates/aion-cognition" }
 aion-evolution = { path = "crates/aion-evolution" }
 aion-browser = { path = "crates/aion-browser" }

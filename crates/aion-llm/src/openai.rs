@@ -15,6 +15,12 @@ pub struct OpenAiEngine {
     model: String,
     id: String,
     http: reqwest::Client,
+    /// Penalización de repetición (solo motores que la soportan, p. ej. mlx_lm.server).
+    /// Imprescindible para el cerebro de voz local: sin ella, Qwen3-4B 4-bit degenera en
+    /// bucles ("tienes tienes tienes…"). None = no se envía (APIs como DeepSeek la ignoran).
+    repetition_penalty: Option<f32>,
+    /// top_p (nucleus). None = no se envía.
+    top_p: Option<f32>,
 }
 
 impl OpenAiEngine {
@@ -31,7 +37,17 @@ impl OpenAiEngine {
             api_key: api_key.into(),
             model,
             http: reqwest::Client::new(),
+            repetition_penalty: None,
+            top_p: None,
         }
+    }
+
+    /// Fija el muestreo anti-bucle (penalización de repetición + top_p) para este motor.
+    /// Pensado para el cerebro de voz local; no afecta a otros motores.
+    pub fn with_sampling(mut self, repetition_penalty: f32, top_p: f32) -> Self {
+        self.repetition_penalty = Some(repetition_penalty);
+        self.top_p = Some(top_p);
+        self
     }
 
     fn body(&self, req: &GenerateRequest, stream: bool) -> serde_json::Value {
@@ -48,12 +64,26 @@ impl OpenAiEngine {
                 serde_json::json!({ "role": role, "content": m.content })
             })
             .collect();
-        serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "messages": messages,
             "stream": stream,
             "temperature": req.temperature.unwrap_or(1.0),
-        })
+        });
+        let obj = body.as_object_mut().expect("body es objeto");
+        // max_tokens: ACOTA la respuesta (en voz evita respuestas de 512 tokens = ~8s y
+        // limita el daño de cualquier bucle). Antes no se enviaba → el servidor usaba su tope.
+        if let Some(m) = req.max_tokens {
+            obj.insert("max_tokens".into(), m.into());
+        }
+        // repetition_penalty / top_p: anti-degeneración del cerebro de voz local.
+        if let Some(rp) = self.repetition_penalty {
+            obj.insert("repetition_penalty".into(), rp.into());
+        }
+        if let Some(tp) = self.top_p {
+            obj.insert("top_p".into(), tp.into());
+        }
+        body
     }
 }
 

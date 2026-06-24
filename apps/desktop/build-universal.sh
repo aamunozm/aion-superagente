@@ -29,6 +29,24 @@ for bin in aion-core aion-control-plane; do
   echo "   $bin: $(lipo -archs "$DEST/$bin-$UNI")"
 done
 
+# face-probe (Swift/Apple Vision) para AMBAS arquitecturas: el .app universal lo exige por slice
+# (externalBin de tauri.macos.conf). En Intel la cara está deshabilitada (arcface compila un stub,
+# sin onnxruntime), pero Tauri necesita el binario presente para bundlear cada slice. Las apps
+# Apple compilan x86 desde un Mac Silicon sin problema (frameworks universales).
+FP="apps/desktop/face_probe"
+if command -v swiftc >/dev/null 2>&1; then
+  for pair in "arm64:$ARM" "x86_64:$X86"; do
+    sw="${pair%%:*}"; triple="${pair##*:}"
+    echo "==> compilando face-probe ($triple)"
+    swiftc -O -target "${sw}-apple-macos11" "$FP/face_probe.swift" -o "$DEST/face-probe-$triple" \
+      -framework AVFoundation -framework Vision -framework CoreImage \
+      -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$FP/Info.plist"
+  done
+  echo "   face-probe: arm64 + x86_64 listos"
+else
+  echo "==> AVISO: swiftc no disponible; face-probe NO se compila (la cara quedará inactiva)"
+fi
+
 echo "==> verificando runtime Ollama vendorizado (debe existir y ser universal)"
 [[ -x apps/desktop/src-tauri/ollama-runtime/ollama ]] || bash apps/desktop/scripts/vendor-ollama-runtime.sh
 

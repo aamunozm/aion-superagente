@@ -20,6 +20,7 @@ aion-orchestrator.workspace = true
 aion-skills.workspace = true
 aion-evolution.workspace = true
 aion-browser.workspace = true
+aion-docgen.workspace = true
 aion-cognition.workspace = true
 aion-sync.workspace = true
 aion-computer.workspace = true
@@ -43,9 +44,19 @@ tokio-stream = "0.1"
 futures-util = "0.3"
 mdns-sd = "0.20.0"
 nusb = "0.2.3"
-# Percepción del computador (Anillo 2, solo lectura): NSWorkspace.runningApplications.
-# objc2 gatea cada clase por feature; activamos solo las que usamos.
+
+# Percepción del computador (Anillo 2, solo lectura, SOLO macOS): NSWorkspace.runningApplications.
+# objc2 gatea cada clase por feature; activamos solo las que usamos. NO debe ir en [dependencies]
+# general: en Windows/Linux arrastra objc-sys, cuyo build.rs solo compila en plataformas Apple y
+# rompía el build de Windows. computer.rs tiene fallbacks #[cfg(not(target_os = "macos"))].
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
 objc2-app-kit = { version = "0.2", features = ["NSWorkspace", "NSRunningApplication", "NSApplication"] }
 objc2-foundation = { version = "0.2", features = ["NSArray", "NSString"] }
+
+# Reconocimiento facial (ArcFace ONNX vía `ort`/onnxruntime): SOLO arm64-apple-darwin. `ort` con
+# `download-binaries` NO tiene prebuilt para x86_64-apple-darwin → rompía el .app UNIVERSAL (la
+# cara es solo-macOS-Silicon de todos modos). En el resto de targets, arcface.rs compila un STUB
+# (embed→None) sin arrastrar `ort`, y faces.rs degrada limpio.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }

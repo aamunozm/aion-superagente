@@ -16,6 +16,7 @@ import {
   projectStudioAudio,
   projectAudioUrl,
   projectStudioRemove,
+  projectStudioExport,
   chatStream,
   type Project,
   type ProjectSource,
@@ -527,6 +528,30 @@ export default function ProjectWorkspace() {
           <div className="card max-w-2xl w-full max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center gap-2 mb-3">
               <h3 className="font-display font-semibold flex-1">{viewing.title}</h3>
+              <button
+                onClick={() =>
+                  projectStudioExport(id, viewing.id, "pdf").catch((e) =>
+                    alert("No se pudo exportar: " + (e as Error).message),
+                  )
+                }
+                className="text-xs px-2.5 py-1 rounded-md"
+                style={{ background: "var(--text-1)", color: "var(--surface-0)" }}
+                title="Descargar como PDF con tu marca"
+              >
+                ⤓ PDF
+              </button>
+              <button
+                onClick={() =>
+                  projectStudioExport(id, viewing.id, "docx").catch((e) =>
+                    alert("No se pudo exportar: " + (e as Error).message),
+                  )
+                }
+                className="text-xs px-2.5 py-1 rounded-md"
+                style={{ background: "var(--surface-1)", border: "1px solid var(--border)", color: "var(--text-1)" }}
+                title="Descargar como Word (.docx) editable"
+              >
+                ⤓ Word
+              </button>
               <button onClick={() => setViewing(null)} className="opacity-60 hover:opacity-100">
                 ✕
               </button>

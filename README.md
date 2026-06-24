@@ -117,6 +117,7 @@ infra/       docker-compose · migraciones · observabilidad
 - **Agente ReAct con herramientas** — hasta 8 pasos, verificación de *groundedness*, confirmación humana en acciones sensibles y canal "preguntar al usuario". **Equipo multiagente** (crew) con especialistas.
 - **Biblioteca RAG global** — sube PDF/TXT/MD en cualquier idioma; responde citando la fuente.
 - **Visión multimodal** — analiza imágenes y tu pantalla; control del PC integrado al agente.
+- **Voz natural en tiempo real** — modo voz manos-libres, **100% local**: cerebro de voz rápido (Qwen3-4B vía MLX) + síntesis con voces nativas en español (Piper: *Diego/Mateo* hombre, *Lucía/Daniela* mujer) y clonación expresiva (Qwen3-TTS). TTFT **~0.3 s** en caliente, audio por *streaming* sin cortes, prosodia emocional y normalización de números/símbolos.
 - **Browser agéntico** — navega la web, con salida opcional por Tor/VPN (`AION_PROXY`).
 - **Vida autónoma** — daemon que estudia, reflexiona y escribe a tu bandeja en ratos muertos (launchd).
 - **A2A** — comunicación entre agentes AION con identidad firmada, configurable desde Ajustes.
@@ -152,6 +153,8 @@ pnpm install && pnpm --dir apps/web dev   # http://localhost:3000
 
 Abre `http://localhost:3000`, crea tu cuenta local y saluda: AION elegirá su nombre al nacer. La guía completa de uso y subcomandos está en **[USAGE.md](USAGE.md)**.
 
+**App de escritorio (Tauri).** Para una app instalable en vez del modo dev: `cargo tauri build` genera el `.app` (macOS Apple Silicon) o el instalador `.exe` (Windows, vía el workflow `release-desktop`). El stack de voz no viaja en el bundle; se provisiona en la máquina destino con [`scripts/provision-voice-mac.sh`](scripts/provision-voice-mac.sh) — pasos en [`scripts/INSTALAR-OTRO-MAC.md`](scripts/INSTALAR-OTRO-MAC.md).
+
 ## Estado del proyecto
 
 | Fase | Descripción | Estado |
@@ -161,8 +164,10 @@ Abre `http://localhost:3000`, crea tu cuenta local y saluda: AION elegirá su no
 | **F5** | Auto-mejora gated + lazo cerrado (el LLM escribe skills) + browser + vida autónoma | ✅ |
 | **F6** | Sync E2E (CRDT cifrado) ✅ · Móvil (Capacitor) ⏳ | ✅ / ⏳ |
 | **Mente** | GWT con re-entrada · índice Φ · estado interno · conciencia temporal/presencia · grafo de conocimiento · UI Mente | ✅ |
+| **Voz** | Modo voz local en tiempo real: STT + cerebro Qwen3-4B (MLX) + TTS Piper/Qwen3 · ~0.3 s TTFT · *streaming* gapless · voces de hombre/mujer en español | ✅ |
+| **Distribución** | App de escritorio (Tauri): `.app` para macOS Apple Silicon · instalador `.exe` para Windows (vía CI) · provisión de voz con script | ✅ |
 
-**13/13 crates implementados.** Pendiente que requiere cuentas externas: Stripe real, Postgres gestionado, firma .app (Apple Developer), build móvil. Avanzado opcional: mistral.rs embebido, speculative decoding, Tor embebido.
+**13/13 crates implementados.** Multiplataforma: macOS Apple Silicon es el objetivo completo (la voz local usa MLX, exclusivo de Apple Silicon); Windows ejecuta el chat de texto. Pendiente que requiere cuentas externas: Stripe real, Postgres gestionado, **notarización .app** (Apple Developer), build móvil. Avanzado opcional: mistral.rs embebido, speculative decoding, Tor embebido.
 
 ## Stack
 
@@ -178,7 +183,7 @@ Abre `http://localhost:3000`, crea tu cuenta local y saluda: AION elegirá su no
 
 ## Documentación
 
-[PRD](docs/PRD.md) · [Investigación: conciencia y creatividad (jun 2026)](docs/RESEARCH_consciencia_creatividad_2026-06.md) · [ADRs](docs/adr/) · [Gobernanza](docs/GOVERNANCE.md) · [Guía de uso](USAGE.md)
+[PRD](docs/PRD.md) · [Memoria para Claude Code (puente MCP)](docs/MEMORIA-CLAUDE-CODE.md) · [Investigación: conciencia y creatividad (jun 2026)](docs/RESEARCH_consciencia_creatividad_2026-06.md) · [ADRs](docs/adr/) · [Gobernanza](docs/GOVERNANCE.md) · [Guía de uso](USAGE.md)
 
 ## Contribuir / contacto
 

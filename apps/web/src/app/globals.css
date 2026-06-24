@@ -28,6 +28,11 @@
   --accent-subtle: rgba(200, 169, 81, 0.12);
   --accent-contrast: #2a2410;
 
+  /* Destructivo: terracota apagado que armoniza con la paleta cálida (no rojo chillón) */
+  --danger: #b8543c;
+  --danger-strong: #9c4530;
+  --danger-subtle: rgba(184, 84, 60, 0.10);
+
   /* Pasteles frescos (acentos por módulo) */
   --pastel-mint: #e3f3ec;     --on-mint: #2f9c75;
   --pastel-sky: #e6eefb;      --on-sky: #4f82c4;
@@ -322,6 +327,50 @@
   .btn-gold:hover {
     filter: brightness(1.04);
   }
+  /* Acción destructiva DISCRETA: ghost neutro que se tiñe de terracota al pasar
+     el cursor. Evita el choque negro+rojo y de-enfatiza la acción peligrosa. */
+  .btn-danger {
+    background: transparent;
+    color: var(--text-2);
+    border: 1px solid var(--border-2);
+    box-shadow: none;
+    font-weight: 500;
+  }
+  .btn-danger:hover {
+    background: var(--danger-subtle);
+    border-color: var(--danger);
+    color: var(--danger);
+    box-shadow: none;
+  }
+  .btn-danger:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+    background: transparent;
+    color: var(--text-3);
+  }
+  /* Botón secundario LIGERO (ghost neutro): mismo lenguaje que .btn-danger pero sin peligro.
+     Para acciones no destructivas que no necesitan el peso del negro sólido. */
+  .btn-ghost {
+    background: transparent;
+    color: var(--text-2);
+    border: 1px solid var(--border-2);
+    box-shadow: none;
+    font-weight: 500;
+  }
+  .btn-ghost:hover {
+    background: var(--surface-1);
+    border-color: var(--text-3);
+    color: var(--text-1);
+    box-shadow: none;
+  }
+  .btn-ghost:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+    background: transparent;
+    color: var(--text-3);
+  }
 
   .input {
     width: 100%;
@@ -439,3 +488,21 @@
 .md-table th { font-weight: 650; background: var(--accent-subtle); color: var(--text-1); }
 .md-table tr:last-child td { border-bottom: 0; }
 .md-table td { color: var(--text-2); }
+
+/* ── Modo voz: onda + orbe animados ───────────────────────────────────── */
+@keyframes voiceBar {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+@keyframes voicePulse {
+  0%, 100% { transform: scale(1); opacity: 0.7; }
+  50% { transform: scale(1.06); opacity: 1; }
+}
+@keyframes voiceFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.voice-fade { animation: voiceFade 0.2s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .voice-fade { animation: none; }
+}

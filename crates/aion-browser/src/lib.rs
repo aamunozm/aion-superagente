@@ -9,8 +9,10 @@
 
 mod driver;
 mod html;
+mod pdf;
 
 pub use driver::{BrowserDriver, ChromiumoxideDriver, El, PageView, Snapshot};
+pub use pdf::{html_to_pdf, PdfOptions};
 
 use aion_kernel::{AionError, Result};
 use std::time::Duration;

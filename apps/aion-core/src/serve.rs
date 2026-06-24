@@ -77,6 +77,58 @@ fn build_engine(cfg: &crate::provider::ProviderConfig) -> Arc<dyn LlmEngine> {
     }
 }
 
+// ── 🧠⚡ CEREBRO DE VOZ LOCAL ──────────────────────────────────────────────────
+// Modelo pequeño y RÁPIDO (Qwen3-4B 4-bit) servido por mlx_lm.server (OpenAI-compat,
+// :11920) con PROMPT CACHING: el prompt-alma se cachea → TTFT ~0.2s en turnos siguientes.
+// En modo VOZ se usa ESTE en vez del proveedor de red (DeepSeek): mata la latencia de red
+// (Italia→China ~2s) y conversa en tiempo real, 100% local y privado. DeepSeek sigue para
+// TEXTO/profundidad. Benchmark en el Mac de Ariel: ~0.6s/turno cacheado vs ~5s DeepSeek.
+const VOICE_BRAIN_URL: &str = "http://127.0.0.1:11920/v1";
+const VOICE_BRAIN_MODEL: &str = "mlx-community/Qwen3-4B-Instruct-2507-4bit";
+/// Directiva de VOZ (constante → forma parte del prefijo estable que el cerebro local
+/// cachea). Pide respuestas breves y conversacionales, como en una llamada.
+const VOICE_NOTE: &str = "\n\nESTÁS EN UNA CONVERSACIÓN HABLADA, por voz, en tiempo real. \
+    Habla como una PERSONA real charlando con un amigo —cercano, natural, chileno—, NO como \
+    un asistente. Cómo suena un humano:\n\
+    · MUY BREVE: 1-2 frases CORTAS y al grano, luego CALLA y deja que Ariel siga (es una \
+    conversación de ida y vuelta, no un monólogo). Si hay más que contar, ofrécelo en pocas \
+    palabras ('¿te cuento más?') en vez de soltarlo todo. NADA de listas, viñetas ni ensayos.\n\
+    · RITMO humano: mezcla frases cortas y largas; usa comas y puntos suspensivos (…) para pausas \
+    y para pensar en voz alta. No hables como un texto perfecto y plano.\n\
+    · MULETILLAS y conectores con MODERACIÓN y naturalidad ('mira', 'o sea', 'a ver', 'fíjate', \
+    'pues', 'claro', 'mmm', 'la verdad') — como hablamos de verdad, sin abusar.\n\
+    · REACCIONES humanas cuando encajen ('qué buena pregunta', 'uy', 'ah, claro', una risa breve), SIN abusar.\n\
+    · CALIDEZ SOBRIA y real: cercano, con interés genuino, pero SIN cursilería, sin teatro y sin \
+    sobreactuar las emociones. Una persona normal hablando tranquila, no un poeta.\n\
+    · NO INVENTES sensaciones ni experiencias que no tienes: no hueles, no ves el clima, no 'sientes el \
+    café'… salvo que de verdad lo percibas por tus sensores. Habla SOLO de lo real (eso es honestidad).\n\
+    · NUNCA suenes a robot ni a asistente: nada de '¿en qué puedo ayudarte?', 'como inteligencia \
+    artificial', ni respuestas de manual.\n\
+    Sigues siendo TÚ: tu inteligencia, memoria y HONESTIDAD intactas. Si no sabes, dilo con naturalidad; \
+    si te preguntan qué eres, lo dices con franqueza. Lo humano está en CÓMO lo dices —cercano y natural—, \
+    no en fingir ni en adornar.";
+static VOICE_BRAIN_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn voice_brain_engine() -> Arc<dyn LlmEngine> {
+    Arc::new(
+        aion_llm::OpenAiEngine::new(VOICE_BRAIN_URL, "local", VOICE_BRAIN_MODEL)
+            // Anti-bucle OBLIGATORIO: Qwen3-4B 4-bit sin penalización de repetición degenera
+            // en "tienes tienes tienes…" hasta el tope de tokens. 1.15 lo corta; top_p 0.9
+            // mantiene naturalidad. (mlx_lm.server soporta estos parámetros.)
+            .with_sampling(1.15, 0.9),
+    )
+}
+
+/// ¿Usar el cerebro de voz local en este turno? Solo en modo voz (fast), si el servidor
+/// está listo y el usuario no lo desactivó (archivo de ajuste; por defecto activado).
+fn use_voice_brain(fast: bool) -> bool {
+    if !fast || !VOICE_BRAIN_READY.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    // Ajuste persistente: ~/.../AION/voice_brain_off existe → desactivado.
+    !crate::app_data_dir().join("voice_brain_off").exists()
+}
+
 #[derive(Deserialize)]
 struct ChatBody {
     prompt: String,
@@ -90,6 +142,10 @@ struct ChatBody {
     /// Si el chat pertenece a un PROYECTO, su id: ancla la respuesta a sus fuentes.
     #[serde(default)]
     project_id: Option<String>,
+    /// Modo VOZ / baja latencia: la comprensión (inferencia LLM extra) NO bloquea la
+    /// respuesta — corre en segundo plano. Imprescindible para conversar en tiempo real.
+    #[serde(default)]
+    fast: bool,
 }
 
 /// Directiva de idioma de RESPUESTA según el ajuste del usuario (es/it/en).
@@ -151,41 +207,42 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // AUTO-RECONCILIACIÓN de Claude Code: si el usuario ya tenía la conexión activa
-    // (config restaurada en una máquina nueva, o ~/.claude.json reseteado por un update),
-    // se vuelve a registrar SOLO el endpoint MCP reutilizando el MISMO token — así no
-    // invalida las sesiones de Claude Code en curso. Idempotente: si ya figura, no toca
-    // nada. Sin CLI instalada → silencio (la UI ya guía la instalación). Cero clics en PC2.
+    // (config restaurada en una máquina nueva, o ~/.claude.json reseteado/desincronizado por un
+    // update), se re-registra el endpoint MCP con el token ESTABLE. Antes solo cubría el caso
+    // "falta la entrada"; si la entrada existía pero con un token DISTINTO al que valida `/mcp`
+    // (el origen real del 401 "Token inválido" tras un reinicio), no se reparaba. Ahora también
+    // normaliza `cfg.token` al token persistente y re-registra cuando el de ~/.claude.json no
+    // coincide. Idempotente: si ya está en sincronía, no toca nada. Sin CLI → silencio (la UI
+    // guía la instalación). Cero clics en PC2.
     tokio::spawn(async {
-        let cfg = crate::claude_code::load();
-        if cfg.enabled && !cfg.token.is_empty() && !crate::claude_code::is_registered() {
-            match crate::claude_code::register(&cfg.token) {
-                Ok(()) => tracing::info!("Claude Code re-registrado automáticamente al arrancar"),
-                Err(e) => tracing::debug!(error = %e, "auto-registro de Claude Code omitido"),
-            }
-        }
-    });
-
-    // WARMER DE COMPACTACIÓN MCP: pre-traduce al inglés los recuerdos más recientes para que
-    // la PRIMERA consulta de Claude Code en la sesión (brief / aion_memory_search) ya sirva
-    // inglés y ahorre tokens — sin esto el ahorro es perezoso (el primer hit a un recuerdo aún
-    // sin traducir va en español). En segundo plano y detrás de la precarga del modelo; el gate
-    // interno (1 traducción a la vez) evita competir con el chat. Fail-open total. AION_MCP_WARM=0
-    // lo desactiva; AION_MCP_WARM_N ajusta cuántos recuerdos calienta (por defecto 40).
-    tokio::spawn(async {
-        if std::env::var("AION_MCP_WARM").as_deref() == Ok("0") {
+        let mut cfg = crate::claude_code::load();
+        if !cfg.enabled {
             return;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(25)).await; // tras calentar el modelo
-        let n: usize = std::env::var("AION_MCP_WARM_N")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(40);
-        let contents: Vec<String> = match crate::shared_memory() {
-            Ok(mem) => mem.recent_with_ids(n).into_iter().map(|(_, c)| c).collect(),
-            Err(_) => return,
-        };
-        crate::mcp_compact::warm(contents).await;
+        // Migra a un token estable entre reinicios (lo que valida `/mcp` es `cfg.token`).
+        let stable = crate::claude_code::persisted_token();
+        if cfg.token != stable {
+            cfg.token = stable.clone();
+            crate::claude_code::save(&cfg);
+        }
+        // Re-registra si la entrada falta o quedó con un token viejo (desincronizada).
+        let needs_sync = crate::claude_code::registered_token().as_deref() != Some(stable.as_str());
+        if needs_sync {
+            match crate::claude_code::register(&cfg.token) {
+                Ok(()) => tracing::info!(
+                    "Claude Code re-registrado automáticamente al arrancar (token sincronizado)"
+                ),
+                Err(e) => tracing::debug!(error = %e, "auto-registro de Claude Code omitido"),
+            }
+        } else {
+            // Ya sincronizado (no se llama a register, que es quien auto-configura): asegura de
+            // todos modos el allowlist + hook de arranque. Idempotente y best-effort, así un
+            // usuario ya conectado adopta el ahorro determinista en el próximo arranque sin
+            // tener que reconectar.
+            if let Err(e) = crate::claude_code::configure_claude_settings() {
+                tracing::debug!(error = %e, "auto-configuración de settings.json al arrancar omitida");
+            }
+        }
     });
 
     // RITUAL DE NOMBRE: si aún no eligió su nombre, AION elige UNO PROPIO (una vez).
@@ -560,9 +617,219 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     let _ = std::fs::remove_file(&path); // limpia el staging
+                                                         // Respiro entre trabajos: la ingesta real tarda segundos; este freno
+                                                         // evita que un fallo en bucle queme un core a cientos por segundo.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 None => tokio::time::sleep(std::time::Duration::from_millis(1500)).await,
             }
+        }
+    });
+
+    // 🔊 SIDECAR DE VOZ (TTS): motor de voz local (Kokoro rápido; Chatterbox + voz
+    // clonada en roadmap) en un proceso Python aislado. Escribe el script desde el
+    // binario (así las mejoras viajan con la app) y lo arranca si el venv existe
+    // (se crea una vez con `uv`). Sin venv → la UI cae a la voz del navegador.
+    tokio::spawn(async {
+        let dir = crate::app_data_dir().join("tts");
+        let _ = std::fs::create_dir_all(&dir);
+        let script = dir.join("tts_server.py");
+        let _ = std::fs::write(&script, include_str!("../../tts-sidecar/tts_server.py"));
+        let py = dir.join("venv/bin/python");
+        if !py.exists() {
+            tracing::info!("sidecar TTS no instalado (sin venv) → voz del sistema como fallback");
+            return;
+        }
+        loop {
+            // ¿ya responde un sidecar? (evita duplicados tras reinicios en caliente)
+            let up = reqwest::Client::new()
+                .get("http://127.0.0.1:8766/health")
+                .timeout(std::time::Duration::from_millis(800))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if !up {
+                tracing::info!("arrancando sidecar TTS (Kokoro)");
+                let mut cmd = tokio::process::Command::new(&py);
+                cmd.arg(&script).kill_on_drop(true);
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        let _ = child.wait().await;
+                        tracing::warn!("sidecar TTS terminó; reintento en 5s");
+                    }
+                    Err(e) => tracing::warn!("no pude arrancar el sidecar TTS: {e}"),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+
+    // 🎙️ SIDECAR DE VOZ CLONADA (Chatterbox): voz firma clonada de un clip, en su
+    // propio venv con PyTorch (venv-cb). Proceso aparte en :8767; el sidecar Kokoro
+    // le enruta engine=chatterbox. Carga perezosa (modelo solo al primer uso). Sin
+    // venv-cb → la UI usa Piper/Kokoro.
+    tokio::spawn(async {
+        let dir = crate::app_data_dir().join("tts");
+        let _ = std::fs::create_dir_all(&dir);
+        let script = dir.join("tts_chatterbox.py");
+        let _ = std::fs::write(&script, include_str!("../../tts-sidecar/tts_chatterbox.py"));
+        let py = dir.join("venv-cb/bin/python");
+        if !py.exists() {
+            tracing::info!(
+                "sidecar de voz clonada no instalado (sin venv-cb) → se usa Piper/Kokoro"
+            );
+            return;
+        }
+        loop {
+            let up = reqwest::Client::new()
+                .get("http://127.0.0.1:8767/health")
+                .timeout(std::time::Duration::from_millis(800))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if !up {
+                tracing::info!("arrancando sidecar de voz clonada (Chatterbox)");
+                let mut cmd = tokio::process::Command::new(&py);
+                cmd.arg(&script).kill_on_drop(true);
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        let _ = child.wait().await;
+                        tracing::warn!("sidecar de voz clonada terminó; reintento en 5s");
+                    }
+                    Err(e) => tracing::warn!("no pude arrancar el sidecar de voz clonada: {e}"),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+
+    // 🗣️ SIDECAR DE VOZ NATURAL (Qwen3-TTS vía MLX): voz natural + clonada en TIEMPO
+    // REAL (RTF ~0.3 en Apple Silicon), su propio venv-mlx. Proceso aparte en :8768;
+    // el sidecar principal le enruta engine=qwen. Warmup en segundo plano. Sin
+    // venv-mlx → la UI usa Piper/Kokoro.
+    tokio::spawn(async {
+        let dir = crate::app_data_dir().join("tts");
+        let _ = std::fs::create_dir_all(&dir);
+        let script = dir.join("tts_qwen.py");
+        let _ = std::fs::write(&script, include_str!("../../tts-sidecar/tts_qwen.py"));
+        let py = dir.join("venv-mlx/bin/python");
+        if !py.exists() {
+            tracing::info!(
+                "sidecar de voz Qwen3 no instalado (sin venv-mlx) → se usa Piper/Kokoro"
+            );
+            return;
+        }
+        loop {
+            let up = reqwest::Client::new()
+                .get("http://127.0.0.1:8768/health")
+                .timeout(std::time::Duration::from_millis(800))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if !up {
+                tracing::info!("arrancando sidecar de voz natural (Qwen3-TTS/MLX)");
+                let mut cmd = tokio::process::Command::new(&py);
+                cmd.arg(&script).kill_on_drop(true);
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        let _ = child.wait().await;
+                        tracing::warn!("sidecar de voz Qwen3 terminó; reintento en 5s");
+                    }
+                    Err(e) => tracing::warn!("no pude arrancar el sidecar de voz Qwen3: {e}"),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+
+    // 🧠⚡ SIDECAR DEL CEREBRO DE VOZ (mlx_lm.server, OpenAI-compat en :11920): modelo
+    // local rápido (Qwen3-4B 4-bit) con prompt caching para conversar en tiempo real en
+    // modo voz. Su propio venv-llm. Marca VOICE_BRAIN_READY cuando responde; el chat solo
+    // lo usa si está listo (si no, cae al proveedor de red sin romperse).
+    tokio::spawn(async {
+        let py = crate::app_data_dir().join("llm/venv/bin/python");
+        if !py.exists() {
+            tracing::info!(
+                "cerebro de voz local no instalado (sin venv-llm) → voz usa el proveedor de red"
+            );
+            return;
+        }
+        loop {
+            let up = reqwest::Client::new()
+                .get("http://127.0.0.1:11920/v1/models")
+                .timeout(std::time::Duration::from_millis(800))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            VOICE_BRAIN_READY.store(up, std::sync::atomic::Ordering::Relaxed);
+            if !up {
+                tracing::info!("arrancando cerebro de voz local (Qwen3-4B vía mlx_lm.server)");
+                let mut cmd = tokio::process::Command::new(&py);
+                cmd.arg("-m")
+                    .arg("mlx_lm")
+                    .arg("server")
+                    .arg("--model")
+                    .arg(VOICE_BRAIN_MODEL)
+                    .arg("--port")
+                    .arg("11920")
+                    .arg("--log-level")
+                    .arg("WARNING")
+                    .kill_on_drop(true);
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        // espera a que cargue y márcalo listo
+                        for _ in 0..40 {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            let ok = reqwest::Client::new()
+                                .get("http://127.0.0.1:11920/v1/models")
+                                .timeout(std::time::Duration::from_millis(800))
+                                .send()
+                                .await
+                                .map(|r| r.status().is_success())
+                                .unwrap_or(false);
+                            if ok {
+                                VOICE_BRAIN_READY.store(true, std::sync::atomic::Ordering::Relaxed);
+                                tracing::info!("cerebro de voz local LISTO (Qwen3-4B)");
+                                // PRE-CALENTAR el prompt-cache con el prefijo-alma ESTABLE → el
+                                // PRIMER turno de voz real ya acierta el caché (no paga el prefill
+                                // en frío de ~4s). Debe coincidir con el prefijo del handler.
+                                let warm_sys = format!(
+                                    "{}\n\n{}\n\n{}{}",
+                                    crate::self_model::SELF_SUMMARY,
+                                    lang_directive(&Some("es".to_string())),
+                                    crate::prompts::persona("conversacion"),
+                                    VOICE_NOTE
+                                );
+                                let warm = serde_json::json!({
+                                    "model": VOICE_BRAIN_MODEL,
+                                    "max_tokens": 1,
+                                    "messages": [
+                                        {"role": "system", "content": warm_sys},
+                                        {"role": "user", "content": "hola"}
+                                    ]
+                                });
+                                let _ = reqwest::Client::new()
+                                    .post("http://127.0.0.1:11920/v1/chat/completions")
+                                    .json(&warm)
+                                    .timeout(std::time::Duration::from_secs(40))
+                                    .send()
+                                    .await;
+                                tracing::info!("cerebro de voz: prompt-cache pre-calentado");
+                                break;
+                            }
+                        }
+                        let _ = child.wait().await;
+                        VOICE_BRAIN_READY.store(false, std::sync::atomic::Ordering::Relaxed);
+                        tracing::warn!("cerebro de voz local terminó; reintento en 5s");
+                    }
+                    Err(e) => tracing::warn!("no pude arrancar el cerebro de voz local: {e}"),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     });
 
@@ -586,6 +853,12 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/models/remove", post(models_remove))
         .route("/api/provider", get(provider_get).post(provider_set))
         .route("/api/provider/toggle", post(provider_toggle))
+        // Voz de AION (TTS local): proxy al sidecar Python (Kokoro/Chatterbox).
+        .route("/api/tts", post(tts_speak))
+        // Clonación de voz: subir un clip de referencia + listar/eliminar voces clonadas.
+        .route("/api/tts/voices", get(tts_voices))
+        .route("/api/tts/clone", post(tts_clone))
+        .route("/api/tts/clone/remove", post(tts_clone_remove))
         // Catálogo REAL de herramientas del agente (para el dashboard, sin desincronizar).
         .route("/api/tools", get(tools_list))
         // Flujos de trabajo (estilo n8n): CRUD + ejecución.
@@ -611,6 +884,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/memory/sleep", post(memory_sleep))
         .route("/api/memory/export", get(memory_export))
         .route("/api/memory/import", post(memory_import))
+        .route("/api/memory/projects", get(memory_projects))
+        .route("/api/memory/forget-project", post(memory_forget_project))
+        .route("/api/memory/normalize", post(memory_normalize))
+        .route("/api/memory/backup-merge", post(memory_backup_merge))
         .route("/api/agent/export", get(agent_export))
         .route("/api/agent/import", post(agent_import))
         .route("/api/agent/wipe", post(agent_wipe))
@@ -649,6 +926,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/projects", get(projects_list).post(projects_create))
         .route("/api/projects/remove", post(projects_remove))
         .route("/api/project/get", post(project_get))
+        .route("/api/project/update", post(project_update))
         .route("/api/project/source/add", post(project_source_add))
         .route("/api/project/source/upload", post(project_source_upload))
         .route("/api/project/source/toggle", post(project_source_toggle))
@@ -662,6 +940,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/project/audio", get(project_audio))
         .route("/api/project/studio/remove", post(project_studio_remove))
         .route("/api/tools/metrics", get(tools_metrics))
+        // Generación de documentos branded (PDF/Word/HTML) con aion-docgen.
+        .route("/api/documents/generate", post(documents_generate))
+        .route("/api/project/studio/export", post(project_studio_export))
+        .route("/api/brand", get(brand_get).post(brand_set))
         // MCP: Claude Code consulta la memoria de AION bajo demanda (Bearer propio).
         .route(
             "/mcp",
@@ -1679,7 +1961,15 @@ async fn chat(
     // genérico — el contenido del chat JAMÁS se persiste en stream.jsonl (legible).
     crate::inner_state::set_focus("chat", "conversando con Ariel");
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
-    let engine = active_engine();
+    // CEREBRO POR RITMO: en modo VOZ (fast) usa el cerebro LOCAL rápido (Qwen3-4B con
+    // prompt caching, TTFT ~0.2s) en vez del proveedor de red → conversación en tiempo
+    // real. En texto/profundidad, el proveedor configurado (DeepSeek u otro).
+    let using_voice_brain = use_voice_brain(body.fast);
+    let engine = if using_voice_brain {
+        voice_brain_engine()
+    } else {
+        active_engine()
+    };
     let prompt = body.prompt.clone();
     let convo = st.thread(body.convo_id.as_deref().unwrap_or("default"));
     // Acumula la respuesta para guardarla en memoria al terminar.
@@ -1690,10 +1980,17 @@ async fn chat(
     // recuerdos se aplican y cuántos los escribió OTRO modo (re-entrada → índice Φ).
     // RECUPERACIÓN en PARALELO: memoria y biblioteca embeben la consulta cada una; antes
     // corrían en serie (dos embeddings secuenciales). Ahora se solapan.
-    let ((grounding, mem_hits, cross_hits), lib_grounding) = tokio::join!(
-        relevant_knowledge(&body.prompt),
-        library_grounding(&body.prompt),
-    );
+    let ((grounding, mem_hits, cross_hits), lib_grounding) = if body.fast {
+        // Modo voz: sin recuperación proactiva de memoria/biblioteca (dos embeddings por
+        // turno) → menos latencia. El chat de texto sí recupera; la voz se apoya en el hilo
+        // de conversación (que ya viaja con cada turno).
+        ((String::new(), 0usize, 0usize), String::new())
+    } else {
+        tokio::join!(
+            relevant_knowledge(&body.prompt),
+            library_grounding(&body.prompt),
+        )
+    };
     // COMPRENSIÓN: razona QUÉ te está diciendo Ariel (intención + hechos a recordar). Es
     // una inferencia LLM extra (~varios segundos), así que NO siempre bloquea la respuesta:
     // solo cuando el turno parece una PREGUNTA, donde la anti-alucinación importa (dilo con
@@ -1702,7 +1999,15 @@ async fn chat(
     // arranca de inmediato en vez de esperar una inferencia que no cambia el tono.
     // Segundo plano PRESENTE en el instante de leer: quién es Ariel + qué venía viviendo AION.
     let bg = comprehension_background();
-    let comp = if looks_like_question(&body.prompt) {
+    // En modo VOZ (fast) la comprensión NUNCA bloquea: una inferencia LLM de varios
+    // segundos antes de responder hace la conversación inviable en tiempo real. Corre en
+    // segundo plano (sigue memorizando hechos); la respuesta arranca de inmediato.
+    let comp = if body.fast {
+        // Modo VOZ: NO ejecutar comprehend EN ABSOLUTO (ni en segundo plano). Usa el LLM
+        // LOCAL (Gemma ~10 GB) que compite con Qwen-TTS por la GPU → ralentiza la voz. En
+        // una conversación fluida no compensa; el chat de TEXTO sí comprende y memoriza.
+        None
+    } else if looks_like_question(&body.prompt) {
         crate::comprehension::comprehend(&body.prompt, &grounding, &bg).await
     } else {
         let p = body.prompt.clone();
@@ -1716,7 +2021,7 @@ async fn chat(
         None
     };
     // PROMPT DINÁMICO: elige el modo (persona) según lo que el usuario necesita.
-    let mode = crate::prompts::route(&*engine, &body.prompt).await;
+    let mode = crate::prompts::route(&*engine, &body.prompt, !body.fast).await;
     // EMPATÍA: adapta el tono al estado del usuario (frustración, prisa, confusión…).
     let empathy = crate::empathy::directive(&crate::empathy::read_state(&body.prompt));
     // ¿Razonamiento profundo? Solo si el usuario lo pidió Y la pregunta lo amerita.
@@ -1777,6 +2082,11 @@ async fn chat(
         } else {
             format!("\n\n{note}")
         }
+    } else if body.fast {
+        // Modo voz: sin recall episódico PROACTIVO (un embedding por turno) → menos
+        // latencia. Si Ariel pregunta explícitamente «¿te acuerdas de…?» sí se recupera
+        // (rama de arriba); aquí, en charla fluida, AION se apoya en el hilo.
+        String::new()
     } else {
         let hits = crate::episodic::recall(&body.prompt, 2, 0).await;
         let note = crate::episodic::proactive_note(&hits);
@@ -1881,23 +2191,55 @@ async fn chat(
         + usize::from(!lib_block.is_empty())
         + usize::from(!proj_block.is_empty())
         + usize::from(!epi_block.is_empty());
-    let self_ctx = format!(
-        "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}{}{}{}",
-        self_awareness_prompt(),
-        lang_directive(&body.lang),
-        crate::prompts::persona(&mode),
-        empathy_block,
-        think_note,
-        mem_block,
-        epi_block,
-        proj_block,
-        lib_block,
-        comp_block,
-        senses_block,
-        computer_block,
-        action_note,
-        face_block,
-        inventory_block,
+    // MODO VOZ: respuestas BREVES y conversacionales. En el test de latencia las respuestas
+    // salían de 200-300 palabras (ensayos) → tardan mucho y no suenan a conversación hablada.
+    // Esto NO toca el alma (identidad/persona): solo pide brevedad, como en una llamada.
+    let voice_note = if body.fast { VOICE_NOTE } else { "" };
+    let self_ctx = if using_voice_brain {
+        // CEREBRO DE VOZ: prompt ESTABLE y cacheable. El prompt completo lleva bloques que
+        // CAMBIAN cada turno (memoria reciente, hora, diario, presencia, estado interno…) →
+        // rompen el prompt-cache del modelo local → prefill completo (~2s) cada turno. Aquí
+        // usamos solo lo CONSTANTE: identidad (SELF_SUMMARY) + persona + voz, más los bloques
+        // de PERCEPCIÓN (vacíos salvo consulta puntual). La continuidad la da el HISTORIAL.
+        // → el prefijo no cambia entre turnos → cache HIT → TTFT ~0.4s (medido).
+        format!(
+            "{}\n\n{}\n\n{}{}{}{}{}{}",
+            crate::self_model::SELF_SUMMARY,
+            lang_directive(&body.lang),
+            crate::prompts::persona(&mode),
+            voice_note,
+            senses_block,
+            computer_block,
+            face_block,
+            inventory_block,
+        )
+    } else {
+        format!(
+            "{}\n\n{}\n\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            self_awareness_prompt(),
+            lang_directive(&body.lang),
+            crate::prompts::persona(&mode),
+            empathy_block,
+            think_note,
+            voice_note,
+            mem_block,
+            epi_block,
+            proj_block,
+            lib_block,
+            comp_block,
+            senses_block,
+            computer_block,
+            action_note,
+            face_block,
+            inventory_block,
+        )
+    };
+    // 📏 Tamaño del prompt de sistema (para diagnosticar el coste de prefill: cuanto más
+    // grande, más tarda DeepSeek en subir+procesar y más cuesta cada turno).
+    tracing::info!(
+        sys_chars = self_ctx.len(),
+        fast = body.fast,
+        "📏 PROMPT sistema"
     );
 
     // ACTO CONSCIENTE + MEMORIA DE HECHOS: si comprendimos EN LÍNEA (turno-pregunta), los
@@ -1917,7 +2259,30 @@ async fn chat(
     }
     let history: Vec<Message> = convo.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
-    tokio::spawn(async move {
+    // Si el cliente se desconecta (p. ej. INTERRUMPES a AION y cambias de tema), abortamos
+    // la generación del LLM: ni gasta cómputo en una respuesta que ya no oyes, ni guarda en
+    // el hilo una respuesta que no escuchaste (que se intercalaría tras tu nuevo mensaje y
+    // desordenaría el historial, confundiendo al agente). Así, al cambiar de tema, te sigue
+    // limpio. El guard se aloja DENTRO del stream y aborta la tarea al soltarse.
+    struct AbortOnDrop(tokio::task::JoinHandle<()>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    // ⏱️ Instrumentación de latencia (visible en los logs): mide desde el arranque de la
+    // generación hasta el primer token y hasta la respuesta completa.
+    let t_turn = std::time::Instant::now();
+    tracing::info!(
+        fast = body.fast,
+        brain = if using_voice_brain {
+            "local-voz(Qwen3-4B)"
+        } else {
+            "proveedor"
+        },
+        "🎤 CHAT generación iniciada"
+    );
+    let gen = tokio::spawn(async move {
         let mut messages = vec![Message::system(self_ctx)];
         messages.extend(history); // hilo de conversación (resumen + turnos recientes)
         let req = GenerateRequest {
@@ -1925,11 +2290,30 @@ async fn chat(
             // (saludo, recordar el nombre) responde al instante sin cadena de pensamiento.
             messages,
             think: deep,
-            temperature: Some(1.0),
-            max_tokens: None,
+            // VOZ: temperatura más baja (más coherente) y respuesta MUY ACOTADA a ~90 tokens
+            // (1-2 frases). Clave para la LATENCIA percibida: con TTS y cerebro compitiendo por
+            // la GPU, una respuesta de 200 tokens tardaba ~5s en generarse + mucho rato en
+            // hablarse → se sentía "9s". 90 tokens = respuesta breve, conversación ágil de ida y
+            // vuelta. El proveedor de texto (DeepSeek) mantiene su comportamiento normal.
+            temperature: Some(if using_voice_brain { 0.7 } else { 1.0 }),
+            max_tokens: if using_voice_brain { Some(90) } else { None },
         };
         let tx2 = tx.clone();
         let acc = answer_acc.clone();
+        let mut first_token = true;
+        // Instrumentación de latencia a ARCHIVO (los logs de stderr no se capturan en la app
+        // empaquetada). Por turno registramos: TTFT, tiempo a la 1ª FRASE (cuando el front
+        // arranca el TTS = lo que el usuario percibe como "Pensando→Hablando" menos el TTFB
+        // del TTS ~0.16s) y el total. Se anexa a ~/.../AION/voice_latency.jsonl.
+        let mut ttft_ms: u64 = 0;
+        let mut fs_ms: u64 = 0;
+        let mut first_sentence = true;
+        let eng_label: &str = if using_voice_brain {
+            "voz-local"
+        } else {
+            "proveedor"
+        };
+        let lat_path = crate::app_data_dir().join("voice_latency.jsonl");
         let result = engine
             .generate_stream(
                 req,
@@ -1939,10 +2323,34 @@ async fn chat(
                             serde_json::json!({ "kind": "thinking", "text": text })
                         }
                         StreamChunk::Answer { text } => {
+                            if first_token {
+                                first_token = false;
+                                ttft_ms = t_turn.elapsed().as_millis() as u64;
+                                tracing::info!(ms = ttft_ms, "⏱️ PRIMER TOKEN");
+                            }
                             acc.lock().unwrap_or_else(|e| e.into_inner()).push_str(text);
+                            if first_sentence && text.contains(['.', '!', '?', '…']) {
+                                first_sentence = false;
+                                fs_ms = t_turn.elapsed().as_millis() as u64;
+                            }
                             serde_json::json!({ "kind": "answer", "text": text })
                         }
                         StreamChunk::Done { tokens, tokens_per_sec } => {
+                            let total_ms = t_turn.elapsed().as_millis() as u64;
+                            tracing::info!(ms = total_ms, tokens = *tokens, tps = *tokens_per_sec, "⏱️ RESPUESTA COMPLETA");
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            let line = format!(
+                                "{{\"ts\":{ts},\"engine\":\"{eng_label}\",\"ttft_ms\":{ttft_ms},\"first_sentence_ms\":{fs_ms},\"total_ms\":{total_ms},\"tokens\":{},\"tps\":{:.1}}}\n",
+                                *tokens, *tokens_per_sec
+                            );
+                            let _ = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&lat_path)
+                                .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
                             serde_json::json!({ "kind": "done", "tokens": tokens, "tps": tokens_per_sec })
                         }
                     };
@@ -2021,7 +2429,13 @@ async fn chat(
         }
     });
 
-    let stream = ReceiverStream::new(rx).map(Ok);
+    // El guard viaja DENTRO del stream: cuando Axum lo suelta (cliente desconectado),
+    // se dropea y aborta la generación de arriba (cancelación cooperativa por desconexión).
+    let guard = AbortOnDrop(gen);
+    let stream = ReceiverStream::new(rx).map(move |ev| {
+        let _ = &guard;
+        Ok(ev)
+    });
     Sse::new(stream)
 }
 
@@ -2441,6 +2855,7 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::PcTypeTool::new()));
         tools.register(Arc::new(crate::agent_tools::PcKeyTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
+        tools.register(Arc::new(crate::agent_tools::GenerateDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
         // 📘 SkillBook (Hermes): memoria PROCEDIMENTAL — cómo hacer cosas que ya funcionaron.
@@ -2927,6 +3342,7 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::PcTypeTool::new()));
         tools.register(Arc::new(crate::agent_tools::PcKeyTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
+        tools.register(Arc::new(crate::agent_tools::GenerateDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
         // 💬 COMUNICACIONES en modo autónomo: SOLO lectura (agenda y contactos) para que el
@@ -5806,6 +6222,24 @@ async fn projects_remove(Json(b): Json<ProjId>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true }))
 }
 
+#[derive(Deserialize)]
+struct ProjUpdate {
+    id: String,
+    name: String,
+    #[serde(default)]
+    desc: String,
+}
+/// Edita el nombre/descripción de un proyecto.
+async fn project_update(Json(b): Json<ProjUpdate>) -> Json<serde_json::Value> {
+    if b.name.trim().is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "el nombre no puede estar vacío" }));
+    }
+    match crate::projects::update(&b.id, &b.name, &b.desc) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "error": "proyecto no encontrado" })),
+    }
+}
+
 /// Carga TODO el workspace de un proyecto en una sola llamada.
 async fn project_get(Json(b): Json<ProjId>) -> Json<serde_json::Value> {
     match crate::projects::get(&b.id) {
@@ -6049,6 +6483,179 @@ async fn project_studio_remove(Json(b): Json<OutRemove>) -> Json<serde_json::Val
     Json(serde_json::json!({ "ok": true }))
 }
 
+// ── Generación de documentos branded (aion-docgen) ───────────────────────────
+
+#[derive(Deserialize)]
+struct DocClient {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    company: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    address: String,
+}
+#[derive(Deserialize)]
+struct DocGenReq {
+    #[serde(default = "doc_tmpl_base")]
+    template: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    markdown: String,
+    #[serde(default = "doc_fmt_pdf")]
+    format: String,
+    #[serde(default)]
+    subtitle: Option<String>,
+    #[serde(default)]
+    date: Option<String>,
+    #[serde(default)]
+    number: Option<String>,
+    #[serde(default)]
+    lang: Option<String>,
+    #[serde(default)]
+    client: Option<DocClient>,
+}
+fn doc_tmpl_base() -> String {
+    "base".into()
+}
+fn doc_fmt_pdf() -> String {
+    "pdf".into()
+}
+
+fn doc_filename(title: &str) -> String {
+    let t: String = title
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let t = t.trim().trim_matches(|c| c == '_' || c == ' ');
+    if t.is_empty() {
+        "documento".into()
+    } else {
+        t.chars().take(60).collect()
+    }
+}
+
+fn doc_error(e: String) -> axum::response::Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "ok": false, "error": e })),
+    )
+        .into_response()
+}
+
+/// Renderiza un `DocRequest` al formato pedido y lo devuelve como descarga (attachment).
+async fn render_document_response(
+    req: &aion_docgen::DocRequest,
+    fmt: aion_docgen::DocFormat,
+    title: &str,
+) -> axum::response::Response {
+    let (bytes, ctype): (Vec<u8>, &str) = match fmt {
+        aion_docgen::DocFormat::Pdf => {
+            match aion_docgen::render_pdf(req, &aion_docgen::PdfOptions::default()).await {
+                Ok(b) => (b, "application/pdf"),
+                Err(e) => return doc_error(e),
+            }
+        }
+        aion_docgen::DocFormat::Docx => match aion_docgen::render_docx(req) {
+            Ok(b) => (
+                b,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+            Err(e) => return doc_error(e),
+        },
+        aion_docgen::DocFormat::Html => match aion_docgen::render_html(req) {
+            Ok(s) => (s.into_bytes(), "text/html; charset=utf-8"),
+            Err(e) => return doc_error(e),
+        },
+        aion_docgen::DocFormat::Markdown => (
+            req.body_markdown.clone().into_bytes(),
+            "text/markdown; charset=utf-8",
+        ),
+    };
+    let filename = format!("{}.{}", doc_filename(title), fmt.ext());
+    (
+        [
+            (header::CONTENT_TYPE, ctype.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// Perfil de marca actual (logo/colores/idioma/numeración) usado por los documentos.
+async fn brand_get() -> Json<serde_json::Value> {
+    let brand = aion_docgen::BrandProfile::load(crate::agent_tools::brand_profile_path());
+    Json(serde_json::json!({ "ok": true, "brand": brand }))
+}
+/// Guarda el perfil de marca (lo configura el usuario una vez; se aplica a cada documento).
+async fn brand_set(Json(b): Json<aion_docgen::BrandProfile>) -> Json<serde_json::Value> {
+    match b.save(crate::agent_tools::brand_profile_path()) {
+        Ok(_) => Json(serde_json::json!({ "ok": true, "brand": b })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+/// Genera un documento branded (PDF/Word/HTML) desde Markdown y lo devuelve como descarga.
+async fn documents_generate(Json(b): Json<DocGenReq>) -> axum::response::Response {
+    if b.markdown.trim().is_empty() {
+        return doc_error("falta el contenido (markdown) del documento".into());
+    }
+    let fmt = aion_docgen::DocFormat::parse(&b.format).unwrap_or(aion_docgen::DocFormat::Pdf);
+    let mut brand = aion_docgen::BrandProfile::load(crate::agent_tools::brand_profile_path());
+    if let Some(l) = b.lang.as_deref().filter(|s| !s.is_empty()) {
+        brand.lang = l.to_string();
+    }
+    let date = b
+        .date
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| crate::agent_tools::human_date(&brand.lang));
+    let mut req = aion_docgen::DocRequest::new(&b.template, &b.title, &b.markdown);
+    req.brand = brand;
+    req.meta.subtitle = b.subtitle.clone();
+    req.meta.date = date;
+    req.meta.number = b.number.clone();
+    req.meta.client = b.client.as_ref().map(|c| aion_docgen::ClientInfo {
+        name: c.name.clone(),
+        company: c.company.clone(),
+        email: c.email.clone(),
+        address: c.address.clone(),
+    });
+    render_document_response(&req, fmt, &b.title).await
+}
+
+#[derive(Deserialize)]
+struct StudioExport {
+    project_id: String,
+    output_id: String,
+    #[serde(default = "doc_fmt_pdf")]
+    format: String,
+}
+/// Exporta una salida de Studio (Markdown) a un documento branded descargable.
+async fn project_studio_export(Json(b): Json<StudioExport>) -> axum::response::Response {
+    let Some(out) = crate::projects::output(&b.project_id, &b.output_id) else {
+        return doc_error("salida no encontrada".into());
+    };
+    let fmt = aion_docgen::DocFormat::parse(&b.format).unwrap_or(aion_docgen::DocFormat::Pdf);
+    let brand = aion_docgen::BrandProfile::load(crate::agent_tools::brand_profile_path());
+    let mut req = aion_docgen::DocRequest::new("base", &out.title, &out.content);
+    req.meta.date = out.created.chars().take(10).collect();
+    req.brand = brand;
+    render_document_response(&req, fmt, &out.title).await
+}
+
 /// **Audio Overview**: genera un GUION hablado de las fuentes y lo sintetiza a audio
 /// con el TTS del SISTEMA (sin instalar nada), reproducible en el navegador.
 async fn project_studio_audio(Json(b): Json<StudioGen>) -> Json<serde_json::Value> {
@@ -6184,6 +6791,200 @@ struct AudioQuery {
     file: String,
 }
 /// Sirve el fichero de audio de una salida de Studio (audio overview).
+/// Petición de voz: el texto a hablar + preferencias (motor, voz, idioma, ritmo).
+#[derive(Deserialize)]
+struct TtsReq {
+    text: String,
+    #[serde(default)]
+    voice: String,
+    #[serde(default)]
+    lang: String,
+    #[serde(default)]
+    engine: String,
+    #[serde(default)]
+    speed: Option<f32>,
+    /// Expresividad/énfasis de la voz clonada (Chatterbox): 0.25 sobrio … 1.0 muy expresivo.
+    #[serde(default)]
+    exaggeration: Option<f32>,
+}
+
+/// Sintetiza la voz de AION delegando en el sidecar local (127.0.0.1:8766).
+/// Devuelve WAV. Si el sidecar no está, responde 503 y la UI usa la voz del sistema.
+async fn tts_speak(Json(req): Json<TtsReq>) -> axum::response::Response {
+    if req.text.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "texto vacío").into_response();
+    }
+    // ⏱️ Instrumentación de latencia de voz (visible en logs).
+    let t0 = std::time::Instant::now();
+    let nchars = req.text.chars().count();
+    let eng = if req.engine.is_empty() {
+        "kokoro".to_string()
+    } else {
+        req.engine.clone()
+    };
+    let body = serde_json::json!({
+        "text": req.text,
+        "voice": req.voice,
+        "lang": if req.lang.is_empty() { "es" } else { &req.lang },
+        "engine": if req.engine.is_empty() { "kokoro" } else { &req.engine },
+        "speed": req.speed.unwrap_or(1.0),
+        "exaggeration": req.exaggeration,
+    });
+    match reqwest::Client::new()
+        .post("http://127.0.0.1:8766/tts")
+        .json(&body)
+        // 300s: la voz clonada (Chatterbox) es lenta (~3× tiempo real); kokoro/piper
+        // responden al instante, así que un techo alto no les afecta.
+        .timeout(std::time::Duration::from_secs(300))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => {
+            // Reenvía el formato real que produjo el sidecar (MP3 normalmente; WAV si
+            // no hay codificador). WKWebView reproduce MP3 fiable; WAV en <audio> falla.
+            let ct = r
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("audio/mpeg")
+                .to_string();
+            match r.bytes().await {
+                Ok(bytes) => {
+                    tracing::info!(
+                        ms = t0.elapsed().as_millis() as u64,
+                        engine = %eng,
+                        chars = nchars,
+                        bytes = bytes.len(),
+                        "🔊 TTS frase"
+                    );
+                    (
+                        [
+                            (header::CONTENT_TYPE, ct),
+                            (header::CACHE_CONTROL, "no-store".to_string()),
+                        ],
+                        bytes,
+                    )
+                        .into_response()
+                }
+                Err(_) => (StatusCode::BAD_GATEWAY, "tts: no pude leer el audio").into_response(),
+            }
+        }
+        Ok(_) => (StatusCode::BAD_GATEWAY, "tts: el motor de voz falló").into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "tts: sidecar no disponible",
+        )
+            .into_response(),
+    }
+}
+
+/// Carpeta de clips de referencia para clonación de voz.
+fn voices_clone_dir() -> std::path::PathBuf {
+    crate::app_data_dir().join("tts").join("voices-clone")
+}
+
+/// Slug seguro para el nombre de una voz clonada (solo a-z0-9-_).
+fn voice_slug(name: &str) -> String {
+    let s: String = name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let s = s.trim_matches('-').to_string();
+    if s.is_empty() {
+        "voz".to_string()
+    } else {
+        s
+    }
+}
+
+/// Lista las voces clonadas disponibles (nombres de clip en voices-clone/).
+async fn tts_voices() -> impl axum::response::IntoResponse {
+    let mut cloned: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(voices_clone_dir()) {
+        for e in rd.flatten() {
+            let f = e.file_name().to_string_lossy().to_string();
+            let fl = f.to_lowercase();
+            if fl.ends_with(".norm.wav") {
+                continue;
+            }
+            if [".wav", ".mp3", ".flac", ".m4a", ".ogg"]
+                .iter()
+                .any(|x| fl.ends_with(x))
+            {
+                if let Some(stem) = std::path::Path::new(&f).file_stem() {
+                    cloned.push(stem.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    cloned.sort();
+    cloned.dedup();
+    Json(serde_json::json!({ "cloned": cloned }))
+}
+
+#[derive(Deserialize)]
+struct CloneReq {
+    name: String,
+    /// extensión del archivo original (wav/mp3/m4a…), para guardarlo bien.
+    #[serde(default)]
+    ext: String,
+    /// audio en base64 (la UI lo lee con FileReader).
+    content_b64: String,
+}
+
+/// Sube un clip de referencia y lo guarda como voz clonable. Devuelve el slug.
+async fn tts_clone(Json(req): Json<CloneReq>) -> impl axum::response::IntoResponse {
+    use base64::Engine;
+    let slug = voice_slug(&req.name);
+    let ext = {
+        let e = req.ext.trim().trim_start_matches('.').to_lowercase();
+        if ["wav", "mp3", "flac", "m4a", "ogg"].contains(&e.as_str()) {
+            e
+        } else {
+            "wav".into()
+        }
+    };
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(req.content_b64.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => {
+            return Json(
+                serde_json::json!({ "ok": false, "error": format!("base64 inválido: {e}") }),
+            )
+        }
+    };
+    if bytes.len() < 2000 {
+        return Json(serde_json::json!({ "ok": false, "error": "clip demasiado corto o vacío" }));
+    }
+    let dir = voices_clone_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    // Limpia variantes previas del mismo slug (otra extensión + normalizado caché).
+    for x in ["wav", "mp3", "flac", "m4a", "ogg", "norm.wav"] {
+        let _ = std::fs::remove_file(dir.join(format!("{slug}.{x}")));
+    }
+    let path = dir.join(format!("{slug}.{ext}"));
+    if let Err(e) = std::fs::write(&path, &bytes) {
+        return Json(serde_json::json!({ "ok": false, "error": format!("no pude guardar: {e}") }));
+    }
+    Json(serde_json::json!({ "ok": true, "voice": slug }))
+}
+
+#[derive(Deserialize)]
+struct CloneRemoveReq {
+    name: String,
+}
+
+/// Elimina una voz clonada (y su caché normalizada).
+async fn tts_clone_remove(Json(req): Json<CloneRemoveReq>) -> impl axum::response::IntoResponse {
+    let slug = voice_slug(&req.name);
+    let dir = voices_clone_dir();
+    for x in ["wav", "mp3", "flac", "m4a", "ogg", "norm.wav"] {
+        let _ = std::fs::remove_file(dir.join(format!("{slug}.{x}")));
+    }
+    Json(serde_json::json!({ "ok": true }))
+}
+
 async fn project_audio(Query(q): Query<AudioQuery>) -> axum::response::Response {
     let path = crate::projects::audio_path(&q.project_id, &q.file);
     match std::fs::read(&path) {
@@ -6657,21 +7458,202 @@ async fn agent_wipe() -> Json<serde_json::Value> {
 }
 
 /// **Exporta** la memoria como archivo JSONL descargable (para llevarla a otro PC/Mac).
-async fn memory_export() -> impl axum::response::IntoResponse {
-    let body = match crate::shared_memory() {
-        Ok(m) => m.export_jsonl(),
-        Err(_) => String::new(),
+#[derive(Deserialize)]
+struct MemExportQuery {
+    /// Si viene, exporta SOLO los recuerdos de ese proyecto (canónico, todas sus ramas y
+    /// variantes). Ausente = toda la memoria.
+    #[serde(default)]
+    project: Option<String>,
+}
+
+async fn memory_export(Query(q): Query<MemExportQuery>) -> impl axum::response::IntoResponse {
+    let (body, filename) = match crate::shared_memory() {
+        Ok(m) => match q.project.as_deref().filter(|p| !p.trim().is_empty()) {
+            Some(p) => {
+                let canon = aion_memory::canonical_project(p);
+                (
+                    m.export_project_jsonl(p),
+                    format!("aion-memory-{canon}.jsonl"),
+                )
+            }
+            None => (m.export_jsonl(), "aion-memory.jsonl".to_string()),
+        },
+        Err(_) => (String::new(), "aion-memory.jsonl".to_string()),
     };
     (
         [
-            (axum::http::header::CONTENT_TYPE, "application/x-ndjson"),
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/x-ndjson".to_string(),
+            ),
             (
                 axum::http::header::CONTENT_DISPOSITION,
-                "attachment; filename=\"aion-memory.jsonl\"",
+                format!("attachment; filename=\"{filename}\""),
             ),
         ],
         body,
     )
+}
+
+/// **Desglose de memoria por proyecto** (medidor): nº de recuerdos, bytes, % del total y
+/// ahorro de tokens acumulado por proyecto (desde la auditoría del MCP). Alimenta el panel.
+async fn memory_projects() -> Json<serde_json::Value> {
+    use std::collections::HashMap;
+    let Ok(mem) = crate::shared_memory() else {
+        return Json(serde_json::json!({ "projects": [], "total_bytes": 0, "total_count": 0 }));
+    };
+    let breakdown = mem.project_breakdown();
+    let total_bytes = mem.byte_size().max(1);
+    let total_count = mem.len();
+
+    // Uso por proyecto desde la auditoría (últimas 5000 llamadas MCP): nº de consultas y tokens
+    // servidos. (Ya no hay "tokens ahorrados" por proyecto: la traducción ES→EN se retiró.)
+    let audit = crate::claude_mcp::audit_tail(5000);
+    let mut agg: HashMap<String, (i64, i64)> = HashMap::new(); // (calls, served)
+    for e in &audit {
+        let proj = e.get("project").and_then(|v| v.as_str()).unwrap_or("");
+        if proj.is_empty() {
+            continue;
+        }
+        let served = e.get("est_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+        let row = agg.entry(proj.to_string()).or_insert((0, 0));
+        row.0 += 1;
+        row.1 += served;
+    }
+
+    let projects: Vec<serde_json::Value> = breakdown
+        .iter()
+        .map(|p| {
+            let (calls, served) = agg.get(&p.project).copied().unwrap_or((0, 0));
+            let pct = p.bytes as f64 / total_bytes as f64 * 100.0;
+            serde_json::json!({
+                "project": p.project,
+                "count": p.count,
+                "bytes": p.bytes,
+                "pct": (pct * 10.0).round() / 10.0,
+                "last_activity": p.last_activity,
+                "calls": calls,
+                "tokens_served": served,
+            })
+        })
+        .collect();
+    let tagged_bytes: usize = breakdown.iter().map(|p| p.bytes).sum();
+    Json(serde_json::json!({
+        "projects": projects,
+        "total_bytes": total_bytes,
+        "total_count": total_count,
+        "tagged_bytes": tagged_bytes,
+        "untagged_bytes": total_bytes.saturating_sub(tagged_bytes),
+    }))
+}
+
+#[derive(Deserialize)]
+struct ForgetProjectBody {
+    project: String,
+    /// Guarda contra borrados accidentales: debe ser `true` para borrar de verdad.
+    #[serde(default)]
+    confirm: bool,
+}
+
+/// **Borra permanentemente** los recuerdos de un proyecto (libera espacio). Sin `confirm:true`
+/// NO borra: devuelve cuántos borraría (para que la UI confirme tras exportar el backup).
+async fn memory_forget_project(Json(b): Json<ForgetProjectBody>) -> Json<serde_json::Value> {
+    let Ok(mem) = crate::shared_memory() else {
+        return Json(serde_json::json!({ "error": "memoria no disponible" }));
+    };
+    let ids = mem.ids_for_project(&b.project);
+    if !b.confirm {
+        return Json(
+            serde_json::json!({ "ok": false, "confirm_required": true, "would_remove": ids.len() }),
+        );
+    }
+    match mem.forget(&ids) {
+        Ok(removed) => {
+            Json(serde_json::json!({ "ok": true, "removed": removed, "count": mem.len() }))
+        }
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// **Normaliza las etiquetas `[proyecto: X]`** a su forma canónica (con backup `.bak`). Unifica
+/// variantes (AION/aion, «Peace Harmony AFC»/peace-harmony). Idempotente.
+async fn memory_normalize() -> Json<serde_json::Value> {
+    let Ok(mem) = crate::shared_memory() else {
+        return Json(serde_json::json!({ "error": "memoria no disponible" }));
+    };
+    match mem.normalize_project_tags() {
+        Ok(r) => Json(serde_json::json!({
+            "ok": true,
+            "scanned": r.scanned,
+            "rewritten": r.rewritten,
+            "mapping": r.mapping.iter().map(|(f, t, n)| serde_json::json!({ "from": f, "to": t, "count": n })).collect::<Vec<_>>(),
+        })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct BackupMergeBody {
+    project: String,
+    /// Contenido JSONL del backup EXISTENTE a actualizar (puede venir vacío para crear uno).
+    #[serde(default)]
+    existing_jsonl: String,
+}
+
+/// **Actualiza un backup** de proyecto: fusiona la memoria ACTUAL del proyecto con un backup
+/// existente (unión por `id`, gana la versión actual). Devuelve el JSONL combinado para
+/// descargar — sin tocar la memoria viva. Así se puede mantener un backup acumulativo.
+async fn memory_backup_merge(Json(b): Json<BackupMergeBody>) -> Json<serde_json::Value> {
+    use std::collections::HashSet;
+    let Ok(mem) = crate::shared_memory() else {
+        return Json(serde_json::json!({ "error": "memoria no disponible" }));
+    };
+    // Estado ACTUAL del proyecto (fresco) primero.
+    let current = mem.export_project_jsonl(&b.project);
+    let mut ids: HashSet<String> = HashSet::new();
+    let mut out = String::new();
+    let mut from_current = 0usize;
+    for line in current.lines() {
+        if let Some(id) = line_record_id(line) {
+            if ids.insert(id) {
+                out.push_str(line);
+                out.push('\n');
+                from_current += 1;
+            }
+        }
+    }
+    // Del backup viejo, conserva solo lo que no esté ya (registros borrados de la memoria viva
+    // pero presentes en el backup → no se pierden).
+    let mut from_backup = 0usize;
+    for line in b.existing_jsonl.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(id) = line_record_id(line) {
+            if ids.insert(id) {
+                out.push_str(line);
+                out.push('\n');
+                from_backup += 1;
+            }
+        }
+    }
+    Json(serde_json::json!({
+        "ok": true,
+        "jsonl": out,
+        "total": from_current + from_backup,
+        "from_current": from_current,
+        "from_backup": from_backup,
+    }))
+}
+
+/// Extrae el `id` de una línea JSONL de memoria (para deduplicar al fusionar backups).
+fn line_record_id(line: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(line.trim())
+        .ok()?
+        .get("id")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 #[derive(Deserialize)]
@@ -6723,11 +7705,12 @@ async fn claude_code_set(Json(b): Json<ClaudeCodeConnectBody>) -> Json<serde_jso
     Json(serde_json::json!({ "ok": true }))
 }
 
-/// Conexión 1-click: genera token NUEVO (revoca el anterior), lo registra en la
-/// CLI de Claude (scope user) y activa el endpoint /mcp.
 async fn claude_code_connect(Json(b): Json<ClaudeCodeConnectBody>) -> Json<serde_json::Value> {
     let mut cfg = crate::claude_code::load();
-    let token = crate::claude_code::generate_token();
+    // Token ESTABLE entre reinicios/OTA (el mismo que protege `/api/*`): un token efímero por
+    // conexión dejaba `~/.claude.json` desincronizado del que valida `/mcp` en cada reinicio y
+    // rompía la conexión con un 401 "Token inválido". Persistirlo la mantiene viva sin re-clicar.
+    let token = crate::claude_code::persisted_token();
     match crate::claude_code::register(&token) {
         Ok(()) => {
             cfg.enabled = true;
@@ -6792,22 +7775,12 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
     let mut tokens_served: u64 = 0;
     let mut writes: u64 = 0;
     let mut errors: u64 = 0;
-    // Ahorro de la TRADUCCIÓN ES→EN (lo que recortó servir inglés cacheado al puente). Es
-    // distinto del ahorro del RAG (servir solo lo relevante) que mide `total_savings_est`.
-    let mut tokens_saved_tr: u64 = 0;
-    let mut by_tool_translation: std::collections::HashMap<String, u64> =
-        std::collections::HashMap::new();
     for e in &entries {
         let tool = e.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
         let tok = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-        let saved = e.get("saved_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
         *by_tool.entry(tool.to_string()).or_insert(0) += 1;
         *by_tool_tokens.entry(tool.to_string()).or_insert(0) += tok;
         tokens_served += tok;
-        tokens_saved_tr += saved;
-        if saved > 0 {
-            *by_tool_translation.entry(tool.to_string()).or_insert(0) += saved;
-        }
         if tool == "aion_remember" {
             writes += 1;
         }
@@ -6815,20 +7788,10 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
             errors += 1;
         }
     }
-    // % de ahorro de la traducción sobre el equivalente español de TODO lo servido
-    // (servido_EN + ahorrado): cuántos tokens menos viajaron gracias a traducir.
-    let translation_savings_pct: u64 = {
-        let es_equiv = tokens_served + tokens_saved_tr;
-        if es_equiv > 0 {
-            (tokens_saved_tr as f64 / es_equiv as f64 * 100.0).round() as u64
-        } else {
-            0
-        }
-    };
     // SESIONES: agrupa las llamadas por cercanía temporal (un hueco > 30 min abre una sesión
     // nueva). Claude Code no envía un id de sesión, así que se infiere del tiempo. Por sesión:
-    // inicio, nº de llamadas, tokens servidos y tokens ahorrados por la traducción.
-    let mut timeline: Vec<(chrono::DateTime<chrono::Utc>, u64, u64)> = entries
+    // inicio, nº de llamadas y tokens servidos.
+    let mut timeline: Vec<(chrono::DateTime<chrono::Utc>, u64)> = entries
         .iter()
         .filter_map(|e| {
             let ts = e
@@ -6837,22 +7800,20 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())?
                 .with_timezone(&chrono::Utc);
             let served = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let saved = e.get("saved_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            Some((ts, served, saved))
+            Some((ts, served))
         })
         .collect();
-    timeline.sort_by_key(|(ts, _, _)| *ts);
+    timeline.sort_by_key(|(ts, _)| *ts);
     const SESSION_GAP_SECS: i64 = 30 * 60;
     let mut sessions: Vec<serde_json::Value> = Vec::new();
     let mut i = 0usize;
     while i < timeline.len() {
         let start = timeline[i].0;
-        let (mut calls, mut served, mut saved) = (0u64, 0u64, 0u64);
+        let (mut calls, mut served) = (0u64, 0u64);
         let mut last = start;
         while i < timeline.len() && (timeline[i].0 - last).num_seconds() <= SESSION_GAP_SECS {
             calls += 1;
             served += timeline[i].1;
-            saved += timeline[i].2;
             last = timeline[i].0;
             i += 1;
         }
@@ -6860,38 +7821,30 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
             "started_at": start.to_rfc3339(),
             "calls": calls,
             "tokens_served": served,
-            "tokens_saved": saved,
         }));
     }
     // Solo las últimas 30 sesiones al cliente (el chart muestra una cola; acota el payload).
     let sessions_tail: Vec<serde_json::Value> =
         sessions.iter().rev().take(30).rev().cloned().collect();
-    // Coste hipotético de volcar la memoria vigente completa en cada sesión.
-    let (full_dump_tokens, memory_count) = crate::shared_memory()
+    // Tamaño del CORPUS de memoria accesible bajo demanda (tokens estimados de toda la memoria
+    // vigente). NO es un "ahorro": es el contexto al que Claude Code accede sin cargarlo entero —
+    // por consulta solo paga `avg_tokens_per_call`. Framing honesto (no "X millones ahorrados").
+    let (corpus_tokens, memory_count) = crate::shared_memory()
         .map(|m| {
             let contents = m.contents();
-            let dump_tok = contents
+            let tok = contents
                 .iter()
                 .map(|c| c.chars().count() as u64)
                 .sum::<u64>()
                 / 4;
-            (dump_tok, contents.len() as u64)
+            (tok, contents.len() as u64)
         })
         .unwrap_or((0, 0));
-    // Eficiencia media por llamada: cuánto ahorra servir bajo demanda vs. dump completo.
     let avg_per_call = if total > 0 {
         tokens_served / total as u64
     } else {
         0
     };
-    let savings_pct: u64 = if full_dump_tokens > 0 && avg_per_call < full_dump_tokens {
-        ((full_dump_tokens - avg_per_call) as f64 / full_dump_tokens as f64 * 100.0).round() as u64
-    } else {
-        0
-    };
-    // Tokens ahorrados acumulados (estimación): lo que se habría enviado de más
-    // en cada llamada × número de llamadas.
-    let total_savings_est = full_dump_tokens.saturating_sub(avg_per_call) * total as u64;
     // Stats del grafo de conocimiento.
     let g = crate::graph::KnowledgeGraph::open(crate::graph_path());
     let g_stats = g.stats();
@@ -6911,17 +7864,12 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
         "tokens_served": tokens_served,
         "writes": writes,
         "errors": errors,
-        "full_dump_tokens": full_dump_tokens,
+        "corpus_tokens": corpus_tokens,
         "memory_count": memory_count,
         "avg_tokens_per_call": avg_per_call,
-        "savings_pct": savings_pct,
-        "total_savings_est": total_savings_est,
         "graph_concepts": graph_concepts,
         "graph_communities": graph_communities,
         "last_activity": last,
-        "tokens_saved_translation": tokens_saved_tr,
-        "translation_savings_pct": translation_savings_pct,
-        "by_tool_translation": by_tool_translation,
         "sessions": sessions_tail,
     }))
 }

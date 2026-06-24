@@ -76,7 +76,7 @@ fn cell() -> &'static Mutex<Option<Session>> {
 }
 
 /// Localiza el ejecutable de Chrome/Chromium (AION_CHROME o rutas habituales).
-fn chrome_path() -> Option<String> {
+pub(crate) fn chrome_path() -> Option<String> {
     if let Ok(p) = std::env::var("AION_CHROME") {
         if !p.is_empty() {
             return Some(p);

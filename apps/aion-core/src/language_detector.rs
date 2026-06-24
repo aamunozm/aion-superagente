@@ -13,6 +13,7 @@
 /// (saltar un recuerdo español) PIERDE el ahorro que justifica todo esto. Por eso basta
 /// UNA señal española — acento/ñ, signo ¿¡, o dos palabras función comunes — para tratarlo
 /// como traducible. El español técnico (anglicismos, pocos acentos) pasa de sobra.
+#[allow(dead_code)]
 pub fn has_spanish_signal(text: &str) -> bool {
     if text
         .chars()
@@ -41,6 +42,7 @@ pub fn has_spanish_signal(text: &str) -> bool {
 
 /// ¿El texto contiene señal clara de italiano? Mismo bias e idea que el español: Ariel vive
 /// en Italia y puede guardar recuerdos en italiano, igual de caros en tokens que el español.
+#[allow(dead_code)]
 pub fn has_italian_signal(text: &str) -> bool {
     // Acentos GRAVES à è ì ò ù: típicos del italiano y ausentes del español (que usa los
     // agudos á í ó ú y la ñ). Una sola aparición ya es señal fuerte e inequívoca.
@@ -74,6 +76,7 @@ pub fn has_italian_signal(text: &str) -> bool {
 /// Gate del puente MCP: ¿vale la pena traducir esto a inglés? Sí si hay señal de español o
 /// de italiano (las dos lenguas de Ariel), ambas más caras en tokens que el inglés. Bias a
 /// traducir: un falso positivo (texto ya inglés) solo cuesta una traducción cacheada inocua.
+#[allow(dead_code)]
 pub fn needs_english_translation(text: &str) -> bool {
     has_spanish_signal(text) || has_italian_signal(text)
 }

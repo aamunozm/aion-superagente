@@ -1,10 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
 import { LANGS, useT } from "@/lib/i18n";
+import { playTtsBlob } from "@/lib/voice";
 import {
+  ttsSpeak,
+  ttsVoices,
+  ttsCloneUpload,
+  ttsCloneRemove,
   credentialsList,
   credentialRemove,
   credentialSet,
@@ -80,6 +85,358 @@ const DEEPSEEK_MODELS: { id: string; label: string; desc: string }[] = [
   { id: "deepseek-v3-0324",   label: "DeepSeek V3-0324",     desc: "Snapshot V3 de marzo 2025" },
   { id: "__custom__",         label: "Otro (escribir ID)",   desc: "" },
 ];
+
+// Voces locales disponibles, con su motor. Las latinas (Piper) son las más
+// naturales y con acento real → primeras y por defecto.
+// Voces de catálogo (Piper latino natural + Kokoro). Las clonadas se añaden
+// dinámicamente desde el backend (motor chatterbox).
+const VOICES: { id: string; engine: string; label: string }[] = [
+  // ESPAÑOL NATIVO con GÉNERO FIABLE (Piper) — RECOMENDADAS. Piper es determinista (cada voz
+  // es un modelo entrenado), así que el género es ESTABLE — a diferencia de Qwen3-TTS, cuyo
+  // género es inestable y se sesga a femenino (incl. clonación), verificado por F0.
+  { id: "es_ES-davefx-medium", engine: "piper", label: "Diego · hombre (español) ✓" },
+  { id: "es_MX-ald-medium", engine: "piper", label: "Mateo · hombre (México) ✓" },
+  { id: "es_MX-claude-high", engine: "piper", label: "Lucía · mujer (México) ✓" },
+  { id: "es_AR-daniela-high", engine: "piper", label: "Daniela · mujer (Argentina) ✓" },
+  // Qwen3-TTS (MLX) — multiidioma, tiempo real, hablantes NO nativos. ⚠️ El género es
+  // INESTABLE en este modelo 0.6B (puede sonar más agudo de lo esperado).
+  { id: "serena", engine: "qwen", label: "Qwen3 · Serena (mujer, multiidioma)" },
+  { id: "vivian", engine: "qwen", label: "Qwen3 · Vivian (mujer, multiidioma)" },
+  { id: "ryan", engine: "qwen", label: "Qwen3 · Ryan (hombre*, multiidioma)" },
+  { id: "aiden", engine: "qwen", label: "Qwen3 · Aiden (hombre*, multiidioma)" },
+  { id: "ef_dora", engine: "kokoro", label: "Español · Dora (Kokoro, mujer)" },
+  { id: "em_alex", engine: "kokoro", label: "Español · Alex (Kokoro, hombre)" },
+  { id: "if_sara", engine: "kokoro", label: "Italiano · Sara (mujer)" },
+  { id: "im_nicola", engine: "kokoro", label: "Italiano · Nicola (hombre)" },
+  { id: "af_heart", engine: "kokoro", label: "English · Heart (mujer)" },
+  { id: "am_michael", engine: "kokoro", label: "English · Michael (hombre)" },
+];
+const DEFAULT_VOICE_ID = "es_MX-ald-medium";
+
+// Las 12 voces diseñadas (VoiceDesign→clonadas) llevan slug «ES-Nombre / IT-Nombre /
+// EN-Nombre». Las clasificamos por idioma + género para agruparlas bonito en el selector.
+const VOICE_GENDER: Record<string, "m" | "f"> = {
+  Mateo: "m", Diego: "m", Valentina: "f", Camila: "f",
+  Marco: "m", Luca: "m", Giulia: "f", Sofia: "f",
+  James: "m", Ethan: "m", Emma: "f", Charlotte: "f",
+};
+// Solo mostramos tu voz personal real. Las voces "diseñadas" (ES-/IT-/EN- clonadas con
+// Qwen3-TTS 0.6B) se OCULTAN: ese modelo tiene género INESTABLE y sesgo femenino (Diego
+// sonaba a mujer, verificado por F0). Para género fiable usa las voces de catálogo Piper.
+const CLONE_GROUPS = ["Tu voz personal ★"];
+function classifyClone(slug: string): { group: string; label: string } {
+  const m = slug.match(/^(ES|IT|EN)-(.+)$/);
+  if (m) {
+    const lang = { ES: "Español latino", IT: "Italiano", EN: "Inglés" }[m[1] as "ES" | "IT" | "EN"];
+    const g = VOICE_GENDER[m[2]];
+    const sym = g === "m" ? "· hombre" : g === "f" ? "· mujer" : "";
+    return { group: lang, label: `${m[2]} ${sym}` };
+  }
+  return { group: "Tu voz personal ★", label: `${slug} · clonada ★` };
+}
+
+/** Todo lo que Ariel puede cambiar de la voz de AION: motor, voz, velocidad + prueba. */
+function VoiceCard() {
+  const { lang } = useT();
+  const [engine, setEngine] = useState<"auto" | "system">("auto");
+  const [voice, setVoice] = useState(DEFAULT_VOICE_ID);
+  const [speed, setSpeed] = useState(1);
+  const [exaggeration, setExaggeration] = useState(0.6);
+  const [testing, setTesting] = useState(false);
+  const [testMsg, setTestMsg] = useState<string | null>(null);
+  const [savedMsg, setSavedMsg] = useState(false);
+  // Voces clonadas (motor chatterbox), cargadas del backend.
+  const [cloned, setCloned] = useState<string[]>([]);
+  const [cloneName, setCloneName] = useState("");
+  const [cloning, setCloning] = useState(false);
+  const [cloneMsg, setCloneMsg] = useState<string | null>(null);
+  const cloneFile = useRef<HTMLInputElement>(null);
+
+  const refreshCloned = () =>
+    ttsVoices()
+      .then((r) => {
+        const cl = r.cloned || [];
+        setCloned(cl);
+        // Migración: las voces "diseñadas" (ES-/IT-/EN- clonadas con Qwen) están OCULTAS por
+        // género inestable/femenino. Si la voz guardada es una de esas (o un preset retirado),
+        // salta al NUEVO defecto Piper masculino (género fiable). La voz personal real ("chile",
+        // subidas del usuario) sigue siendo válida.
+        const isDesigned = (s: string) => /^(ES|IT|EN)-/.test(s);
+        const stored = (typeof localStorage !== "undefined" && localStorage.getItem("aion.voice.name")) || "";
+        const valid =
+          VOICES.some((v) => v.id === stored) || (cl.includes(stored) && !isDesigned(stored));
+        if (stored && !valid) {
+          save("aion.voice.name", DEFAULT_VOICE_ID);
+          save("aion.voice.engine", "piper");
+          setVoice(DEFAULT_VOICE_ID);
+        }
+      })
+      .catch(() => {});
+  useEffect(() => {
+    if (typeof localStorage === "undefined") return;
+    if (localStorage.getItem("aion.voice") === "system") setEngine("system");
+    setVoice(localStorage.getItem("aion.voice.name") || DEFAULT_VOICE_ID);
+    setSpeed(parseFloat(localStorage.getItem("aion.voice.speed") || "1") || 1);
+    setExaggeration(parseFloat(localStorage.getItem("aion.voice.exaggeration") || "0.6") || 0.6);
+    refreshCloned();
+  }, []);
+
+  const save = (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* */ } };
+  // El motor de una voz: clonada → Qwen3 (natural + tiempo real); si no, el del catálogo.
+  const voiceEngine = (id: string) =>
+    cloned.includes(id) ? "qwen" : VOICES.find((v) => v.id === id)?.engine || "kokoro";
+  const chooseVoice = (id: string) => {
+    setVoice(id);
+    save("aion.voice.name", id);
+    save("aion.voice.engine", voiceEngine(id));
+  };
+
+  async function uploadClone(file: File) {
+    const name = cloneName.trim();
+    if (!name) { setCloneMsg("Ponle un nombre a la voz (p. ej. Chile)."); return; }
+    setCloning(true);
+    setCloneMsg(null);
+    try {
+      const r = await ttsCloneUpload(name, file);
+      if (r.ok && r.voice) {
+        await refreshCloned();
+        chooseVoice(r.voice);
+        setCloneName("");
+        setCloneMsg(`✅ Voz «${r.voice}» añadida. Pruébala con «Probar voz» (la 1ª vez tarda unos segundos).`);
+      } else {
+        setCloneMsg(`⚠️ ${r.error || "no pude añadir la voz"}`);
+      }
+    } catch (e) {
+      setCloneMsg(`⚠️ ${e instanceof Error ? e.message : "error"}`);
+    } finally {
+      setCloning(false);
+    }
+  }
+
+  async function removeClone(name: string) {
+    await ttsCloneRemove(name).catch(() => {});
+    if (voice === name) chooseVoice(DEFAULT_VOICE_ID);
+    await refreshCloned();
+  }
+
+  async function test() {
+    setTestMsg(null);
+    setTesting(true);
+    try {
+      if (engine === "system") {
+        const u = new SpeechSynthesisUtterance("Hola Ariel, soy AION. Así sueno.");
+        u.lang = lang === "it" ? "it-IT" : lang === "en" ? "en-US" : "es-ES";
+        u.rate = speed;
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(u);
+      } else {
+        if (voiceEngine(voice) === "qwen" || voiceEngine(voice) === "chatterbox") {
+          setTestMsg("Generando con tu voz natural… (la 1ª vez puede tardar un momento)");
+        }
+        const blob = await ttsSpeak("Hola Ariel, soy AION. Así sueno con esta voz, más natural.", lang, {
+          voice,
+          engine: voiceEngine(voice),
+          speed,
+          exaggeration,
+        });
+        setTestMsg(null);
+        await playTtsBlob(blob);
+      }
+    } catch (e) {
+      setTestMsg(`No sonó (${e instanceof Error ? e.message : String(e)}). Se usará la voz del sistema.`);
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  const ENGINES: { key: "auto" | "system"; label: string; note: string }[] = [
+    { key: "auto", label: "Voz propia de AION", note: "Natural y local (Kokoro). Respaldo a la del sistema." },
+    { key: "system", label: "Voz del sistema", note: "La voz integrada de macOS. Instantánea." },
+  ];
+
+  return (
+    <div className="card">
+      <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "var(--text-2)" }}>
+        <Icon name="volume" size={16} /> Voz
+      </h2>
+      <p className="text-sm mb-3" style={{ color: "var(--text-3)" }}>
+        Cómo suena AION cuando lee sus respuestas y en el modo voz.
+      </p>
+
+      {/* Motor */}
+      <div className="flex flex-col sm:flex-row gap-2 mb-4">
+        {ENGINES.map((o) => {
+          const active = engine === o.key;
+          return (
+            <button
+              key={o.key}
+              onClick={() => { setEngine(o.key); save("aion.voice", o.key); }}
+              className="flex-1 text-left px-4 py-3 rounded-xl transition-all"
+              style={{
+                background: active ? "var(--accent-subtle)" : "var(--surface-2)",
+                border: `1px solid ${active ? "var(--accent)" : "transparent"}`,
+              }}
+            >
+              <div className="text-sm font-semibold" style={{ color: active ? "var(--gold-deep)" : "var(--text-1)" }}>
+                {o.label}
+              </div>
+              <div className="text-xs mt-0.5" style={{ color: "var(--text-3)" }}>{o.note}</div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Voz concreta + velocidad (solo aplican a la voz propia) */}
+      <div className="grid sm:grid-cols-2 gap-3" style={{ opacity: engine === "system" ? 0.5 : 1 }}>
+        <div>
+          <label className="text-xs block mb-1" style={{ color: "var(--text-3)" }}>Voz</label>
+          <select
+            className="input"
+            value={voice}
+            disabled={engine === "system"}
+            onChange={(e) => chooseVoice(e.target.value)}
+            style={{ background: "var(--surface-1)", color: "var(--text-1)" }}
+          >
+            {CLONE_GROUPS.map((grp) => {
+              const items = cloned.filter((c) => classifyClone(c).group === grp);
+              if (!items.length) return null;
+              return (
+                <optgroup key={grp} label={grp}>
+                  {items.map((c) => (
+                    <option key={`c-${c}`} value={c}>{classifyClone(c).label}</option>
+                  ))}
+                </optgroup>
+              );
+            })}
+            <optgroup label="Catálogo — español nativo (género fiable ✓) y multiidioma">
+              {VOICES.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
+            </optgroup>
+          </select>
+        </div>
+        <div>
+          <label className="text-xs block mb-1" style={{ color: "var(--text-3)" }}>
+            Velocidad · {speed.toFixed(2)}×
+          </label>
+          <input
+            type="range"
+            min={0.7}
+            max={1.4}
+            step={0.05}
+            value={speed}
+            disabled={engine === "system"}
+            onChange={(e) => { const s = parseFloat(e.target.value); setSpeed(s); save("aion.voice.speed", String(s)); }}
+            className="w-full"
+            style={{ accentColor: "var(--accent)" }}
+          />
+        </div>
+      </div>
+
+      {/* Expresividad — solo aplica a la voz clonada (Chatterbox). */}
+      {voiceEngine(voice) === "chatterbox" && engine !== "system" && (
+        <div className="mt-3">
+          <label className="text-xs block mb-1" style={{ color: "var(--text-3)" }}>
+            Expresividad / énfasis · {Math.round(exaggeration * 100)}%
+          </label>
+          <input
+            type="range"
+            min={0.3}
+            max={0.95}
+            step={0.05}
+            value={exaggeration}
+            onChange={(e) => { const v = parseFloat(e.target.value); setExaggeration(v); save("aion.voice.exaggeration", String(v)); }}
+            className="w-full"
+            style={{ accentColor: "var(--accent)" }}
+          />
+          <p className="text-[11px] mt-0.5" style={{ color: "var(--text-3)" }}>
+            Más alto = más emoción y énfasis (puede sonar más teatral); más bajo = más sobrio.
+          </p>
+        </div>
+      )}
+
+      <div className="flex items-center gap-3 mt-4">
+        <button className="btn inline-flex items-center gap-1.5" onClick={test} disabled={testing}>
+          <Icon name="play" size={15} /> {testing ? "Sonando…" : "Probar voz"}
+        </button>
+        <button
+          className="btn inline-flex items-center gap-1.5"
+          onClick={() => {
+            // Re-persiste todas las preferencias de voz (ya se autoguardan en cada cambio;
+            // este botón da confirmación visible y asegura el estado actual en disco).
+            save("aion.voice.name", voice);
+            save("aion.voice.engine", voiceEngine(voice));
+            save("aion.voice.speed", String(speed));
+            save("aion.voice.exaggeration", String(exaggeration));
+            save("aion.voice", engine === "system" ? "system" : "auto");
+            setSavedMsg(true);
+            setTimeout(() => setSavedMsg(false), 2200);
+          }}
+        >
+          <Icon name="check" size={15} /> Guardar preferencia
+        </button>
+        {savedMsg && <span className="text-xs" style={{ color: "var(--accent)" }}>✓ Preferencia guardada</span>}
+        {testMsg && <span className="text-xs" style={{ color: "var(--text-3)" }}>{testMsg}</span>}
+      </div>
+
+      {/* ── Clonar voz ─────────────────────────────────────────────────── */}
+      <div className="mt-5 pt-4" style={{ borderTop: "1px solid var(--border)" }}>
+        <h3 className="text-sm font-semibold mb-1" style={{ color: "var(--text-1)" }}>
+          Clonar una voz
+        </h3>
+        <p className="text-xs mb-3" style={{ color: "var(--text-3)" }}>
+          Sube un clip limpio de <strong>10-20&nbsp;s</strong> (voz sola, sin música ni ruido) y AION
+          la clona con <strong>Qwen3-TTS</strong> conservando acento y timbre. Es muy realista y
+          <strong> en tiempo real</strong> (RTF&nbsp;~0.3), así que sirve también para conversar en
+          el modo voz en vivo, no solo al pulsar «Escuchar».
+        </p>
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input
+            className="input"
+            placeholder="Nombre (p. ej. Chile)"
+            value={cloneName}
+            onChange={(e) => setCloneName(e.target.value)}
+          />
+          <input
+            ref={cloneFile}
+            type="file"
+            accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg"
+            className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadClone(f); e.target.value = ""; }}
+          />
+          <button
+            className="btn shrink-0 inline-flex items-center gap-1.5"
+            disabled={cloning || !cloneName.trim()}
+            onClick={() => cloneFile.current?.click()}
+          >
+            <Icon name="upload" size={15} /> {cloning ? "Clonando…" : "Subir clip y clonar"}
+          </button>
+        </div>
+        {cloneMsg && <p className="text-xs mt-2" style={{ color: "var(--text-2)" }}>{cloneMsg}</p>}
+        {cloned.filter((c) => !/^(ES|IT|EN)-/.test(c)).length > 0 && (
+          <div className="flex flex-wrap gap-2 mt-3">
+            {cloned.filter((c) => !/^(ES|IT|EN)-/.test(c)).map((c) => (
+              <span
+                key={c}
+                className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full"
+                style={{ background: "var(--surface-2)", color: "var(--text-2)" }}
+              >
+                {c}
+                <button
+                  onClick={() => removeClone(c)}
+                  className="opacity-60 hover:opacity-100"
+                  style={{ color: "#ef4444" }}
+                  title="Eliminar voz clonada"
+                  aria-label={`Eliminar ${c}`}
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export default function SettingsPage() {
   const { t, lang, setLang } = useT();
@@ -418,6 +775,25 @@ export default function SettingsPage() {
   return (
     <AppShell title={t("nav.settings")}>
       <div className="max-w-6xl mx-auto px-3 py-6 flex flex-col gap-6">
+        {/* ── CABECERA (patrón de Mente) ── */}
+        <div className="card flex items-center gap-4" style={{ boxShadow: "var(--shadow-elevated)" }}>
+          <span
+            className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0"
+            style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}
+          >
+            <Icon name="settings" size={24} />
+          </span>
+          <div className="min-w-0">
+            <div className="font-display text-xl font-bold" style={{ color: "var(--text-1)" }}>
+              {t("nav.settings")}
+            </div>
+            <p className="text-sm mt-0.5 max-w-xl" style={{ color: "var(--text-3)" }}>
+              Personaliza AION: cuenta, idioma, motor de IA, voz y privacidad. Todo se guarda en
+              este dispositivo.
+            </p>
+          </div>
+        </div>
+
         <div className="card">
           <h2 className="t-section mb-3" style={{ color: "var(--text-2)" }}>
             {t("settings.account")}
@@ -429,6 +805,8 @@ export default function SettingsPage() {
             {t("settings.localNote")}
           </p>
         </div>
+
+        <VoiceCard />
 
         {/* ── Idioma (ES / IT / EN) ── */}
         <div className="card">

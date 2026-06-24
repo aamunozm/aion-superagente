@@ -41,6 +41,70 @@ if (typeof window !== "undefined" && !(window as unknown as { __aionPatched?: bo
   };
 }
 
+/**
+ * Voz de AION (TTS local). Pide el audio al núcleo (que delega en el sidecar
+ * Kokoro/Chatterbox) y devuelve el WAV como Blob. Lanza si el sidecar no está
+ * (la capa de voz cae entonces a la voz del sistema). El Bearer se inyecta solo.
+ */
+export async function ttsSpeak(
+  text: string,
+  lang: string,
+  opts?: { voice?: string; engine?: string; speed?: number; exaggeration?: number },
+): Promise<Blob> {
+  const res = await fetch(`${BRIDGE_URL}/api/tts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text,
+      lang,
+      voice: opts?.voice ?? "",
+      engine: opts?.engine ?? "",
+      speed: opts?.speed ?? 1.0,
+      ...(opts?.exaggeration != null ? { exaggeration: opts.exaggeration } : {}),
+    }),
+  });
+  if (!res.ok) throw new Error(`tts ${res.status}`);
+  return res.blob();
+}
+
+/** Voces clonadas disponibles (clips de referencia subidos por el usuario). */
+export async function ttsVoices(): Promise<{ cloned: string[] }> {
+  try {
+    return await fetch(`${BRIDGE_URL}/api/tts/voices`).then((r) => r.json());
+  } catch {
+    return { cloned: [] };
+  }
+}
+
+/** Sube un clip de referencia y lo registra como voz clonable (Chatterbox). */
+export async function ttsCloneUpload(
+  name: string,
+  file: File,
+): Promise<{ ok: boolean; voice?: string; error?: string }> {
+  const b64 = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
+    r.onerror = () => reject(new Error("no pude leer el archivo"));
+    r.readAsDataURL(file);
+  });
+  const ext = (file.name.split(".").pop() || "wav").toLowerCase();
+  return fetch(`${BRIDGE_URL}/api/tts/clone`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, ext, content_b64: b64 }),
+  }).then((r) => r.json());
+}
+
+export async function ttsCloneRemove(name: string): Promise<{ ok: boolean }> {
+  return fetch(`${BRIDGE_URL}/api/tts/clone/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  })
+    .then((r) => r.json())
+    .catch(() => ({ ok: false }));
+}
+
 export type AuthResult = {
   id: string;
   email: string;
@@ -172,24 +236,14 @@ export type ClaudeCodeStats = {
   tokens_served: number;
   writes: number;
   errors?: number;
-  full_dump_tokens: number;
+  /** Tokens del corpus de memoria accesible bajo demanda (NO un "ahorro": es el contexto al
+   *  que Claude accede sin cargarlo entero; por consulta solo paga avg_tokens_per_call). */
+  corpus_tokens?: number;
   memory_count?: number;
   avg_tokens_per_call?: number;
-  savings_pct?: number;
-  total_savings_est?: number;
   graph_concepts?: number;
   graph_communities?: number;
   last_activity?: string | null;
-  // Ahorro de la traducción ES→EN del puente (distinto del ahorro del RAG de arriba).
-  tokens_saved_translation?: number;
-  translation_savings_pct?: number;
-  by_tool_translation?: Record<string, number>;
-  sessions?: {
-    started_at: string;
-    calls: number;
-    tokens_served: number;
-    tokens_saved: number;
-  }[];
 };
 export async function claudeCodeGet(): Promise<ClaudeCodeStatus> {
   try {
@@ -224,6 +278,73 @@ export async function claudeCodeStats(): Promise<ClaudeCodeStats | null> {
     return null;
   }
 }
+
+// ── Memoria por proyecto (medidor + backup/restore + liberar espacio) ─────────
+export type ProjectMemory = {
+  project: string;
+  count: number;
+  bytes: number;
+  pct: number;
+  last_activity?: string | null;
+  calls: number;
+  tokens_served: number;
+};
+export type MemoryProjects = {
+  projects: ProjectMemory[];
+  total_bytes: number;
+  total_count: number;
+  tagged_bytes: number;
+  untagged_bytes: number;
+};
+export async function memoryProjects(): Promise<MemoryProjects> {
+  try {
+    return await fetch(`${BRIDGE_URL}/api/memory/projects`).then((x) => x.json());
+  } catch {
+    return { projects: [], total_bytes: 0, total_count: 0, tagged_bytes: 0, untagged_bytes: 0 };
+  }
+}
+/** Descarga el JSONL de un proyecto (o de toda la memoria si project es vacío). vía blob. */
+export async function downloadMemory(project?: string): Promise<string | null> {
+  try {
+    const qs = project ? `?project=${encodeURIComponent(project)}` : "";
+    const res = await fetch(`${BRIDGE_URL}/api/memory/export${qs}`);
+    if (!res.ok) return null;
+    const text = await res.text();
+    const blob = new Blob([text], { type: "application/x-ndjson" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = project ? `aion-memory-${project}.jsonl` : "aion-memory.jsonl";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    return text;
+  } catch {
+    return null;
+  }
+}
+/** Cuántos recuerdos borraría (confirm:false) o los borra de verdad (confirm:true). */
+export const forgetProject = (project: string, confirm: boolean) =>
+  jpost<{ ok: boolean; confirm_required?: boolean; would_remove?: number; removed?: number; count?: number; error?: string }>(
+    "/api/memory/forget-project",
+    { project, confirm },
+  );
+/** Normaliza las etiquetas de proyecto a su forma canónica (con backup). */
+export const memoryNormalize = () =>
+  jpost<{ ok: boolean; scanned?: number; rewritten?: number; mapping?: { from: string; to: string; count: number }[]; error?: string }>(
+    "/api/memory/normalize",
+    {},
+  );
+/** Fusiona la memoria actual del proyecto con un backup existente (dedup por id). */
+export const backupMerge = (project: string, existing_jsonl: string) =>
+  jpost<{ ok: boolean; jsonl?: string; total?: number; from_current?: number; from_backup?: number; error?: string }>(
+    "/api/memory/backup-merge",
+    { project, existing_jsonl },
+  );
+/** Restaura/fusiona memoria desde un JSONL (subido por el usuario). */
+export const importMemory = (jsonl: string) =>
+  jpost<{ ok?: boolean; added?: number; count?: number; error?: string }>("/api/memory/import", { jsonl });
 
 export type AionIdentity = { id: string; name: string; born_at: string };
 export async function getIdentity(): Promise<AionIdentity | null> {
@@ -305,6 +426,7 @@ export async function chatStream(
   convoId?: string,
   projectId?: string,
   signal?: AbortSignal,
+  fast?: boolean,
 ): Promise<void> {
   const res = await fetch(`${BRIDGE_URL}/api/chat`, {
     method: "POST",
@@ -315,10 +437,46 @@ export async function chatStream(
       lang: lang(),
       convo_id: convoId ?? "default",
       project_id: projectId,
+      // Modo voz: respuesta de baja latencia (la comprensión/route no bloquean).
+      fast: fast ?? false,
     }),
     signal,
   });
   await readSse(res, onEvent);
+}
+
+/** Precalienta el CEREBRO de voz (Qwen3-4B local) al abrir el modo voz: un fast-chat
+ * efímero a un convo desechable que abortamos en cuanto llega el primer byte. Para entonces
+ * el prefill del prefijo de sistema ESTABLE ya ocurrió → su KV-cache queda caliente y el
+ * PRIMER turno real sale ya rápido (~0.3s), sin el pico del arranque en frío. Best-effort:
+ * si el cerebro no está listo o falla, el pre-warm del arranque cubre el caso. */
+export async function warmBrain(): Promise<void> {
+  try {
+    const ctrl = new AbortController();
+    const kill = setTimeout(() => ctrl.abort(), 3000);
+    const res = await fetch(`${BRIDGE_URL}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        prompt: "hola",
+        think: false,
+        lang: lang(),
+        convo_id: "__voicewarm__", // desechable: nunca se muestra
+        fast: true, // dispara el cerebro local de voz
+      }),
+      signal: ctrl.signal,
+    });
+    // No nos interesa la respuesta: con el primer byte el prefijo ya se procesó. Cancelar
+    // el stream hace que aion-core (AbortOnDrop) detenga la generación → cero desperdicio.
+    const reader = res.body?.getReader();
+    if (reader) {
+      await reader.read();
+      await reader.cancel();
+    }
+    clearTimeout(kill);
+  } catch {
+    /* best-effort */
+  }
 }
 
 // ── Proyectos (workspace estilo NotebookLM) ─────────────────────────────────
@@ -343,6 +501,8 @@ export async function projectsList(): Promise<Project[]> {
 export const projectCreate = (name: string, desc: string, icon: string) =>
   jpost<{ ok: boolean; project?: Project; error?: string }>("/api/projects", { name, desc, icon });
 export const projectRemove = (id: string) => jpost<{ ok: boolean }>("/api/projects/remove", { id });
+export const projectUpdate = (id: string, name: string, desc: string) =>
+  jpost<{ ok: boolean; project?: Project; error?: string }>("/api/project/update", { id, name, desc });
 export const projectGet = (id: string) =>
   jpost<{ ok: boolean; project?: Project; sources?: ProjectSource[]; outputs?: ProjectOutput[]; error?: string }>(
     "/api/project/get",
@@ -388,6 +548,60 @@ export const projectStudioGenerate = (project_id: string, kind: string) =>
   });
 export const projectStudioRemove = (project_id: string, id: string) =>
   jpost<{ ok: boolean }>("/api/project/studio/remove", { project_id, id });
+
+export type DocFormat = "pdf" | "docx" | "html";
+
+/** Dispara la descarga de un `Response` binario, tomando el nombre de Content-Disposition. */
+async function downloadBlob(res: Response, fallbackName: string): Promise<void> {
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(t || `error ${res.status}`);
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get("content-disposition") ?? "";
+  const m = /filename="?([^"]+)"?/.exec(cd);
+  const name = m?.[1] ?? fallbackName;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** Exporta una salida de Studio a un documento branded (PDF/Word/HTML) y lo descarga. */
+export async function projectStudioExport(
+  project_id: string,
+  output_id: string,
+  format: DocFormat,
+): Promise<void> {
+  const res = await fetch(`${BRIDGE_URL}/api/project/studio/export`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ project_id, output_id, format }),
+  });
+  await downloadBlob(res, `documento.${format}`);
+}
+
+/** Genera un documento branded desde Markdown arbitrario y lo descarga. */
+export async function documentsGenerate(req: {
+  title: string;
+  markdown: string;
+  format: DocFormat;
+  template?: string;
+  subtitle?: string;
+  number?: string;
+  client?: { name: string; company?: string; email?: string; address?: string };
+}): Promise<void> {
+  const res = await fetch(`${BRIDGE_URL}/api/documents/generate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...req, lang: lang() }),
+  });
+  await downloadBlob(res, `${req.title || "documento"}.${req.format}`);
+}
 
 /** Reinicia el hilo de una conversación en el backend (nuevo chat). */
 export async function chatReset(convoId: string): Promise<void> {

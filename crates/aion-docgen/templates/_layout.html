@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="{{ lang }}">
+<head>
+<meta charset="utf-8" />
+<title>{{ title }}</title>
+<style>
+  :root {
+    --accent: {{ brand.accent }};
+    --ink: {{ brand.ink }};
+    --text: #1a1a1a;
+    --muted: #555;
+    --hair: #e6e8eb;
+    --soft: #f5f7f8;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  /* Página A4 con márgenes generosos; el footer corre en el margen inferior. */
+  @page {
+    size: A4;
+    margin: 18mm 16mm 22mm 16mm;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: var(--font-sans);
+    color: var(--text);
+    font-size: 10.5pt;
+    line-height: 1.55;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* ── Cabecera de marca ─────────────────────────────────────────── */
+  .brandbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 2px solid var(--ink);
+    padding-bottom: 10px;
+    margin-bottom: 22px;
+  }
+  .brandbar .id { display: flex; align-items: center; gap: 12px; }
+  .brandbar .logo { height: 34px; width: auto; display: block; }
+  .brandbar .wordmark {
+    font-size: 17pt;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+  .brandbar .tagline {
+    font-size: 8.5pt;
+    color: var(--muted);
+    margin-top: 1px;
+  }
+  .brandbar .accent-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent);
+    display: inline-block;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+
+  /* ── Título del documento ──────────────────────────────────────── */
+  .doc-head { margin-bottom: 20px; }
+  .doc-head h1 {
+    font-size: 21pt;
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    color: var(--ink);
+    margin: 0 0 4px;
+    line-height: 1.15;
+  }
+  .doc-head .subtitle { font-size: 11pt; color: var(--muted); margin: 0; }
+  .doc-meta {
+    display: flex;
+    gap: 18px;
+    font-size: 8.5pt;
+    color: var(--muted);
+    margin-top: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .doc-meta .num { color: var(--accent); font-weight: 600; }
+
+  /* ── Cuerpo (Markdown renderizado) ─────────────────────────────── */
+  .content h1, .content h2, .content h3 {
+    color: var(--ink);
+    letter-spacing: -0.01em;
+    line-height: 1.25;
+    margin: 1.4em 0 0.5em;
+  }
+  .content h1 { font-size: 15pt; }
+  .content h2 {
+    font-size: 12.5pt;
+    border-bottom: 1px solid var(--hair);
+    padding-bottom: 4px;
+  }
+  .content h3 { font-size: 11pt; }
+  .content p { margin: 0 0 0.7em; }
+  .content ul, .content ol { margin: 0 0 0.7em; padding-left: 1.3em; }
+  .content li { margin: 0.15em 0; }
+  .content a { color: var(--accent); text-decoration: none; }
+  .content strong { color: var(--ink); }
+  .content blockquote {
+    margin: 1em 0;
+    padding: 0.5em 1em;
+    border-left: 3px solid var(--accent);
+    background: var(--soft);
+    color: var(--muted);
+    border-radius: 0 6px 6px 0;
+  }
+  .content code {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 9pt;
+    background: var(--soft);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .content pre {
+    background: var(--soft);
+    padding: 12px 14px;
+    border-radius: 8px;
+    overflow-x: auto;
+    border: 1px solid var(--hair);
+  }
+  .content pre code { background: none; padding: 0; }
+
+  /* Tablas con cabecera de marca (clave para preventivos/informes). */
+  .content table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1em 0;
+    font-size: 9.5pt;
+  }
+  .content thead th {
+    background: var(--ink);
+    color: #fff;
+    text-align: left;
+    padding: 8px 10px;
+    font-weight: 600;
+  }
+  .content tbody td {
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--hair);
+  }
+  .content tbody tr:nth-child(even) { background: var(--soft); }
+
+  /* ── Footer corriente (se repite en cada página vía position:fixed) ── */
+  .page-footer {
+    position: fixed;
+    bottom: -14mm;
+    left: 0; right: 0;
+    font-size: 7.5pt;
+    color: #9aa1a8;
+    display: flex;
+    justify-content: space-between;
+    border-top: 1px solid var(--hair);
+    padding-top: 5px;
+  }
+
+  {% block extra_style %}{% endblock %}
+</style>
+</head>
+<body>
+  <div class="page-footer">
+    <span>{{ brand.legal_footer }}</span>
+    <span>{% if brand.website %}{{ brand.website }}{% endif %}{% if brand.email %} · {{ brand.email }}{% endif %}</span>
+  </div>
+
+  <header class="brandbar">
+    <div class="id">
+      {% if brand.logo_data_uri %}
+        <img class="logo" src="{{ brand.logo_data_uri }}" alt="{{ brand.company }}" />
+      {% else %}
+        <div>
+          <div class="wordmark">{{ brand.company }}<span class="accent-dot"></span></div>
+          {% if brand.tagline %}<div class="tagline">{{ brand.tagline }}</div>{% endif %}
+        </div>
+      {% endif %}
+    </div>
+  </header>
+
+  <section class="doc-head">
+    <h1>{{ title }}</h1>
+    {% if subtitle %}<p class="subtitle">{{ subtitle }}</p>{% endif %}
+    <div class="doc-meta">
+      {% if number %}<span class="num">{{ number }}</span>{% endif %}
+      {% if date %}<span>{{ date }}</span>{% endif %}
+    </div>
+  </section>
+
+  {% block before_content %}{% endblock %}
+
+  <main class="content">
+    {% block content %}{{ body|safe }}{% endblock %}
+  </main>
+
+  {% block after_content %}{% endblock %}
+</body>
+</html>

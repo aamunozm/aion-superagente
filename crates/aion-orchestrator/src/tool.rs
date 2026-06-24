@@ -130,6 +130,11 @@ impl ToolRegistry {
         self.tools.is_empty()
     }
 
+    /// Número de herramientas registradas.
+    pub fn len(&self) -> usize {
+        self.tools.len()
+    }
+
     /// Registra el resultado de una invocación y actualiza la reputación.
     /// Toma `&self` (mutabilidad interior) para poder grabar desde el bucle del agente.
     pub fn record_call(&self, name: &str, success: bool, latency_ms: u64) {
@@ -236,6 +241,46 @@ impl ToolRegistry {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// **Progressive disclosure**: descripción del catálogo ENFOCADA en una tarea. Da la
+    /// descripción COMPLETA (con su formato de entrada) de las `n` herramientas más
+    /// relevantes a `query`, y lista SOLO por nombre el resto —que el agente puede invocar
+    /// igualmente. Abarata el contexto cuando hay muchas herramientas (clave para LLMs
+    /// locales con ventana modesta). Con `≤ n` herramientas equivale a [`describe`](Self::describe).
+    pub fn describe_relevant(&self, query: &str, n: usize) -> String {
+        if self.tools.len() <= n {
+            return self.describe();
+        }
+        // `top_tools_for` toma y libera su propio lock antes de volver: sin solape con el de abajo.
+        let top: std::collections::BTreeSet<String> = self
+            .top_tools_for(query, n)
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect();
+        let metrics = self.metrics.lock().unwrap();
+        let mut full: Vec<String> = Vec::new();
+        let mut rest: Vec<&str> = Vec::new();
+        for t in self.tools.values() {
+            let name = t.name();
+            if top.contains(name) {
+                let warn = match metrics.get(name) {
+                    Some(m) if m.total_calls > 5 && m.reputation < 0.6 => " [⚠]",
+                    _ => "",
+                };
+                full.push(format!("- {}: {}{}", name, t.description(), warn));
+            } else {
+                rest.push(name);
+            }
+        }
+        let mut out = full.join("\n");
+        if !rest.is_empty() {
+            out.push_str(&format!(
+                "\n\nOtras herramientas que también tienes (invócalas por su nombre si la tarea lo pide): {}",
+                rest.join(", ")
+            ));
+        }
+        out
     }
 }
 
@@ -371,5 +416,64 @@ mod tests {
         let s = t.schema();
         assert_eq!(s["type"], "string");
         assert_eq!(s["description"], "arithmetic expression");
+    }
+
+    struct Dummy(&'static str, &'static str);
+    #[async_trait]
+    impl Tool for Dummy {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            self.1
+        }
+        async fn run(&self, _: &str) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn describe_relevant_focuses_and_lists_rest() {
+        let mut r = ToolRegistry::new();
+        r.register(Arc::new(CalculatorTool));
+        r.register(Arc::new(Dummy(
+            "weather",
+            "clima y temperatura actual de una ciudad",
+        )));
+        r.register(Arc::new(Dummy(
+            "files_list",
+            "lista archivos de una carpeta del usuario",
+        )));
+        // n=1 con consulta de clima → 'weather' con descripción completa; el resto por nombre.
+        let d = r.describe_relevant("qué clima hace hoy", 1);
+        assert!(
+            d.contains("- weather: clima"),
+            "la relevante va completa: {d}"
+        );
+        assert!(
+            d.contains("Otras herramientas"),
+            "el resto se lista por nombre: {d}"
+        );
+        // una no-relevante NO aparece con su descripción completa
+        assert!(
+            !d.contains("- files_list: lista archivos"),
+            "no debe ir completa: {d}"
+        );
+    }
+
+    #[test]
+    fn describe_relevant_small_registry_equals_describe() {
+        let mut r = ToolRegistry::new();
+        r.register(Arc::new(CalculatorTool));
+        // Con pocas herramientas (≤ n) se comporta igual que describe(): cero pérdida.
+        assert_eq!(r.describe_relevant("lo que sea", 5), r.describe());
+    }
+
+    #[test]
+    fn registry_len_counts() {
+        let mut r = ToolRegistry::new();
+        assert_eq!(r.len(), 0);
+        r.register(Arc::new(CalculatorTool));
+        assert_eq!(r.len(), 1);
     }
 }

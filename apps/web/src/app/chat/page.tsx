@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AppShell, Icon, Markdown, MessageActions, VoiceBar } from "@/components";
+import { AppShell, Icon, Markdown, MessageActions, VoiceBar, VoiceMode, type VoiceState } from "@/components";
 import { useT } from "@/lib/i18n";
-import { useSpeech, useDictation } from "@/lib/voice";
+import { useSpeech, useDictation, useVoiceConversation, stripMarkdownForSpeech, warmVoice } from "@/lib/voice";
 import { LightboxProvider, useLightbox } from "@/lib/lightbox";
 
 // Foto adjunta por Ariel, mostrada en su burbuja del chat. Clic = ampliar (lightbox).
@@ -24,6 +24,7 @@ import {
   agentStream,
   crewStream,
   chatStream,
+  warmBrain,
   chatReset,
   confirmDecision,
   answerQuestion,
@@ -376,7 +377,7 @@ export default function ChatPage() {
             update((t) => ({ ...t, meta: `${ev.tokens} tokens · ${ev.tps.toFixed(1)} tok/s` }));
           else if (ev.kind === "error") update((t) => ({ ...t, answer: `⚠️ ${ev.text}` }));
           scroll();
-        }, convoId, undefined, ctrl.signal);
+        }, convoId, undefined, ctrl.signal, voiceMode || handsFree);
       } else {
         const stream = mode === "crew" ? crewStream : agentStream;
         // CONTEXTO RECIENTE para el agente: los últimos turnos viajan con la tarea.
@@ -414,8 +415,13 @@ export default function ChatPage() {
       if (err instanceof DOMException && err.name === "AbortError") return;
       update((t) => ({ ...t, answer: `⚠️ ${err instanceof Error ? err.message : "error"}` }));
     } finally {
-      if (streamAbort.current === ctrl) streamAbort.current = null;
-      setBusy(false);
+      // Solo el turno VIGENTE controla `busy`. Si una nueva petición (p. ej. tras
+      // interrumpir a AION) ya tomó el control, este `finally` (de un turno abortado)
+      // NO debe apagar `busy` ni AION hablaría "el resto" del turno viejo por error.
+      if (streamAbort.current === ctrl) {
+        streamAbort.current = null;
+        setBusy(false);
+      }
     }
   }
 
@@ -440,22 +446,108 @@ export default function ChatPage() {
     });
   }
 
-  // Conversación hablada en tiempo real: cuando una respuesta termina (no hay
-  // stream en curso) y el modo manos libres está activo, AION la lee en voz alta
-  // y, al acabar, reabre el micrófono para que sigas hablando sin tocar nada.
+  // ── Modo voz inmersivo: conversación CONTINUA tipo teléfono ──────────────
+  // Escucha sin volver a pulsar y deja interrumpir a AION mientras habla.
+  const [voiceMode, setVoiceMode] = useState(false);
+  const [voiceMuted, setVoiceMuted] = useState(false);
+  const lastAnswer = turns.length ? stripMarkdownForSpeech(turns[turns.length - 1].answer) : "";
+
+  // Conversación: escucha en continuo cuando AION calla (no ocupado ni hablando);
+  // vigila barge-in mientras AION habla. Cada frase tuya se envía; tu voz corta el TTS.
+  const convo = useVoiceConversation(lang, {
+    listen: voiceMode && !voiceMuted && !busy && !speech.speakingId,
+    // Vigila tu voz mientras AION HABLA y también mientras PIENSA: así puedes cambiar
+    // de tema o interrumpir en cualquier momento, no solo cuando ya está hablando.
+    watchBargeIn: voiceMode && !voiceMuted && (!!speech.speakingId || busy),
+    speaking: !!speech.speakingId, // para recalibrar el eco al empezar a hablar
+
+    onUtterance: (text) => { void runSend(text); },
+    // Interrupción real: corta la voz Y aborta la generación del LLM en curso, y
+    // marca el turno como interrumpido (el efecto incremental no volverá a hablarlo).
+    // Así AION se detiene de inmediato para escucharte y la conversación puede variar.
+    onBargeIn: () => {
+      interruptedRef.current = true;
+      speech.stop();
+      streamAbort.current?.abort();
+      setBusy(false);
+    },
+  });
+
+  function openVoiceMode() {
+    setVoiceMode(true);
+    setVoiceMuted(false);
+    speech.stop();
+    // Precalentado en paralelo al abrir el modo voz → ni el 1er turno nota el arranque frío:
+    warmVoice(lang); // compila el kernel Metal de la voz elegida (Qwen3-TTS)
+    warmBrain(); // calienta la KV-cache del cerebro local (Qwen3-4B)
+  }
+  function closeVoiceMode() {
+    setVoiceMode(false);
+    speech.stop();
+  }
+  // Estado derivado para el overlay. Hablar tiene prioridad sobre pensar: en cuanto
+  // AION empieza a decir la 1ª frase (aunque el LLM siga escribiendo), mostramos
+  // «Hablando».
+  const voiceState: VoiceState = speech.speakingId
+    ? "speaking"
+    : busy
+      ? "thinking"
+      : convo.listening
+        ? "listening"
+        : "idle";
+
+  // CONVERSACIÓN FLUIDA: AION habla la respuesta MIENTRAS el LLM la genera. A medida
+  // que llegan frases COMPLETAS las va diciendo (con Piper, instantáneo); así empieza
+  // a responder tras la 1ª frase, no tras toda la respuesta. Al terminar, reabre el
+  // micro (en manos libres; en modo voz el hook de conversación lo retoma solo).
+  const spokenCharRef = useRef(0);
+  const finishedTurnRef = useRef(-1);
+  // Cuando interrumpes a AION (barge-in), marcamos el turno para NO seguir hablándolo
+  // (ni encolar más frases ni "el resto"): AION se calla de verdad y te escucha.
+  const interruptedRef = useRef(false);
   useEffect(() => {
-    if (!handsFree || busy || turns.length === 0) return;
+    if (!(handsFree || voiceMode) || turns.length === 0) return;
     const i = turns.length - 1;
-    const last = turns[i];
-    if (!last.answer || last.answer.startsWith("⚠️")) return;
-    if (i === lastSpokenRef.current) return;
-    lastSpokenRef.current = i;
-    speech.speak(`turn-${i}`, last.answer, lang, () => {
-      if (handsFree && dictation.supported && !busy) dictation.start();
-    });
+    const ans = turns[i].answer || "";
+    if (ans.startsWith("⚠️")) return;
+    // Nuevo turno → reinicia el seguimiento (y limpia la marca de interrupción).
+    if (lastSpokenRef.current !== i) {
+      lastSpokenRef.current = i;
+      spokenCharRef.current = 0;
+      interruptedRef.current = false;
+    }
+    // Si interrumpiste este turno, no sigas hablándolo (ni frases nuevas ni el resto).
+    if (interruptedRef.current) return;
+    // Encola las frases COMPLETAS nuevas (hasta el último signo de puntuación final).
+    const fromIdx = spokenCharRef.current;
+    const pending = ans.slice(fromIdx);
+    const lastEnd = Math.max(
+      pending.lastIndexOf(". "),
+      pending.lastIndexOf("! "),
+      pending.lastIndexOf("? "),
+      pending.lastIndexOf("… "),
+      pending.lastIndexOf(".\n"),
+      pending.lastIndexOf("!\n"),
+      pending.lastIndexOf("?\n"),
+    );
+    if (lastEnd >= 0) {
+      const chunk = pending.slice(0, lastEnd + 1).trim();
+      if (chunk) speech.enqueueSpeak(`turn-${i}`, chunk, lang);
+      spokenCharRef.current = fromIdx + lastEnd + 1;
+    }
+    // Cuando el LLM termina: encola el resto y cierra el turno (una sola vez).
+    if (!busy && finishedTurnRef.current !== i) {
+      finishedTurnRef.current = i;
+      const rest = ans.slice(spokenCharRef.current).trim();
+      if (rest) speech.enqueueSpeak(`turn-${i}`, rest, lang);
+      spokenCharRef.current = ans.length;
+      speech.finishQueue(`turn-${i}`, () => {
+        if (handsFree && !voiceMode && dictation.supported) dictation.start();
+      });
+    }
     // speech/dictation son estables (useCallback); el disparador real es turns/busy.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turns, busy, handsFree, lang]);
+  }, [turns, busy, handsFree, voiceMode, lang]);
 
   return (
     <LightboxProvider>
@@ -782,6 +874,20 @@ export default function ChatPage() {
           onMic={onMic}
           onToggleHandsFree={toggleHandsFree}
         />
+        {/* Modo voz inmersivo: conversación hablada a pantalla completa.
+            Solo si hay reconocimiento de voz (si no, no podría oírte → no se ofrece). */}
+        {dictation.supported && (
+          <button
+            type="button"
+            onClick={openVoiceMode}
+            className="shrink-0 rounded-full p-2 transition-colors"
+            style={{ color: "var(--text-3)", background: "var(--surface-2)" }}
+            title={t("chat.voiceMode")}
+            aria-label={t("chat.voiceMode")}
+          >
+            <Icon name="waveform" size={18} />
+          </button>
+        )}
         <input
           className="input"
           placeholder={dictation.listening ? t("chat.listening") : mode === "chat" ? t("chat.placeholderChat") : mode === "crew" ? t("chat.placeholderCrew") : t("chat.placeholderAgent")}
@@ -794,6 +900,15 @@ export default function ChatPage() {
         </button>
       </form>
       </div>
+      <VoiceMode
+        open={voiceMode}
+        state={voiceState}
+        muted={voiceMuted}
+        interim={convo.interim}
+        caption={lastAnswer}
+        onToggleMic={() => setVoiceMuted((m) => !m)}
+        onClose={closeVoiceMode}
+      />
     </AppShell>
     </LightboxProvider>
   );

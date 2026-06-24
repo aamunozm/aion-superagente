@@ -26,6 +26,10 @@ pub struct Job {
     pub passages: usize,
     #[serde(default)]
     pub error: String,
+    /// Nº de veces que se ha tomado para procesar. Tope para no reintentar infinito un
+    /// trabajo que falla siempre (p. ej. su archivo de staging ya no existe).
+    #[serde(default)]
+    pub attempts: u32,
 }
 
 fn queue_path() -> PathBuf {
@@ -59,6 +63,14 @@ fn write(jobs: &[Job]) {
 pub fn enqueue(id: &str, domain: &str, source: &str, path: &str) {
     let _g = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut jobs = read();
+    // DEDUP POR ID: si ya hay un trabajo con este id (p. ej. el auto-modelo que se
+    // re-siembra en cada arranque), reemplázalo en vez de ACUMULAR DUPLICADOS. Los ids
+    // repetidos rompían take_next/update (solo tocaban el 1er match) → bucle infinito.
+    jobs.retain(|j| j.id != id);
+    // PODA: no dejes que la cola crezca sin límite con terminales viejos (done/error).
+    if jobs.len() > 200 {
+        jobs.retain(|j| j.status == "pending" || j.status == "processing");
+    }
     jobs.push(Job {
         id: id.to_string(),
         domain: domain.to_string(),
@@ -67,6 +79,7 @@ pub fn enqueue(id: &str, domain: &str, source: &str, path: &str) {
         status: "pending".into(),
         passages: 0,
         error: String::new(),
+        attempts: 0,
     });
     write(&jobs);
 }
@@ -76,11 +89,31 @@ pub fn enqueue(id: &str, domain: &str, source: &str, path: &str) {
 pub fn take_next() -> Option<Job> {
     let _g = QLOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut jobs = read();
+    // TOPE DE REINTENTOS: un trabajo «processing» que ya se intentó demasiadas veces
+    // (su archivo no existe / falla siempre) pasa a «error» y deja de re-cogerse. Sin
+    // esto, un job que falla siempre se re-toma sin fin (bucle a cientos/seg).
+    let mut changed = false;
+    for j in jobs.iter_mut() {
+        if j.status == "processing" && j.attempts >= 3 {
+            j.status = "error".into();
+            if j.error.is_empty() {
+                j.error = "agotó reintentos".into();
+            }
+            changed = true;
+        }
+    }
     let pos = jobs
         .iter()
         .position(|j| j.status == "pending")
-        .or_else(|| jobs.iter().position(|j| j.status == "processing"))?;
+        .or_else(|| jobs.iter().position(|j| j.status == "processing"));
+    let Some(pos) = pos else {
+        if changed {
+            write(&jobs);
+        }
+        return None;
+    };
     jobs[pos].status = "processing".into();
+    jobs[pos].attempts += 1;
     let job = jobs[pos].clone();
     write(&jobs);
     Some(job)
