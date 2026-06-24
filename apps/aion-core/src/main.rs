@@ -53,6 +53,7 @@ mod project_rag;
 mod projects;
 mod prompt_store;
 mod prompts;
+mod proposta;
 mod provider;
 mod redact;
 mod reflection;

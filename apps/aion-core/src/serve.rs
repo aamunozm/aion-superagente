@@ -2536,7 +2536,7 @@ fn project_task_done(body: &AgentBody, answer: &str) {
 }
 
 /// Extrae la primera URL http(s) de un texto (para el fast-path de lectura web).
-fn extract_url(s: &str) -> Option<String> {
+pub(crate) fn extract_url(s: &str) -> Option<String> {
     let i = s.find("http://").or_else(|| s.find("https://"))?;
     let rest = &s[i..];
     let end = rest
@@ -2706,6 +2706,50 @@ async fn agent(
         // CONTINUACIÓN EN SEGUNDO PLANO: marca la tarea del proyecto como «en curso». El daemon
         // sigue trabajando aunque cierres la página; el resultado se persiste al terminar.
         project_task_start(&body);
+
+        // 🧠 FAST-PATH «PROPOSTA ANALITICA» (consultor, nivel PREV-2026-030): analiza el sitio del
+        // cliente (SEO real), razona su situación y REDACTA una propuesta a medida con la marca
+        // dinámica de la empresa. Es un análisis LARGO → idóneo para la continuación en 2º plano.
+        if crate::proposta::is_proposta(&body.task) && body.project_id.is_some() {
+            crate::inner_state::set_focus("agente", "redactando una propuesta analítica");
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "thought", "text": "Analizo el sitio del cliente, razono su situación y redacto una propuesta a medida. Es un análisis a fondo; lo termino aunque cierres la página." }).to_string(),
+                ))
+                .await;
+            let ctx = body.context.clone().unwrap_or_default();
+            let ans = match crate::proposta::compose(
+                &*engine,
+                body.project_id.as_deref(),
+                &body.task,
+                &ctx,
+            )
+            .await
+            {
+                Ok((path, cliente)) => {
+                    crate::awareness::record_outcome(true);
+                    let who = if cliente.trim().is_empty() {
+                        "el cliente".to_string()
+                    } else {
+                        cliente
+                    };
+                    format!("Propuesta analítica para {who} lista — la guardé en tu Escritorio:\n{path}")
+                }
+                Err(e) => format!("Empecé la propuesta analítica pero no pude terminarla: {e}"),
+            };
+            project_task_done(&body, &ans);
+            agent_perceive_and_remember(body.task.clone(), ans.clone());
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "answer", "text": ans, "steps": 1 }).to_string(),
+                ))
+                .await;
+            let _ = tx
+                .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                .await;
+            return;
+        }
+
         // 📄 FAST-PATH DETERMINISTA «oferta → documento»: «hazme la oferta en un pdf» tras hablarla.
         // No depende de que el modelo emita una acción ReAct (que a veces falla → negativa honesta):
         // extrae los hechos del contexto y RENDERIZA de verdad. Si no hay oferta extraíble, sigue.
