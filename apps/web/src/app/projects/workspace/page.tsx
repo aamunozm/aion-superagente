@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
 import Markdown from "@/components/Markdown";
+import { DocStudioModal } from "@/components/documents/DocStudio";
 import {
   projectGet,
   projectSourceAdd,
@@ -51,6 +52,8 @@ export default function ProjectWorkspace() {
   const [sources, setSources] = useState<ProjectSource[]>([]);
   const [outputs, setOutputs] = useState<ProjectOutput[]>([]);
   const [notFound, setNotFound] = useState(false);
+  // Estudio de documentos y estilos (galería tipo Canva), dentro del proyecto.
+  const [docOpen, setDocOpen] = useState(false);
 
   // Fuentes
   const [adding, setAdding] = useState(false);
@@ -533,6 +536,15 @@ export default function ProjectWorkspace() {
             </span>
           </div>
           <div className="p-3 grid grid-cols-1 gap-2" style={{ borderBottom: "1px solid var(--border)" }}>
+            <button
+              onClick={() => setDocOpen(true)}
+              className="flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm text-left transition-colors font-medium"
+              style={{ background: "var(--accent-subtle)", border: "1px solid var(--accent)", color: "var(--gold-deep)" }}
+              title="Elegir/extraer estilos y generar ofertas o documentos con esa apariencia"
+            >
+              <Icon name="file" size={16} />
+              <span>Documentos y estilos</span>
+            </button>
             {STUDIO.map((it) => (
               <button
                 key={it.kind}
@@ -630,6 +642,8 @@ export default function ProjectWorkspace() {
           </div>
         </div>
       )}
+
+      <DocStudioModal open={docOpen} onClose={() => setDocOpen(false)} />
     </AppShell>
   );
 }

@@ -91,10 +91,42 @@ impl DocStyle {
     }
 }
 
-/// **Galería de presets** (la base de "elegir estilo como en Canva"). Looks bien distintos
-/// entre sí: corporativo cálido, tech moderno, editorial serif, bold de alto contraste.
+/// **Galería de presets** (la base de "elegir estilo como en Canva"). Una biblioteca AMPLIA de
+/// looks profesionales y modernos, bien distintos entre sí (corporativo cálido, tech, editorial
+/// serif, esmeralda, violeta, coral, navy, oliva, naranja, bordeaux, índigo, ámbar, ciano…), para
+/// que el usuario nunca tenga "siempre lo mismo". Cada uno con acento único.
 pub fn presets() -> Vec<DocStyle> {
+    // Constructor con NEUTROS estándar (texto/secundario/líneas/suave) — variamos lo que da
+    // carácter: tinta, acento, papel, callout, fuentes, esquinas y mayúsculas.
+    #[allow(clippy::too_many_arguments)]
+    let s = |name: &str,
+             ink: &str,
+             accent: &str,
+             paper: &str,
+             cream: &str,
+             font: &str,
+             display: &str,
+             radius: u8,
+             caps: bool|
+     -> DocStyle {
+        DocStyle {
+            name: name.into(),
+            ink: ink.into(),
+            accent: accent.into(),
+            paper: paper.into(),
+            text: "#1f2937".into(),
+            muted: "#6b7280".into(),
+            hair: "#e5e7eb".into(),
+            soft: "#f3f4f6".into(),
+            cream: cream.into(),
+            font: font.into(),
+            font_display: display.into(),
+            radius,
+            caps_headings: caps,
+        }
+    };
     vec![
+        // — Los 4 originales, afinados a mano —
         DocStyle::default(),
         DocStyle {
             name: "Plasma · teal".into(),
@@ -141,6 +173,117 @@ pub fn presets() -> Vec<DocStyle> {
             radius: 0,
             caps_headings: true,
         },
+        // — Biblioteca ampliada (10 looks profesionales modernos) —
+        s(
+            "Smeraldo · verde",
+            "#064e3b",
+            "#059669",
+            "#ffffff",
+            "#ecfdf5",
+            SANS,
+            SANS,
+            12,
+            false,
+        ),
+        s(
+            "Porpora · viola",
+            "#3b0764",
+            "#7c3aed",
+            "#ffffff",
+            "#f5f3ff",
+            SANS,
+            SANS,
+            14,
+            false,
+        ),
+        s(
+            "Corallo · rosa",
+            "#4c0519",
+            "#e11d48",
+            "#fffafa",
+            "#fff1f2",
+            SANS,
+            SANS,
+            12,
+            false,
+        ),
+        s(
+            "Oceano · sky",
+            "#0c2a45",
+            "#0284c7",
+            "#ffffff",
+            "#f0f9ff",
+            SANS,
+            SANS,
+            10,
+            false,
+        ),
+        s(
+            "Foresta · oliva",
+            "#1a2e05",
+            "#4d7c0f",
+            "#fcfdf7",
+            "#f7fee7",
+            SERIF,
+            SERIF,
+            4,
+            false,
+        ),
+        s(
+            "Tramonto · arancio",
+            "#431407",
+            "#ea580c",
+            "#fffaf5",
+            "#fff7ed",
+            SANS,
+            SANS,
+            12,
+            false,
+        ),
+        s(
+            "Rubino · classico",
+            "#500724",
+            "#be123c",
+            "#fffafa",
+            "#fff1f3",
+            SANS,
+            SERIF,
+            2,
+            true,
+        ),
+        s(
+            "Indaco · tech",
+            "#1e1b4b",
+            "#4f46e5",
+            "#ffffff",
+            "#eef2ff",
+            SANS,
+            MONO,
+            0,
+            true,
+        ),
+        s(
+            "Ambra · miele",
+            "#451a03",
+            "#d97706",
+            "#fffdf7",
+            "#fffbeb",
+            SANS,
+            SERIF,
+            8,
+            false,
+        ),
+        s(
+            "Acqua · ciano",
+            "#083344",
+            "#0891b2",
+            "#ffffff",
+            "#ecfeff",
+            SANS,
+            SANS,
+            12,
+            false,
+        ),
     ]
 }
 
@@ -158,7 +301,7 @@ mod tests {
     #[test]
     fn presets_are_distinct() {
         let p = presets();
-        assert!(p.len() >= 4, "varios estilos");
+        assert!(p.len() >= 10, "biblioteca amplia de estilos");
         // Paletas realmente distintas (no el mismo look).
         let accents: std::collections::HashSet<_> = p.iter().map(|s| s.accent.clone()).collect();
         assert_eq!(accents.len(), p.len(), "acentos únicos por estilo");
