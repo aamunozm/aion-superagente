@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 /// Tarjeta numerada de "qué incluimos" (los recuadros 1·2·3 del ejemplo).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct Card {
     pub title: String,
     pub body: String,
@@ -21,6 +22,7 @@ pub struct Card {
 
 /// Fila de la tabla de oferta: concepto + descripción + importe (+ nota tipo "/ mese").
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct OfferRow {
     pub title: String,
     #[serde(default)]
@@ -33,6 +35,7 @@ pub struct OfferRow {
 /// Barra del gráfico comparativo "cuánto costaría en otro sitio". `pct` (0–100) es el ancho;
 /// `tone` ∈ {"red","gold","green"} da el color (caro→barato).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct CompareBar {
     pub label: String,
     pub pct: u8,
@@ -43,6 +46,7 @@ pub struct CompareBar {
 
 /// Viñeta de beneficios con lead en negrita ("**Si ripaga da sola.** Basta…").
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct Benefit {
     pub lead: String,
     pub body: String,
@@ -141,6 +145,7 @@ pub struct OffertaContent {
 /// del modo híbrido: tú das los hechos, [`build_offerta`] monta el documento; el LLM local
 /// (en aion-core) solo pule la prosa después, si quieres.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OffertaFacts {
     pub kicker: String,
     pub subtitle: String,
