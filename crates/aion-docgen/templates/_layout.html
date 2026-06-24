@@ -126,9 +126,11 @@
   }
   .content pre code { background: none; padding: 0; }
 
-  /* Tablas con cabecera de marca (clave para preventivos/informes). */
+  /* Tablas con cabecera de marca (clave para preventivos/informes). word-wrap evita que un
+     contenido largo desborde la página o corte el texto; el ancho 100% mantiene el margen. */
   .content table {
     width: 100%;
+    max-width: 100%;
     border-collapse: collapse;
     margin: 1em 0;
     font-size: 9.5pt;
@@ -139,12 +141,20 @@
     text-align: left;
     padding: 8px 10px;
     font-weight: 600;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
   }
   .content tbody td {
     padding: 7px 10px;
     border-bottom: 1px solid var(--hair);
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+    vertical-align: top;
   }
   .content tbody tr:nth-child(even) { background: var(--soft); }
+  /* Última columna (importe) alineada a la derecha en tablas de 2+ columnas. */
+  .content tbody td:last-child:not(:first-child),
+  .content thead th:last-child:not(:first-child) { text-align: right; white-space: nowrap; }
 
   /* ── Footer corriente (se repite en cada página vía position:fixed) ── */
   .page-footer {
