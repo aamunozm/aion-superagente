@@ -516,7 +516,7 @@ export async function warmBrain(): Promise<void> {
 // ── Proyectos (workspace estilo NotebookLM) ─────────────────────────────────
 
 export type Project = { id: string; name: string; desc: string; icon: string; created: string; updated: string };
-export type ProjectSource = { id: string; title: string; kind: string; content: string; active: boolean; created: string };
+export type ProjectSource = { id: string; title: string; kind: string; content: string; note?: string; active: boolean; created: string };
 export type ProjectOutput = { id: string; kind: string; title: string; content: string; created: string; audio?: string };
 
 async function jpost<T>(path: string, body: unknown): Promise<T> {
@@ -559,6 +559,9 @@ export const projectSourceToggle = (project_id: string, id: string, active: bool
   jpost<{ ok: boolean }>("/api/project/source/toggle", { project_id, id, active });
 export const projectSourceRemove = (project_id: string, id: string) =>
   jpost<{ ok: boolean }>("/api/project/source/remove", { project_id, id });
+/** Comentario de Ariel sobre una fuente: instrucción que el agente tiene SIEMPRE en cuenta. */
+export const projectSourceNote = (project_id: string, id: string, note: string) =>
+  jpost<{ ok: boolean }>("/api/project/source/note", { project_id, id, note });
 export type DiscoverResult = { title: string; url: string; snippet: string };
 export const projectDiscover = (project_id: string, query: string) =>
   jpost<{ ok: boolean; results?: DiscoverResult[]; error?: string }>("/api/project/discover", {

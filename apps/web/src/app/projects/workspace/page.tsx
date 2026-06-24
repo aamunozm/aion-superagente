@@ -12,6 +12,7 @@ import {
   projectSourceUpload,
   projectSourceToggle,
   projectSourceRemove,
+  projectSourceNote,
   projectDiscover,
   projectStudioGenerate,
   projectStudioAudio,
@@ -54,6 +55,9 @@ export default function ProjectWorkspace() {
   const [notFound, setNotFound] = useState(false);
   // Estudio de documentos y estilos (galería tipo Canva), dentro del proyecto.
   const [docOpen, setDocOpen] = useState(false);
+  // Edición del COMENTARIO de una fuente (instrucción para el agente).
+  const [noteEditId, setNoteEditId] = useState<string | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
 
   // Fuentes
   const [adding, setAdding] = useState(false);
@@ -172,6 +176,16 @@ export default function ProjectWorkspace() {
   async function removeSource(sid: string) {
     setSources((arr) => arr.filter((x) => x.id !== sid));
     await projectSourceRemove(id, sid);
+  }
+  function startNote(s: ProjectSource) {
+    setNoteEditId(s.id);
+    setNoteDraft(s.note ?? "");
+  }
+  async function saveNote(sid: string) {
+    const note = noteDraft.trim();
+    setSources((arr) => arr.map((x) => (x.id === sid ? { ...x, note } : x)));
+    setNoteEditId(null);
+    await projectSourceNote(id, sid, note).catch(() => {});
   }
 
   async function send() {
@@ -408,36 +422,85 @@ export default function ProjectWorkspace() {
                 ref={(el) => {
                   srcRefs.current[s.id] = el;
                 }}
-                className="rounded-lg p-2.5 flex items-start gap-2 group transition-all"
+                className="rounded-lg p-2.5 group transition-all"
                 style={{
                   background: highlightSrc === s.id ? "var(--accent-subtle)" : "var(--surface-1)",
                   border: highlightSrc === s.id ? "1px solid var(--accent)" : "1px solid var(--border)",
                   opacity: s.active ? 1 : 0.5,
                 }}
               >
-                <button
-                  onClick={() => toggleSource(s)}
-                  className="mt-0.5 w-4 h-4 rounded shrink-0 flex items-center justify-center text-[10px]"
-                  style={{
-                    background: s.active ? "var(--accent)" : "transparent",
-                    border: s.active ? "none" : "1px solid var(--border)",
-                    color: "#04201f",
-                  }}
-                  title={s.active ? "Activa (en uso)" : "Inactiva"}
-                >
-                  {s.active ? "✓" : ""}
-                </button>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm truncate" style={{ color: "var(--text-1)" }}>{s.title}</p>
-                  <p className="text-[10px] uppercase tracking-wide" style={{ color: "var(--text-3)" }}>{s.kind}</p>
+                <div className="flex items-start gap-2">
+                  <button
+                    onClick={() => toggleSource(s)}
+                    className="mt-0.5 w-4 h-4 rounded shrink-0 flex items-center justify-center text-[10px]"
+                    style={{
+                      background: s.active ? "var(--accent)" : "transparent",
+                      border: s.active ? "none" : "1px solid var(--border)",
+                      color: "#04201f",
+                    }}
+                    title={s.active ? "Activa (en uso)" : "Inactiva"}
+                  >
+                    {s.active ? "✓" : ""}
+                  </button>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm truncate" style={{ color: "var(--text-1)" }}>{s.title}</p>
+                    <p className="text-[10px] uppercase tracking-wide" style={{ color: "var(--text-3)" }}>{s.kind}</p>
+                  </div>
+                  <button
+                    onClick={() => startNote(s)}
+                    className="text-xs shrink-0 hover:!opacity-100 transition-opacity"
+                    style={{ color: s.note ? "var(--accent)" : "var(--text-3)", opacity: s.note ? 0.9 : 0.45 }}
+                    title={s.note ? "Editar comentario para el agente" : "Comentar (instrucción para el agente)"}
+                  >
+                    💬
+                  </button>
+                  <button
+                    onClick={() => removeSource(s.id)}
+                    className="text-xs opacity-0 group-hover:opacity-60 hover:!opacity-100"
+                    style={{ color: "var(--text-3)" }}
+                    title="Quitar fuente"
+                  >
+                    ✕
+                  </button>
                 </div>
-                <button
-                  onClick={() => removeSource(s.id)}
-                  className="text-xs opacity-0 group-hover:opacity-60 hover:!opacity-100"
-                  style={{ color: "var(--text-3)" }}
-                >
-                  ✕
-                </button>
+
+                {/* Comentario existente (clic para editar) */}
+                {s.note && noteEditId !== s.id && (
+                  <p
+                    onClick={() => startNote(s)}
+                    className="text-[11px] mt-1.5 leading-snug cursor-text rounded px-1.5 py-1"
+                    style={{ color: "var(--text-2)", background: "var(--accent-subtle)" }}
+                    title="Editar comentario"
+                  >
+                    💬 {s.note}
+                  </p>
+                )}
+
+                {/* Editor de comentario */}
+                {noteEditId === s.id && (
+                  <div className="mt-2 flex flex-col gap-1.5">
+                    <textarea
+                      autoFocus
+                      rows={2}
+                      className="input text-xs"
+                      placeholder="Instrucción para el agente sobre esta fuente… p. ej. «usa este formato para las nuevas ofertas» o «el precio vigente es 250€, ignora el del PDF»"
+                      value={noteDraft}
+                      onChange={(e) => setNoteDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) saveNote(s.id);
+                        if (e.key === "Escape") setNoteEditId(null);
+                      }}
+                    />
+                    <div className="flex gap-2">
+                      <button className="btn text-xs" onClick={() => saveNote(s.id)}>
+                        Guardar comentario
+                      </button>
+                      <button className="btn btn-ghost text-xs" onClick={() => setNoteEditId(null)}>
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>

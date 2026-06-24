@@ -35,6 +35,11 @@ pub struct Source {
     pub kind: String,
     #[serde(default)]
     pub content: String,
+    /// COMENTARIO de Ariel sobre esta fuente: una instrucción a tener SIEMPRE en cuenta al usarla
+    /// (p. ej. «el precio vigente es 250€, ignora el del PDF»). Se inyecta con prioridad en el
+    /// grounding del agente, aparte del contenido recuperado.
+    #[serde(default)]
+    pub note: String,
     /// Si está ACTIVA, se usa para anclar (grounding) el chat/agente del proyecto.
     #[serde(default = "yes")]
     pub active: bool,
@@ -168,6 +173,7 @@ pub fn add_source(pid: &str, title: &str, kind: &str, content: &str) -> Source {
         title: title.trim().to_string(),
         kind: kind.trim().to_string(),
         content: content.trim().to_string(),
+        note: String::new(),
         active: true,
         created: now(),
     };
@@ -189,6 +195,35 @@ pub fn toggle_source(pid: &str, sid: &str, active: bool) {
 pub fn remove_source(pid: &str, sid: &str) {
     let all: Vec<Source> = sources(pid).into_iter().filter(|s| s.id != sid).collect();
     write_vec(&sources_path(pid), &all);
+}
+
+/// Fija (o limpia, con cadena vacía) el COMENTARIO de Ariel sobre una fuente.
+pub fn set_source_note(pid: &str, sid: &str, note: &str) {
+    let mut all = sources(pid);
+    if let Some(s) = all.iter_mut().find(|s| s.id == sid) {
+        s.note = note.trim().to_string();
+        write_vec(&sources_path(pid), &all);
+        touch(pid);
+    }
+}
+
+/// Bloque de INSTRUCCIONES de Ariel: los comentarios de las fuentes ACTIVAS que los tengan. Se
+/// antepone al grounding con prioridad explícita (no se diluye entre el contenido recuperado).
+pub fn source_notes_block(pid: &str) -> String {
+    let notes: Vec<Source> = sources(pid)
+        .into_iter()
+        .filter(|s| s.active && !s.note.trim().is_empty())
+        .collect();
+    if notes.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "\nINSTRUCCIONES DE ARIEL (PRIORIDAD MÁXIMA — respétalas al usar las fuentes):\n",
+    );
+    for n in notes {
+        s.push_str(&format!("- Sobre «{}»: {}\n", n.title, n.note.trim()));
+    }
+    s
 }
 
 // ── Studio (salidas) ──────────────────────────────────────────────────────────
@@ -310,6 +345,8 @@ pub fn grounding(pid: &str) -> String {
     if !p.desc.is_empty() {
         s.push_str(&format!(" Objetivo: {}.", p.desc));
     }
+    // Comentarios de Ariel sobre las fuentes (prioridad), antes del contenido.
+    s.push_str(&source_notes_block(pid));
     let active: Vec<Source> = sources(pid).into_iter().filter(|s| s.active).collect();
     if !active.is_empty() {
         s.push_str(

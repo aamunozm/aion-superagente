@@ -937,6 +937,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/project/source/add", post(project_source_add))
         .route("/api/project/source/upload", post(project_source_upload))
         .route("/api/project/source/toggle", post(project_source_toggle))
+        .route("/api/project/source/note", post(project_source_note))
         .route("/api/project/source/remove", post(project_source_remove))
         .route("/api/project/discover", post(project_discover))
         .route(
@@ -6392,6 +6393,19 @@ struct SrcToggle {
 }
 async fn project_source_toggle(Json(b): Json<SrcToggle>) -> Json<serde_json::Value> {
     crate::projects::toggle_source(&b.project_id, &b.id, b.active);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+struct SrcNote {
+    project_id: String,
+    id: String,
+    #[serde(default)]
+    note: String,
+}
+/// Fija el COMENTARIO de Ariel sobre una fuente (instrucción prioritaria para el agente).
+async fn project_source_note(Json(b): Json<SrcNote>) -> Json<serde_json::Value> {
+    crate::projects::set_source_note(&b.project_id, &b.id, &b.note);
     Json(serde_json::json!({ "ok": true }))
 }
 

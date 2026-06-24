@@ -188,6 +188,8 @@ pub async fn grounding_for_query(pid: &str, query: &str) -> String {
         return crate::projects::grounding(pid);
     }
     let mut s = crate::projects::header(pid);
+    // Comentarios de Ariel sobre las fuentes (prioridad máxima), antes de los fragmentos.
+    s.push_str(&crate::projects::source_notes_block(pid));
     s.push_str(
         "\nFRAGMENTOS RELEVANTES DE LAS FUENTES (recuperados por SIGNIFICADO para esta pregunta — \
          básate en ellos y cítalos por su título; si no bastan, dilo con franqueza):\n",
