@@ -24,6 +24,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-xcode16"
       - name: Cache ORT binaries
         uses: actions/cache@v4
         with:
