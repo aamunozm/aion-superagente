@@ -900,6 +900,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/a2a/send", post(a2a_send))
         .route("/api/inbox", get(inbox_list))
         .route("/api/inbox/read", post(inbox_read))
+        .route("/api/vault", get(vault_list))
+        .route("/api/vault/set", post(vault_set))
+        .route("/api/vault/get", post(vault_get))
+        .route("/api/vault/remove", post(vault_remove))
         .route("/api/library", get(library_list))
         .route("/api/library/ingest", post(library_ingest))
         .route("/api/library/upload", post(library_upload))
@@ -962,6 +966,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/claude-code/test", post(claude_code_test))
         .route("/api/claude-code/audit", get(claude_code_audit))
         .route("/api/claude-code/stats", get(claude_code_stats))
+        .route("/api/claude-code/cost", get(claude_code_cost))
         // Bootstrap del token local: la UI lo pide una vez al arrancar (GET, Origin local).
         .route("/api/auth/token", get(api_auth_token))
         .route("/api/apikeys", get(apikeys_list).post(apikeys_set))
@@ -7636,6 +7641,51 @@ fn line_record_id(line: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+// ── Bóveda de secretos (Llavero macOS; NUNCA expuesta al LLM ni al puente MCP) ──────────
+
+/// Lista los secretos de la bóveda (nombre + nota + fecha). NUNCA devuelve valores.
+async fn vault_list() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "secrets": crate::vault::list() }))
+}
+
+#[derive(Deserialize)]
+struct VaultSetBody {
+    name: String,
+    value: String,
+    #[serde(default)]
+    note: String,
+}
+
+/// Guarda un secreto en el Llavero. El valor jamás se persiste en disco plano ni se sirve al LLM.
+async fn vault_set(Json(b): Json<VaultSetBody>) -> Json<serde_json::Value> {
+    match crate::vault::set(&b.name, &b.value, &b.note) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct VaultNameBody {
+    name: String,
+}
+
+/// Revela el VALOR de un secreto. Solo por acción LOCAL explícita (local_guard protege la ruta);
+/// NO hay tool MCP equivalente → Claude Code no puede leer la bóveda.
+async fn vault_get(Json(b): Json<VaultNameBody>) -> Json<serde_json::Value> {
+    match crate::vault::get(&b.name) {
+        Some(value) => Json(serde_json::json!({ "ok": true, "value": value })),
+        None => Json(serde_json::json!({ "ok": false, "error": "no encontrado" })),
+    }
+}
+
+/// Elimina un secreto (Llavero + índice).
+async fn vault_remove(Json(b): Json<VaultNameBody>) -> Json<serde_json::Value> {
+    match crate::vault::remove(&b.name) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
 #[derive(Deserialize)]
 struct ImportBody {
     /// Contenido JSONL (formato de export). Se fusiona con la memoria actual.
@@ -7806,18 +7856,26 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
     // Solo las últimas 30 sesiones al cliente (el chart muestra una cola; acota el payload).
     let sessions_tail: Vec<serde_json::Value> =
         sessions.iter().rev().take(30).rev().cloned().collect();
-    // Tamaño del CORPUS de memoria accesible bajo demanda (tokens estimados de toda la memoria
-    // vigente). NO es un "ahorro": es el contexto al que Claude Code accede sin cargarlo entero —
-    // por consulta solo paga `avg_tokens_per_call`. Framing honesto (no "X millones ahorrados").
+    // Tamaño del CORPUS SERVIBLE: la memoria vigente que el puente PODRÍA servir a Claude Code,
+    // es decir EXCLUYENDO lo que nunca viaja al puente (ruido introspectivo/conversacional y
+    // recuerdos confidenciales). Es el baseline honesto del "ahorro": por consulta Claude paga
+    // solo `avg_tokens_per_call` en vez de volcar todo este corpus servible. Contar el ruido aquí
+    // inflaría el ahorro contra una línea base que el puente jamás serviría.
     let (corpus_tokens, memory_count) = crate::shared_memory()
         .map(|m| {
-            let contents = m.contents();
-            let tok = contents
+            let servable: Vec<String> = m
+                .contents()
+                .into_iter()
+                .filter(|c| {
+                    !crate::claude_code::is_bridge_noise(c) && !crate::redact::is_confidential(c)
+                })
+                .collect();
+            let tok = servable
                 .iter()
                 .map(|c| c.chars().count() as u64)
                 .sum::<u64>()
                 / 4;
-            (tok, contents.len() as u64)
+            (tok, servable.len() as u64)
         })
         .unwrap_or((0, 0));
     let avg_per_call = if total > 0 {
@@ -7851,6 +7909,62 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
         "graph_communities": graph_communities,
         "last_activity": last,
         "sessions": sessions_tail,
+    }))
+}
+
+/// **Tokens del puente**: serie diaria/mensual de tokens servidos + total, y el desglose
+/// lectura/escritura (las escrituras `remember`/`forget` NO ahorran; solo las lecturas comparan
+/// contra volcar el corpus). Sin precios: el dashboard muestra TOKENS, no dinero (honesto).
+async fn claude_code_cost() -> Json<serde_json::Value> {
+    use std::collections::BTreeMap;
+    let entries = crate::claude_mcp::audit_tail(5000);
+    let mut by_day: BTreeMap<String, u64> = BTreeMap::new();
+    let mut by_month: BTreeMap<String, u64> = BTreeMap::new();
+    let mut total: u64 = 0;
+    let mut read_tokens: u64 = 0;
+    let mut read_calls: u64 = 0;
+    for e in &entries {
+        let tok = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let tool = e.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+        total += tok;
+        // LECTURAS de memoria (lo único que "ahorra" vs. volcar el corpus). Escrituras no cuentan.
+        let is_read = matches!(
+            tool,
+            "aion_brief"
+                | "aion_memory_search"
+                | "aion_library_search"
+                | "aion_graph_query"
+                | "aion_project_context"
+                | "aion_episodic_recall"
+        );
+        if is_read {
+            read_tokens += tok;
+            read_calls += 1;
+        }
+        if let Some(ts) = e.get("ts").and_then(|v| v.as_str()) {
+            // ts RFC3339 → "YYYY-MM-DD" y "YYYY-MM" por prefijo (estable, sin parseo de fecha).
+            if ts.len() >= 10 {
+                *by_day.entry(ts[..10].to_string()).or_insert(0) += tok;
+            }
+            if ts.len() >= 7 {
+                *by_month.entry(ts[..7].to_string()).or_insert(0) += tok;
+            }
+        }
+    }
+    let daily: Vec<serde_json::Value> = by_day
+        .iter()
+        .map(|(d, t)| serde_json::json!({ "day": d, "tokens": t }))
+        .collect();
+    let monthly: Vec<serde_json::Value> = by_month
+        .iter()
+        .map(|(m, t)| serde_json::json!({ "month": m, "tokens": t }))
+        .collect();
+    Json(serde_json::json!({
+        "total_tokens": total,
+        "read_tokens": read_tokens,
+        "read_calls": read_calls,
+        "daily": daily,
+        "monthly": monthly,
     }))
 }
 

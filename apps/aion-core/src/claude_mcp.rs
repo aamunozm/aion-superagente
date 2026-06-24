@@ -67,10 +67,10 @@ fn est_tokens(s: &str) -> usize {
     s.chars().count() / 4
 }
 
-/// Sirve los hits `(score, contenido)` compactados a inglés, acotando el TOTAL a `budget`
-/// tokens estimados. Cada recuerdo se sirve truncado a 300 chars; `compact_take` cachea por el
-/// recuerdo COMPLETO, así comparte traducción con el brief y el grafo. Garantiza al menos 1
-/// línea (no devolver vacío por un presupuesto diminuto). Palanca A de ahorro.
+/// Sirve los hits `(score, contenido)` acotando el TOTAL a `budget` tokens estimados. Cada
+/// recuerdo se trunca a 300 chars (densidad por hit) y el bucle corta la cola cuando el acumulado
+/// excede el presupuesto. Garantiza al menos 1 línea (no devolver vacío por un presupuesto
+/// diminuto). Palanca de ahorro: acota el total servido al puente sin importar cuántos hits pasen.
 fn serve_within_budget<'a>(hits: impl Iterator<Item = (f32, &'a str)>, budget: usize) -> String {
     let mut spent = 0usize;
     let mut lines: Vec<String> = Vec::new();
@@ -542,8 +542,13 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             // infla el contexto y despista. Aquí solo lo que de verdad casa con la consulta.
             // SimpleMem etapa 3: expand_intent enriquece el query sin LLM (arXiv:2601.02553).
             let query_ex = expand_intent(query);
+            // Recupera un POOL más amplio que `k` para que los filtros (relevancia +
+            // confidencialidad + ruido del puente) no dejen el resultado vacío cuando los primeros
+            // hits son ruido: un `[hecho]`/`[decisión]` útil situado más abajo debe poder aflorar.
+            // El recorte final por COUNT (`k`) y por TOKENS (presupuesto) ocurre tras filtrar.
+            let pool_k = (k + 8).min(16);
             let hits = mem
-                .retrieve_associative(&query_ex, k, 0)
+                .retrieve_associative(&query_ex, pool_k, 0)
                 .await
                 .map_err(|e| e.to_string())?;
             // Filtro de relevancia (mismo criterio probado que la ruta de chat): si ni el
@@ -554,25 +559,30 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 return Ok("Sin recuerdos relevantes para esa consulta.".into());
             }
             let cutoff = (best * 0.75).max(0.28);
-            // DENY DURO de confidencialidad: los recuerdos marcados `[confidencial]` NUNCA salen al
-            // puente (Claude Code es remoto), pase lo que pase con su relevancia.
+            // Triple filtro antes de servir al puente (Claude Code es un LLM remoto que paga por
+            // token y donde NO deben viajar ni secretos ni ruido):
+            //   1. RELEVANCIA: dentro del 75% del mejor hit (cola débil fuera).
+            //   2. CONFIDENCIALIDAD (deny duro): los `[confidencial]` NUNCA salen al puente.
+            //   3. RUIDO DEL PUENTE: eco conversacional, deudas resueltas e introspección del loop
+            //      de vida interior no son contexto accionable para tareas de código; gastan tokens
+            //      y diluyen la relevancia. Se excluyen (siguen vivos en la memoria de AION).
             let useful: Vec<_> = hits
                 .into_iter()
-                .filter(|h| h.score >= cutoff && !crate::redact::is_confidential(&h.content))
+                .filter(|h| {
+                    h.score >= cutoff
+                        && !crate::redact::is_confidential(&h.content)
+                        && !crate::claude_code::is_bridge_noise(&h.content)
+                })
+                .take(k) // del pool ampliado, conserva solo el top-`k` de hits ÚTILES (orden por score)
                 .collect();
             if useful.is_empty() {
                 return Ok("Sin recuerdos relevantes para esa consulta.".into());
             }
-            // OPTIMIZACIÓN DE TOKENS DEL PUENTE: Claude Code paga por token, así que se
-            // sirve la versión inglesa cacheada (≈14-40% menos tokens, medido) cuando existe;
-            // en miss se sirve el español original y se calienta la caché en segundo plano.
-            // Fail-open: nunca bloquea ni corrompe.
-            //
-            // PRESUPUESTO POR TOKENS (palanca A de ahorro): además del filtro de relevancia,
-            // se acota el TOTAL servido a un presupuesto estimado de tokens (def. 600;
-            // `AION_MCP_TOKEN_BUDGET`). Así una consulta nunca infla el contexto de Claude Code
-            // con la cola de recuerdos marginales aunque pasen el umbral. Siempre se sirve al
-            // menos el más relevante (no devolver vacío por un presupuesto diminuto).
+            // PRESUPUESTO POR TOKENS (palanca de ahorro): además de los filtros, se acota el TOTAL
+            // servido a un presupuesto estimado de tokens (def. 400; `AION_MCP_TOKEN_BUDGET`). Así
+            // una consulta nunca infla el contexto de Claude Code con la cola de recuerdos
+            // marginales aunque pasen el umbral. Siempre se sirve al menos el más relevante (no
+            // devolver vacío por un presupuesto diminuto).
             let body = serve_within_budget(
                 useful.iter().map(|h| (h.score, h.content.as_str())),
                 token_budget(),
@@ -837,8 +847,11 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             let now = chrono::Utc::now().timestamp();
             let mut out = String::new();
             for h in hits {
-                // DENY DURO: un micromomento confidencial nunca sale al puente remoto.
-                if crate::redact::is_confidential(&h.detail) {
+                // DENY DURO: un micromomento confidencial nunca sale al puente remoto;
+                // y el ruido introspectivo/conversacional tampoco (no es contexto accionable).
+                if crate::redact::is_confidential(&h.detail)
+                    || crate::claude_code::is_bridge_noise(&h.detail)
+                {
                     continue;
                 }
                 let detail = crate::mcp_compact::compact_dense(h.detail.trim(), 300);

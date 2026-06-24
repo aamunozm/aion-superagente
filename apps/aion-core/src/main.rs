@@ -64,6 +64,7 @@ mod skill_store;
 mod skill_tool;
 mod skillbook_tool;
 mod usermodel;
+mod vault;
 mod web_tool;
 mod workflow;
 mod workspace;

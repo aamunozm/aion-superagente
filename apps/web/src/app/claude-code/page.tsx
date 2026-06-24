@@ -16,13 +16,20 @@ import {
   downloadMemory,
   forgetProject,
   importMemory,
+  claudeCodeCost,
   memoryNormalize,
   memoryProjects,
+  vaultGet,
+  vaultList,
+  vaultRemove,
+  vaultSet,
   type ClaudeCodeAuditEntry,
   type ClaudeCodeStats,
   type ClaudeCodeStatus,
+  type CostData,
   type MemoryProjects,
   type ProjectMemory,
+  type VaultSecret,
 } from "@/lib/api";
 
 const INSTALL_CMD = "npm install -g @anthropic-ai/claude-code";
@@ -275,6 +282,158 @@ function MemoryByProject() {
   );
 }
 
+type ChartPoint = { label: string; value: number };
+
+/** Gráfico de área estilo bursátil (SVG puro): gradiente, rejilla, ejes y crosshair al hover. */
+function AreaChart({ data, color, fmtVal }: { data: ChartPoint[]; color: string; fmtVal: (v: number) => string }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const W = 720, H = 200, pl = 12, pr = 12, pt = 16, pb = 24;
+  const innerW = W - pl - pr, innerH = H - pt - pb;
+  const n = data.length;
+  if (n === 0) return <p className="text-sm py-6 text-center" style={{ color: "var(--text-3)" }}>Sin datos aún.</p>;
+  const max = Math.max(1e-9, ...data.map((d) => d.value));
+  const X = (i: number) => (n <= 1 ? pl + innerW / 2 : pl + (i * innerW) / (n - 1));
+  const Y = (v: number) => pt + innerH - (v / max) * innerH;
+  const line = data.map((d, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(d.value).toFixed(1)}`).join(" ");
+  const area = `${line} L${X(n - 1).toFixed(1)},${(pt + innerH).toFixed(1)} L${X(0).toFixed(1)},${(pt + innerH).toFixed(1)} Z`;
+  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - r.left) / r.width) * W;
+    const i = Math.max(0, Math.min(n - 1, Math.round(((x - pl) / innerW) * (n - 1))));
+    setHover(i);
+  };
+  const tipX = hover === null ? 0 : Math.min(Math.max(X(hover), 58), W - 58);
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block" }} onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+      <defs>
+        <linearGradient id="areafill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.30" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {[0, 0.5, 1].map((f) => (
+        <g key={f}>
+          <line x1={pl} x2={W - pr} y1={pt + innerH * (1 - f)} y2={pt + innerH * (1 - f)} stroke="var(--border)" strokeWidth="1" strokeDasharray="3 4" />
+          <text x={W - pr} y={pt + innerH * (1 - f) - 3} textAnchor="end" fontSize="9" fill="var(--text-3)">{fmtVal(max * f)}</text>
+        </g>
+      ))}
+      <path d={area} fill="url(#areafill)" />
+      <path d={line} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={X(n - 1)} cy={Y(data[n - 1].value)} r="3" fill={color} />
+      {[...new Set([0, Math.floor((n - 1) / 2), n - 1])].map((i) => (
+        <text key={i} x={X(i)} y={H - 6} textAnchor={i === 0 ? "start" : i === n - 1 ? "end" : "middle"} fontSize="9" fill="var(--text-3)">{data[i].label}</text>
+      ))}
+      {hover !== null && (
+        <g>
+          <line x1={X(hover)} x2={X(hover)} y1={pt} y2={pt + innerH} stroke={color} strokeWidth="1" strokeDasharray="2 3" opacity="0.6" />
+          <circle cx={X(hover)} cy={Y(data[hover].value)} r="4" fill={color} stroke="#fff" strokeWidth="1.5" />
+          <g transform={`translate(${tipX},${pt + 6})`}>
+            <rect x="-54" y="-4" width="108" height="32" rx="6" fill="#11110f" opacity="0.94" />
+            <text x="0" y="8" textAnchor="middle" fontSize="9" fill="#cbb78a">{data[hover].label}</text>
+            <text x="0" y="21" textAnchor="middle" fontSize="11" fontWeight="bold" fill="#fff">{fmtVal(data[hover].value)}</text>
+          </g>
+        </g>
+      )}
+    </svg>
+  );
+}
+
+/** Barras verticales con gradiente (mensual). */
+function MoneyBars({ data, color, fmtVal }: { data: ChartPoint[]; color: string; fmtVal: (v: number) => string }) {
+  if (data.length === 0) return <p className="text-sm py-4 text-center" style={{ color: "var(--text-3)" }}>Sin datos aún.</p>;
+  const max = Math.max(1e-9, ...data.map((d) => d.value));
+  return (
+    <div className="flex items-end gap-3" style={{ height: 130 }}>
+      {data.map((d, i) => (
+        <div key={i} className="flex-1 flex flex-col items-center justify-end" style={{ height: "100%" }} title={`${d.label}: ${fmtVal(d.value)}`}>
+          <span className="text-[10px] mb-1 tabular-nums" style={{ color: "var(--text-2)" }}>{fmtVal(d.value)}</span>
+          <div className="w-full rounded-t transition-all" style={{ height: `${Math.max(4, (d.value / max) * 100)}%`, background: `linear-gradient(180deg, ${color}, ${color}44)` }} />
+          <span className="text-[10px] mt-1.5" style={{ color: "var(--text-3)" }}>{d.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Panel de TOKENS del puente AION↔Claude Code con gráficos en tiempo real. HONESTO: muestra los
+ *  tokens de memoria que AION inyecta en tus sesiones (un COSTE, a cambio de continuidad) + un
+ *  ahorro ESTIMADO —solo lecturas— vs. volcar todo el corpus. Sin dinero. */
+function CostPanel({ stats }: { stats: ClaudeCodeStats | null }) {
+  const [cost, setCost] = useState<CostData | null>(null);
+  const load = useCallback(() => { claudeCodeCost().then((c) => { if (c) setCost(c); }).catch(() => {}); }, []);
+  useEffect(() => { load(); const iv = setInterval(load, 15_000); return () => clearInterval(iv); }, [load]);
+  if (!cost) return null;
+
+  const monthKey = new Date().toISOString().slice(0, 7);
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const monthTokens = cost.monthly.find((m) => m.month === monthKey)?.tokens ?? 0;
+  const todayTokens = cost.daily.find((d) => d.day === todayKey)?.tokens ?? 0;
+  const corpus = stats?.corpus_tokens ?? 0;
+  const writeTokens = Math.max(0, cost.total_tokens - cost.read_tokens);
+  // Ahorro estimado SOLO sobre LECTURAS (las escrituras no leen memoria → no ahorran): cada lectura
+  // sirve ~avgRead tok relevantes en vez de los `corpus` de volcar toda la memoria.
+  const avgRead = cost.read_calls > 0 ? cost.read_tokens / cost.read_calls : 0;
+  const saved = Math.max(0, corpus - avgRead) * cost.read_calls;
+  // Porcentaje de ahorro POR LECTURA vs volcar el corpus servible entero: cada lectura sirve
+  // ~avgRead en vez de `corpus`. Es la respuesta honesta a "¿cuánto % ahorro?" (acotado [0,100)).
+  const savedPct = corpus > 0 && avgRead > 0 ? Math.min(99.9, Math.max(0, (1 - avgRead / corpus) * 100)) : 0;
+  const ft = (v: number) => fmtTokens(Math.round(v));
+
+  const dailyT: ChartPoint[] = cost.daily.map((d) => ({ label: d.day.slice(5), value: d.tokens }));
+  const monthlyT: ChartPoint[] = cost.monthly.map((m) => ({ label: m.month, value: m.tokens }));
+
+  return (
+    <div className="card" style={{ border: "1px solid var(--border)" }}>
+      <div className="flex items-center gap-2 mb-1">
+        <span style={{ fontSize: 16 }}>📊</span>
+        <h2 className="t-section" style={{ color: "var(--text-2)" }}>Tokens del puente AION ↔ Claude Code</h2>
+      </div>
+      <p className="text-xs mb-4 leading-relaxed" style={{ color: "var(--text-3)" }}>
+        Tokens de memoria que AION inyecta en tus sesiones de Claude Code. Son un <b>coste</b> a cambio de
+        <b> continuidad</b> (Claude conoce tus proyectos sin re-explicar). El <b>ahorro</b> es una
+        <b> estimación</b> y solo aplica a las <b>lecturas</b>: cuando Claude lee memoria recibe ~{ft(avgRead)} tok
+        relevantes en vez de volcar el <b>corpus servible</b> (~{ft(corpus)} tok) —un <b>{savedPct.toFixed(1)}%</b> menos
+        por lectura—. El corpus servible excluye recuerdos privados e introspección de AION, que nunca salen al puente.
+        Las <b>escrituras</b> (remember) no ahorran.
+      </p>
+
+      {/* Héroes */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+        {[
+          { k: "Tokens servidos (total)", v: ft(cost.total_tokens), s: `${cost.read_calls} lecturas`, accent: "var(--text-1)" },
+          { k: "Este mes", v: ft(monthTokens), s: "tokens", accent: "var(--text-1)" },
+          { k: "Hoy", v: ft(todayTokens), s: "tokens", accent: "var(--text-1)" },
+          { k: "Ahorro por lectura", v: `${savedPct.toFixed(1)}%`, s: `~${ft(saved)} tok ahorrados · vs volcar el corpus`, accent: "var(--accent)" },
+        ].map((h) => (
+          <div key={h.k} className="rounded-lg p-3" style={{ background: "var(--surface-1)" }}>
+            <div className="text-xl font-bold tabular-nums" style={{ color: h.accent }}>{h.v}</div>
+            <div className="text-[11px] mt-0.5" style={{ color: "var(--text-2)" }}>{h.k}</div>
+            <div className="text-[10px]" style={{ color: "var(--text-3)" }}>{h.s}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Gráfico diario (área bursátil) */}
+      <div className="mb-5">
+        <div className="text-xs font-medium uppercase tracking-wide mb-1" style={{ color: "var(--text-3)" }}>Tokens servidos por día</div>
+        <AreaChart data={dailyT} color="var(--accent)" fmtVal={ft} />
+      </div>
+
+      {/* Gráfico mensual (barras) */}
+      <div className="mb-4">
+        <div className="text-xs font-medium uppercase tracking-wide mb-2" style={{ color: "var(--text-3)" }}>Tokens por mes</div>
+        <MoneyBars data={monthlyT} color="var(--accent)" fmtVal={ft} />
+      </div>
+
+      {/* Desglose lectura/escritura (transparencia) */}
+      <div className="text-[11px]" style={{ color: "var(--text-3)" }}>
+        <span style={{ color: "var(--accent)" }}>Lecturas: {ft(cost.read_tokens)} tok</span> ({cost.read_calls} consultas) ·{" "}
+        Escrituras: {ft(writeTokens)} tok <span style={{ opacity: 0.8 }}>(guardan memoria, no ahorran)</span>
+      </div>
+    </div>
+  );
+}
+
 /** Panel informativo de PRIVACIDAD: explica el blindaje de secretos/datos confidenciales,
  *  incluido el caso de usar un LLM externo de pago. Honesto sobre los límites. */
 function PrivacyPanel() {
@@ -311,6 +470,107 @@ function PrivacyPanel() {
         retención cero), evitando cuentas Consumer (Free/Pro/Max) que por defecto entrenan salvo
         opt-out. <i>Próximo paso: bóveda local cifrada para claves estructuradas.</i>
       </div>
+    </div>
+  );
+}
+
+/** Bóveda de secretos: claves/datos bancarios cifrados en el Llavero de macOS. El valor NUNCA
+ *  llega a ningún LLM ni al puente — solo se revela aquí, bajo acción local explícita. */
+function VaultPanel() {
+  const [secrets, setSecrets] = useState<VaultSecret[]>([]);
+  const [name, setName] = useState("");
+  const [value, setValue] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [revealed, setRevealed] = useState<Record<string, string>>({});
+
+  const load = useCallback(() => {
+    vaultList().then(setSecrets).catch(() => {});
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function add() {
+    if (!name.trim() || !value.trim() || busy) return;
+    setBusy(true);
+    const r = await vaultSet(name.trim(), value, note.trim()).catch(() => ({ ok: false, error: "sin respuesta" }));
+    if (r.ok) {
+      setName(""); setValue(""); setNote("");
+      setMsg(`✓ Guardado en el Llavero (cifrado, fuera de la memoria)`);
+      load();
+    } else {
+      setMsg(`⚠️ ${r.error ?? "no se pudo guardar"}`);
+    }
+    setBusy(false);
+  }
+  async function reveal(n: string) {
+    if (revealed[n] !== undefined) {
+      setRevealed((m) => { const c = { ...m }; delete c[n]; return c; });
+      return;
+    }
+    const r = await vaultGet(n).catch(() => ({ ok: false, value: undefined as string | undefined }));
+    if (r.ok && r.value !== undefined) setRevealed((m) => ({ ...m, [n]: r.value as string }));
+  }
+  async function del(n: string) {
+    if (!confirm(`¿Eliminar el secreto «${n}» del Llavero?`)) return;
+    await vaultRemove(n).catch(() => {});
+    setRevealed((m) => { const c = { ...m }; delete c[n]; return c; });
+    load();
+  }
+
+  return (
+    <div className="card" style={{ border: "1px solid var(--border)" }}>
+      <div className="flex items-center gap-2 mb-1">
+        <span style={{ fontSize: 16 }}>🗝️</span>
+        <h2 className="t-section" style={{ color: "var(--text-2)" }}>Bóveda de secretos</h2>
+      </div>
+      <p className="text-xs mb-4 leading-relaxed" style={{ color: "var(--text-3)" }}>
+        Claves, datos bancarios y tokens cifrados en el <b>Llavero de macOS</b>. El valor vive solo
+        ahí — <b>nunca</b> entra en la memoria de AION, ni se embebe, ni se sirve a Claude Code o a un
+        LLM externo. Solo se revela aquí, en tu Mac, bajo tu acción.
+      </p>
+
+      {msg && (
+        <p className="text-xs mb-3 px-3 py-2 rounded-lg" style={{ background: "var(--surface-1)", color: "var(--text-2)" }}>{msg}</p>
+      )}
+
+      {/* Alta */}
+      <div className="flex flex-wrap gap-2 mb-4">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="nombre (ej. banco-santander)"
+          className="text-sm px-3 py-2 rounded-lg" style={{ background: "var(--surface-1)", border: "1px solid var(--border)", color: "var(--text-1)", minWidth: 180, flex: 1 }} />
+        <input value={value} onChange={(e) => setValue(e.target.value)} type="password" placeholder="valor (clave / nº de cuenta)"
+          className="text-sm px-3 py-2 rounded-lg" style={{ background: "var(--surface-1)", border: "1px solid var(--border)", color: "var(--text-1)", minWidth: 180, flex: 1 }} />
+        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="nota (opcional)"
+          className="text-sm px-3 py-2 rounded-lg" style={{ background: "var(--surface-1)", border: "1px solid var(--border)", color: "var(--text-1)", minWidth: 120, flex: 1 }} />
+        <button className="btn btn-gold text-sm" disabled={busy || !name.trim() || !value.trim()} onClick={add}>Guardar</button>
+      </div>
+
+      {/* Lista */}
+      {secrets.length === 0 ? (
+        <p className="text-sm" style={{ color: "var(--text-3)" }}>Aún no hay secretos guardados.</p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {secrets.map((s) => (
+            <div key={s.name} className="flex items-center gap-3 rounded-lg p-2.5" style={{ background: "var(--surface-1)" }}>
+              <div className="min-w-0 flex-1">
+                <span className="font-mono text-sm" style={{ color: "var(--text-1)" }}>{s.name}</span>
+                {s.note && <span className="text-xs ml-2" style={{ color: "var(--text-3)" }}>{s.note}</span>}
+                {revealed[s.name] !== undefined && (
+                  <div className="font-mono text-xs mt-1 px-2 py-1 rounded break-all" style={{ background: "var(--surface-2)", color: "var(--accent)" }}>
+                    {revealed[s.name]}
+                  </div>
+                )}
+              </div>
+              <button className="btn text-xs shrink-0" onClick={() => reveal(s.name)}>
+                {revealed[s.name] !== undefined ? "Ocultar" : "Revelar"}
+              </button>
+              <button className="btn text-xs shrink-0" style={{ color: "var(--danger)" }} onClick={() => del(s.name)}>Eliminar</button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -504,20 +764,26 @@ export default function ClaudeCodePage() {
                 </div>
                 <div className="text-center shrink-0">
                   <div className="text-3xl font-bold" style={{ color: "var(--text-1)" }}>~{fmtTokens(corpusTokens)}</div>
-                  <div className="text-[11px] mt-0.5" style={{ color: "var(--text-3)" }}>memoria accesible</div>
+                  <div className="text-[11px] mt-0.5" style={{ color: "var(--text-3)" }}>corpus servible</div>
                 </div>
                 <div className="flex-1" style={{ minWidth: 220 }}>
                   <p className="text-sm leading-relaxed" style={{ color: "var(--text-2)" }}>
-                    El puente sirve <b>solo lo relevante bajo demanda</b>: Claude accede a un corpus de
-                    ~{fmtTokens(corpusTokens)} tokens de memoria pagando ~{fmtTokens(avgPerCall)} por consulta,
-                    sin cargarla entera en el contexto.
+                    El puente sirve <b>solo lo relevante bajo demanda</b>: Claude accede a un corpus servible de
+                    ~{fmtTokens(corpusTokens)} tokens (memoria útil, sin recuerdos privados ni introspección de AION)
+                    pagando ~{fmtTokens(avgPerCall)} por consulta, sin cargarla entera en el contexto.
                   </p>
                 </div>
               </div>
             </div>
 
+            {/* ── Tokens del puente + ahorro estimado en tiempo real ── */}
+            <CostPanel stats={stats} />
+
             {/* ── Privacidad y datos confidenciales ── */}
             <PrivacyPanel />
+
+            {/* ── Bóveda de secretos (Llavero macOS) ── */}
+            <VaultPanel />
 
             {/* ── Métricas en grid 3×2 ── */}
             <div className="grid grid-cols-3 gap-3">
