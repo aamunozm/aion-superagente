@@ -439,7 +439,10 @@ pub async fn build_brief() -> String {
             // El brief es coste GARANTIZADO por sesión y lo consume SOLO Claude Code (tokens de
             // pago) → cada recuerdo se trunca a 180 chars para densidad. La de-duplicación opera
             // sobre `c` (180 chars del original), estable e independiente del truncado.
-            let display = crate::mcp_compact::compact_dense(&content, 180);
+            // Redacta ANTES de truncar (egreso remoto): el marcador entra antes del recorte, así
+            // el truncado a 180 nunca puede dejar un fragmento de secreto.
+            let red = crate::redact::redact_secrets(&content);
+            let display = crate::mcp_compact::compact_dense(&red, 180);
             if aion_memory::is_unknown_time(ts) {
                 lines.push_str(&format!("- {display}\n"));
             } else {

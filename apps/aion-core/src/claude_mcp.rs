@@ -75,7 +75,11 @@ fn serve_within_budget<'a>(hits: impl Iterator<Item = (f32, &'a str)>, budget: u
     let mut spent = 0usize;
     let mut lines: Vec<String> = Vec::new();
     for (score, content) in hits {
-        let served = crate::mcp_compact::compact_dense(content, 300);
+        // Redacta ANTES de truncar: el secreto se sustituye por su marcador (corto) antes del
+        // recorte, así un truncado a 300 chars nunca puede partir un secreto en un fragmento
+        // superviviente. La redacción del dispatch queda como segunda capa (idempotente).
+        let red = crate::redact::redact_secrets(content);
+        let served = crate::mcp_compact::compact_dense(&red, 300);
         let line = format!("[{score:.2}] {served}");
         let cost = est_tokens(&line);
         if !lines.is_empty() && spent + cost > budget {
@@ -854,7 +858,9 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 {
                     continue;
                 }
-                let detail = crate::mcp_compact::compact_dense(h.detail.trim(), 300);
+                // Redacta ANTES de truncar (egreso remoto): el marcador entra antes del recorte.
+                let red = crate::redact::redact_secrets(h.detail.trim());
+                let detail = crate::mcp_compact::compact_dense(&red, 300);
                 out.push_str(&format!(
                     "- hace {} (relevancia {:.2}): {}\n",
                     crate::awareness::humanize_secs(now - h.at),
