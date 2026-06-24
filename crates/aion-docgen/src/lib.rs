@@ -18,10 +18,19 @@
 pub mod brand;
 mod docx;
 mod markdown;
+pub mod offerta;
+pub mod style;
+pub mod style_extract;
 mod template;
 
 pub use aion_browser::PdfOptions;
 pub use brand::BrandProfile;
+pub use offerta::{
+    build_offerta, render_offerta_html, render_offerta_pdf, Benefit, Card, CompareBar, Condition,
+    OfferRow, OffertaContent, OffertaFacts,
+};
+pub use style::{presets as style_presets, DocStyle};
+pub use style_extract::{extract_style, Extracted};
 
 use serde::Serialize;
 

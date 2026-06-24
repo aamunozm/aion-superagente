@@ -11,11 +11,15 @@ use serde::Serialize;
 const LAYOUT: &str = include_str!("../templates/_layout.html");
 const BASE: &str = include_str!("../templates/base.html");
 const PREVENTIVO: &str = include_str!("../templates/preventivo.html");
+const OFFERTA: &str = include_str!("../templates/offerta.html");
 
 fn environment() -> Environment<'static> {
     let mut env = Environment::new();
     // Escapa SIEMPRE como HTML (también plantillas sin extensión, que registramos por nombre).
     env.set_auto_escape_callback(|_name| AutoEscape::Html);
+    // Filtro `md`: renderiza markdown INLINE en un campo (permite **negrita** en titulares,
+    // celdas, tarjetas…). Se usa siempre junto a `|safe` porque su salida ya es HTML nuestro.
+    env.add_filter("md", |s: String| crate::markdown::to_html_inline(&s));
     // El layout es el padre del que heredan las demás (cabecera + CSS de marca + bloques).
     env.add_template("_layout.html", LAYOUT)
         .expect("layout válido en build");
@@ -23,6 +27,10 @@ fn environment() -> Environment<'static> {
         .expect("plantilla base válida en build");
     env.add_template("preventivo", PREVENTIVO)
         .expect("plantilla preventivo válida en build");
+    // Plantilla RICA (skill de documento): oferta comercial con hero, tarjetas, tabla de
+    // precios, gráfico comparativo, beneficios, condiciones y firma. Standalone (CSS propio).
+    env.add_template("offerta", OFFERTA)
+        .expect("plantilla offerta válida en build");
     env
 }
 
@@ -37,4 +45,4 @@ pub fn render<C: Serialize>(name: &str, ctx: &C) -> Result<String, String> {
 }
 
 /// Nombres de plantilla disponibles (para validar entrada del usuario/agente).
-pub const AVAILABLE: &[&str] = &["base", "preventivo"];
+pub const AVAILABLE: &[&str] = &["base", "preventivo", "offerta"];

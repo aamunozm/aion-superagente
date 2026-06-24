@@ -227,6 +227,7 @@ dependencies = [
  "aion-kernel",
  "chrono",
  "docx-rs",
+ "image",
  "minijinja",
  "pulldown-cmark",
  "serde",
