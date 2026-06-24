@@ -961,6 +961,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/doc-styles/remove", post(doc_styles_remove))
         .route("/api/doc-styles/extract", post(doc_styles_extract))
+        .route(
+            "/api/doc-styles/default",
+            get(doc_styles_default_get).post(doc_styles_default_set),
+        )
         .route("/api/documents/offerta", post(documents_offerta))
         // MCP: Claude Code consulta la memoria de AION bajo demanda (Bearer propio).
         .route(
@@ -6716,6 +6720,58 @@ struct StyleRemove {
 async fn doc_styles_remove(Json(b): Json<StyleRemove>) -> Json<serde_json::Value> {
     let p = doc_styles_dir().join(format!("{}.json", style_slug(&b.name)));
     let _ = std::fs::remove_file(p);
+    // Si era el predeterminado, lo limpiamos (vuelve al estilo por defecto).
+    if get_default_style_name().as_deref() == Some(b.name.trim()) {
+        let _ = std::fs::remove_file(default_style_path());
+    }
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// Puntero al estilo PREDETERMINADO global (el que se usa "siempre" cuando no se especifica
+/// uno): un archivo con el NOMBRE del estilo. Sin extensión .json → `doc_styles_list` lo ignora.
+fn default_style_path() -> std::path::PathBuf {
+    doc_styles_dir().join("_default.txt")
+}
+fn get_default_style_name() -> Option<String> {
+    std::fs::read_to_string(default_style_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+/// Resuelve el estilo predeterminado: busca por nombre en los presets y luego en los guardados;
+/// si no hay predeterminado o no se encuentra, cae al estilo por defecto («Slate · oro»). Lo usan
+/// el agente (`generate_offerta`) y los endpoints cuando el usuario no elige un estilo concreto.
+pub(crate) fn resolve_default_style() -> aion_docgen::DocStyle {
+    let Some(name) = get_default_style_name() else {
+        return aion_docgen::DocStyle::default();
+    };
+    if let Some(s) = aion_docgen::style::by_name(&name) {
+        return s;
+    }
+    let p = doc_styles_dir().join(format!("{}.json", style_slug(&name)));
+    if p.exists() {
+        return aion_docgen::DocStyle::load(p);
+    }
+    aion_docgen::DocStyle::default()
+}
+async fn doc_styles_default_get() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "ok": true, "name": get_default_style_name() }))
+}
+#[derive(Deserialize)]
+struct StyleDefault {
+    name: String,
+}
+/// Fija el estilo predeterminado por NOMBRE; nombre vacío lo limpia (vuelve al por defecto).
+async fn doc_styles_default_set(Json(b): Json<StyleDefault>) -> Json<serde_json::Value> {
+    let name = b.name.trim();
+    if name.is_empty() {
+        let _ = std::fs::remove_file(default_style_path());
+    } else {
+        let tmp = default_style_path().with_extension("txt.tmp");
+        if std::fs::write(&tmp, name).is_ok() {
+            let _ = std::fs::rename(&tmp, default_style_path());
+        }
+    }
     Json(serde_json::json!({ "ok": true }))
 }
 
@@ -6809,11 +6865,12 @@ async fn documents_offerta(Json(b): Json<OffertaGen>) -> axum::response::Respons
                 .as_deref()
                 .and_then(aion_docgen::style::by_name)
         })
-        .unwrap_or_default();
+        // Sin estilo explícito → el PREDETERMINADO del usuario («utilizar siempre»).
+        .unwrap_or_else(resolve_default_style);
     let mut content = aion_docgen::build_offerta(&b.facts);
-    // Numeración + fecha del preventivo (igual que el tool del agente: documento trazable).
+    // Numeración + fecha del preventivo. La oferta es italiana (scaffolding IT) → fecha en italiano.
     content.doc_number = crate::agent_tools::next_preventivo_number();
-    content.doc_date = crate::agent_tools::human_date(&brand.lang);
+    content.doc_date = crate::agent_tools::human_date("it");
     let title = if b.facts.client.trim().is_empty() {
         "offerta".to_string()
     } else {
@@ -6888,10 +6945,15 @@ async fn documents_generate(Json(b): Json<DocGenReq>) -> axum::response::Respons
     if let Some(l) = b.lang.as_deref().filter(|s| !s.is_empty()) {
         brand.lang = l.to_string();
     }
-    // Estilo de la galería: aplica su paleta al documento simple (ink/accent de la marca).
+    // Estilo de la galería: aplica su paleta al documento simple (ink/accent de la marca). Sin
+    // estilo explícito, si el usuario fijó un PREDETERMINADO, se usa («utilizar siempre»).
     if let Some(st) = &b.style {
         brand.ink = st.ink.clone();
         brand.accent = st.accent.clone();
+    } else if get_default_style_name().is_some() {
+        let d = resolve_default_style();
+        brand.ink = d.ink;
+        brand.accent = d.accent;
     }
     let date = b
         .date

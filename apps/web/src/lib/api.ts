@@ -647,6 +647,16 @@ export const docStyleSave = (style: DocStyleT) =>
   jpost<{ ok: boolean; error?: string }>("/api/doc-styles", { style });
 export const docStyleRemove = (name: string) =>
   jpost<{ ok: boolean }>("/api/doc-styles/remove", { name });
+/** Estilo predeterminado global ("utilizar siempre"): el agente y los endpoints lo usan
+ *  cuando no se especifica un estilo. `name` vacío lo limpia. */
+export async function docStyleGetDefault(): Promise<string | null> {
+  const r = await fetch(`${BRIDGE_URL}/api/doc-styles/default`)
+    .then((x) => x.json())
+    .catch(() => ({ name: null }));
+  return (r?.name ?? null) as string | null;
+}
+export const docStyleSetDefault = (name: string) =>
+  jpost<{ ok: boolean }>("/api/doc-styles/default", { name });
 export const docStyleExtract = (content_b64: string, kind: string, name: string) =>
   jpost<{ ok: boolean; style?: DocStyleT; palette?: string[]; fonts?: string[]; error?: string }>(
     "/api/doc-styles/extract",

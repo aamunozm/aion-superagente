@@ -515,6 +515,16 @@ export default function ProjectWorkspace() {
             className="px-6 py-4 flex gap-2 items-center shrink-0"
             style={{ borderTop: "1px solid var(--border)" }}
           >
+            <button
+              type="button"
+              onClick={() => setDocOpen(true)}
+              className="shrink-0 rounded-full p-2 transition-colors"
+              style={{ color: "var(--text-3)", background: "var(--surface-2)" }}
+              title="Crear documento con estilo (oferta, informe…) en PDF o Word"
+              aria-label="Crear documento con estilo"
+            >
+              <Icon name="file" size={18} />
+            </button>
             <input
               className="input flex-1"
               placeholder="Pregunta sobre el proyecto…"

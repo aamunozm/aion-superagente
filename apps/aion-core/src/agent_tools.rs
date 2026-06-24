@@ -1642,11 +1642,18 @@ impl Tool for GenerateOffertaTool {
             }
         }
         let brand = aion_docgen::BrandProfile::load(brand_profile_path());
-        let style = aion_docgen::style::by_name(&style_name).unwrap_or_default();
+        // Sin estilo en la entrada → el PREDETERMINADO del usuario; con nombre que no existe,
+        // también caemos al predeterminado (no a un default ciego).
+        let style = if style_name.trim().is_empty() {
+            crate::serve::resolve_default_style()
+        } else {
+            aion_docgen::style::by_name(&style_name)
+                .unwrap_or_else(crate::serve::resolve_default_style)
+        };
         let mut content = aion_docgen::build_offerta(&f);
-        // Numeración + fecha del preventivo (metadatos profesionales, trazables).
+        // Numeración + fecha del preventivo (metadatos profesionales, trazables). Oferta IT → fecha IT.
         content.doc_number = next_preventivo_number();
-        content.doc_date = human_date(&brand.lang);
+        content.doc_date = human_date("it");
         let bytes = aion_docgen::render_offerta_pdf(
             &brand,
             &style,

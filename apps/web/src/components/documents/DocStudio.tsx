@@ -6,6 +6,8 @@ import {
   docStyleSave,
   docStyleRemove,
   docStyleExtract,
+  docStyleGetDefault,
+  docStyleSetDefault,
   documentsGenerate,
   type DocStyleT,
   type StyleEntry,
@@ -56,6 +58,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 export default function DocStudio() {
   const [entries, setEntries] = useState<StyleEntry[]>([]);
   const [selected, setSelected] = useState<DocStyleT | null>(null);
+  const [defaultName, setDefaultName] = useState<string | null>(null);
   const [busy, setBusy] = useState("");
   const [note, setNote] = useState("");
 
@@ -75,10 +78,21 @@ export default function DocStudio() {
         setSelected((cur) => cur ?? e[0]?.style ?? null);
       })
       .catch(() => {});
+    docStyleGetDefault().then(setDefaultName).catch(() => {});
   }, []);
   useEffect(() => {
     load();
   }, [load]);
+
+  /** Fija (o quita) el estilo elegido como predeterminado global ("utilizar siempre"). */
+  async function setAsDefault(name: string) {
+    const next = defaultName === name ? "" : name;
+    setBusy("default");
+    await docStyleSetDefault(next).catch(() => {});
+    setBusy("");
+    setDefaultName(next || null);
+    setNote(next ? `★ «${name}» es ahora el estilo predeterminado.` : "Predeterminado quitado.");
+  }
 
   function patchStyle(patch: Partial<DocStyleT>) {
     setSelected((s) => (s ? { ...s, ...patch } : s));
@@ -184,14 +198,18 @@ export default function DocStudio() {
               className="text-left rounded-xl p-2 transition-all"
               style={{ background: "var(--surface)", border: `2px solid ${selected?.name === e.name ? "var(--accent)" : "var(--border)"}` }}>
               <Swatch s={e.style} h={64} />
-              <div className="flex items-center justify-between mt-2">
-                <span className="text-xs font-medium truncate" style={{ color: "var(--text-1)" }}>{e.name}</span>
+              <div className="flex items-center justify-between mt-2 gap-1">
+                <span className="text-xs font-medium truncate" style={{ color: "var(--text-1)" }}>
+                  {defaultName === e.name && <span title="Estilo predeterminado" style={{ color: "var(--accent)" }}>★ </span>}{e.name}
+                </span>
                 {!e.builtin && (
                   <span role="button" onClick={(ev) => { ev.stopPropagation(); removeStyle(e.name); }}
                     className="text-xs opacity-50 hover:opacity-100" style={{ color: "var(--danger)" }} title="Eliminar estilo guardado">✕</span>
                 )}
               </div>
-              <span className="text-[10px]" style={{ color: "var(--text-3)" }}>{e.builtin ? "preset" : "guardado"}</span>
+              <span className="text-[10px]" style={{ color: defaultName === e.name ? "var(--accent)" : "var(--text-3)" }}>
+                {defaultName === e.name ? "★ predeterminado" : e.builtin ? "preset" : "guardado"}
+              </span>
             </button>
           ))}
         </div>
@@ -234,8 +252,17 @@ export default function DocStudio() {
               <span className="text-[10px] ml-2 self-center" style={{ color: "var(--text-3)" }}>fuentes: {fonts.length ? fonts.join(", ") : "—"}</span>
             </div>
           )}
-          <div className="flex gap-2 mt-3 items-center">
-            <input className="input flex-1 text-sm" value={saveName} onChange={(e) => setSaveName(e.target.value)} placeholder="Nombre para guardar este estilo" />
+          <div className="flex gap-2 mt-3 items-center flex-wrap">
+            <input className="input flex-1 min-w-[180px] text-sm" value={saveName} onChange={(e) => setSaveName(e.target.value)} placeholder="Nombre para guardar este estilo" />
+            <button
+              className="btn btn-ghost text-xs shrink-0"
+              disabled={busy === "default"}
+              onClick={() => setAsDefault(selected.name)}
+              title="Usar este estilo siempre por defecto (lo aplica el agente al crear ofertas/documentos)"
+              style={defaultName === selected.name ? { color: "var(--accent)", borderColor: "var(--accent)" } : undefined}
+            >
+              {defaultName === selected.name ? "★ Predeterminado" : "☆ Usar siempre"}
+            </button>
             <button className="btn btn-ghost text-xs shrink-0" disabled={busy === "save"} onClick={duplicateStyle} title="Crear una copia editable de este estilo">⧉ Duplicar</button>
             <button className="btn btn-gold text-xs shrink-0" disabled={busy === "save"} onClick={() => saveStyle()}>Guardar estilo</button>
           </div>
