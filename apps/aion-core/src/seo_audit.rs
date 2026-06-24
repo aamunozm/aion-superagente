@@ -418,13 +418,21 @@ pub async fn audit(url: &str) -> Result<SeoReport, String> {
     md.push_str(&format!(
         "## Resumen ejecutivo\n\n**Puntuación SEO: {score}/100** — {veredicto}\n\nSitio analizado: {url}\n\n"
     ));
+    // Escapa `<`/`>`/`|` para que nombres de etiqueta (<h1>, <title>…) NO se interpreten como
+    // HTML real al renderizar el Markdown (si no, rompen la tabla del PDF).
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('|', "\\|")
+    };
     md.push_str("## Resultados\n\n| | Control | Detalle |\n|---|---|---|\n");
     for c in &checks {
         md.push_str(&format!(
             "| {} | **{}** | {} |\n",
             c.icon,
             c.label,
-            c.detail.replace('|', "\\|")
+            esc(&c.detail)
         ));
     }
     // Acciones prioritarias = los controles fallidos/parciales.
@@ -433,7 +441,12 @@ pub async fn audit(url: &str) -> Result<SeoReport, String> {
     if !acc.is_empty() {
         md.push_str("\n## Acciones prioritarias\n\n");
         for (i, c) in acc.iter().take(8).enumerate() {
-            md.push_str(&format!("{}. **{}** — {}\n", i + 1, c.label, c.detail));
+            md.push_str(&format!(
+                "{}. **{}** — {}\n",
+                i + 1,
+                c.label,
+                esc(&c.detail)
+            ));
         }
     }
     md.push_str(
