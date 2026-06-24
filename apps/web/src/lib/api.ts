@@ -538,7 +538,7 @@ export const projectRemove = (id: string) => jpost<{ ok: boolean }>("/api/projec
 export const projectUpdate = (id: string, name: string, desc: string) =>
   jpost<{ ok: boolean; project?: Project; error?: string }>("/api/project/update", { id, name, desc });
 export const projectGet = (id: string) =>
-  jpost<{ ok: boolean; project?: Project; sources?: ProjectSource[]; outputs?: ProjectOutput[]; folders?: string[]; error?: string }>(
+  jpost<{ ok: boolean; project?: Project; sources?: ProjectSource[]; outputs?: ProjectOutput[]; folders?: string[]; running?: string | null; error?: string }>(
     "/api/project/get",
     { id },
   );

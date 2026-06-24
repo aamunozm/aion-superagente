@@ -2482,6 +2482,59 @@ struct AgentBody {
     project_id: Option<String>,
 }
 
+/// Tareas de proyecto EN CURSO (pid → resumen). Permite mostrar «trabajando…» al volver al
+/// proyecto desde otro menú, porque la tarea sigue viva en el daemon aunque cierres la página.
+static PROJECT_RUNNING: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::OnceLock::new();
+fn project_running() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    PROJECT_RUNNING.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+/// Marca el inicio de una tarea de proyecto (la pinta como «trabajando…»).
+fn project_task_start(body: &AgentBody) {
+    if let Some(pid) = body.project_id.as_deref() {
+        project_running()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(pid.to_string(), body.task.chars().take(120).collect());
+    }
+}
+/// CIERRE de una tarea de proyecto: persiste la respuesta del agente en el chat del proyecto
+/// (server-side → sobrevive a que cierres la página), limpia el estado «trabajando» y avisa en la
+/// Bandeja. Idempotente por respuesta: si ya se persistió ese texto al final, no duplica.
+fn project_task_done(body: &AgentBody, answer: &str) {
+    let Some(pid) = body.project_id.as_deref() else {
+        return;
+    };
+    let was_running = project_running()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(pid)
+        .is_some();
+    let ans = answer.trim();
+    if ans.is_empty() {
+        return;
+    }
+    // Evita duplicar si el último mensaje persistido ya es esta respuesta (la UI viva pudo añadirlo).
+    let last_is_same = crate::projects::chat_history(pid)
+        .last()
+        .map(|m| m.role == "assistant" && m.text.trim() == ans)
+        .unwrap_or(false);
+    if !last_is_same {
+        crate::projects::add_chat_msg(pid, "assistant", ans);
+    }
+    // Aviso en la Bandeja solo si era una tarea realmente en curso (no recarga trivial).
+    if was_running {
+        if let Ok(ibx) = crate::inbox::Inbox::open(crate::inbox_path()) {
+            let name = crate::projects::get(pid)
+                .map(|p| p.name)
+                .unwrap_or_default();
+            let resumen: String = ans.chars().take(140).collect();
+            let _ = ibx.push("idea", &format!("Terminé una tarea en «{name}»: {resumen}"));
+        }
+    }
+}
+
 /// Extrae la primera URL http(s) de un texto (para el fast-path de lectura web).
 fn extract_url(s: &str) -> Option<String> {
     let i = s.find("http://").or_else(|| s.find("https://"))?;
@@ -2650,6 +2703,9 @@ async fn agent(
     }
 
     tokio::spawn(async move {
+        // CONTINUACIÓN EN SEGUNDO PLANO: marca la tarea del proyecto como «en curso». El daemon
+        // sigue trabajando aunque cierres la página; el resultado se persiste al terminar.
+        project_task_start(&body);
         // 📄 FAST-PATH DETERMINISTA «oferta → documento»: «hazme la oferta en un pdf» tras hablarla.
         // No depende de que el modelo emita una acción ReAct (que a veces falla → negativa honesta):
         // extrae los hechos del contexto y RENDERIZA de verdad. Si no hay oferta extraíble, sigue.
@@ -2663,6 +2719,7 @@ async fn agent(
             if let Some(answer) = try_offerta_to_doc(&*engine, &body).await {
                 crate::awareness::record_outcome(true);
                 agent_perceive_and_remember(body.task.clone(), answer.clone());
+                project_task_done(&body, &answer);
                 let _ = tx
                     .send(
                         Event::default().data(
@@ -2691,6 +2748,7 @@ async fn agent(
             if let Some(answer) = try_seo_audit(&body).await {
                 crate::awareness::record_outcome(!answer.contains("no pude completarla"));
                 agent_perceive_and_remember(body.task.clone(), answer.clone());
+                project_task_done(&body, &answer);
                 let _ = tx
                     .send(
                         Event::default().data(
@@ -2783,6 +2841,7 @@ async fn agent(
             // Biblioteca/Grafo), para poder hablar del tema, profundizar y construir encima.
             // En segundo plano: no retrasa el envío del informe al chat.
             crate::research_memory::remember_research(body.task.clone(), report.clone(), true);
+            project_task_done(&body, &report);
             let _ = tx
                 .send(Event::default().data(
                     serde_json::json!({ "kind": "answer", "text": report, "steps": 1 }).to_string(),
@@ -2849,6 +2908,7 @@ async fn agent(
                     &format!("leí {url} y le respondí a Ariel"),
                 ));
                 crate::awareness::record_outcome(ok);
+                project_task_done(&body, &text_out);
                 let _ = tx
                     .send(
                         Event::default().data(
@@ -3211,6 +3271,7 @@ async fn agent(
                     &body.task,
                     "se agotó el tiempo (herramienta o bucle colgado)",
                 );
+                project_task_done(&body, "Esto me llevó más tiempo del que tenía y no lo terminé a tiempo. Lo dejé apuntado y lo retomo por mi cuenta. Si prefieres, reformúlamelo más concreto.");
                 let _ = tx
                     .send(Event::default().data(
                         serde_json::json!({
@@ -3345,6 +3406,11 @@ async fn agent(
                 serde_json::json!({ "kind": "error", "text": e.to_string() })
             }
         };
+        // CONTINUACIÓN BG: persiste la respuesta en el chat del proyecto (sobrevive a cerrar la
+        // página) + avisa en la Bandeja. Cubre el camino conversacional y el del bucle ReAct.
+        if let Some(t) = final_event.get("text").and_then(|t| t.as_str()) {
+            project_task_done(&body, t);
+        }
         let _ = tx
             .send(Event::default().data(final_event.to_string()))
             .await;
@@ -6335,6 +6401,12 @@ async fn project_get(Json(b): Json<ProjId>) -> Json<serde_json::Value> {
             "sources": crate::projects::sources(&b.id),
             "outputs": crate::projects::outputs(&b.id),
             "folders": crate::projects::folders(&b.id),
+            // Tarea en curso (continuación en segundo plano): la UI pinta «trabajando…» al volver.
+            "running": project_running()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&b.id)
+                .cloned(),
         })),
         None => Json(serde_json::json!({ "ok": false, "error": "proyecto no encontrado" })),
     }

@@ -65,6 +65,8 @@ export default function ProjectWorkspace() {
   // Fuentes
   const [adding, setAdding] = useState(false);
   const [srcKind, setSrcKind] = useState("nota");
+  // Tarea del proyecto EN CURSO en segundo plano (sigue aunque salgas; «trabajando…» al volver).
+  const [running, setRunning] = useState<string | null>(null);
   // Carpeta enlazada (espejo del disco).
   const [folders, setFolders] = useState<string[]>([]);
   const [folderPath, setFolderPath] = useState("");
@@ -108,6 +110,7 @@ export default function ProjectWorkspace() {
     setSources(r.sources ?? []);
     setOutputs(r.outputs ?? []);
     setFolders(r.folders ?? []);
+    setRunning(r.running ?? null);
     // Restaura la conversación PERSISTIDA del proyecto (ya no se pierde al salir y volver).
     projectChatHistory(id)
       .then((h) =>
@@ -125,6 +128,22 @@ export default function ProjectWorkspace() {
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // CONTINUACIÓN EN SEGUNDO PLANO: si al volver hay una tarea en curso (y no la estamos viendo en
+  // vivo), sondeamos hasta que el backend la termine y recargamos el historial (trae el resultado).
+  useEffect(() => {
+    if (!running || streaming || !id) return;
+    const iv = setInterval(async () => {
+      const r = await projectGet(id).catch(() => null);
+      if (r && !r.running) {
+        clearInterval(iv);
+        setRunning(null);
+        const h = await projectChatHistory(id).catch(() => []);
+        setMessages(h.map((m) => ({ role: m.role === "user" ? "user" : "assistant", text: m.text }) as Msg));
+      }
+    }, 4000);
+    return () => clearInterval(iv);
+  }, [running, streaming, id]);
 
   async function addSource() {
     const title = srcTitle.trim();
@@ -272,7 +291,9 @@ export default function ProjectWorkspace() {
     );
     setStreaming(false);
     setStatus("");
-    if (finalText) projectChatAppend(id, "assistant", finalText).catch(() => {});
+    // La respuesta la persiste el BACKEND (sobrevive a que cierres la página). No la guardamos
+    // aquí para no duplicar. `finalText` se mantiene solo para el aviso de error local.
+    void finalText;
   }
 
   async function decide(approved: boolean) {
@@ -639,6 +660,13 @@ export default function ProjectWorkspace() {
                 </div>
               </div>
             ))}
+            {running && !streaming && (
+              <div className="self-start rounded-2xl px-4 py-2.5 text-sm inline-flex items-center gap-2"
+                style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}>
+                <Icon name="refresh" size={14} />
+                Trabajando en segundo plano… te aviso en la Bandeja cuando termine.
+              </div>
+            )}
             <div ref={endRef} />
           </div>
           {confirm && (
