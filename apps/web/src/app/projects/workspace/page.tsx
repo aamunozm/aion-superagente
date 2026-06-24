@@ -189,6 +189,14 @@ export default function ProjectWorkspace() {
         return copy;
       });
     let finalText = "";
+    // CONTEXTO RECIENTE: los últimos turnos viajan con la tarea. Sin esto, «hazme la oferta en
+    // PDF» llega HUÉRFANO (sin saber a qué oferta se refiere) y el agente —con razón— dice que no
+    // tiene la información. Acotado para no inflar el prompt del modelo local.
+    const convo = messages
+      .slice(-6)
+      .map((m) => `${m.role === "user" ? "Usuario" : "AION"}: ${m.text.slice(0, 280)}`)
+      .filter(Boolean)
+      .join("\n");
     // AGENTE con grounding del proyecto: razona, USA herramientas reales (crea PDF/Word, busca…),
     // y NO puede fingir (el honesty_guard corre sobre acciones reales).
     await agentStream(
@@ -210,7 +218,7 @@ export default function ProjectWorkspace() {
           setLast(`⚠️ ${ev.text}`);
         }
       },
-      undefined,
+      convo || undefined,
       undefined,
       id,
     );

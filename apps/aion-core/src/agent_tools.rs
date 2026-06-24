@@ -1302,7 +1302,7 @@ impl Tool for MakeDocumentTool {
 }
 
 /// Abre un archivo en el Mac (TextEdit para texto plano, app por defecto para el resto).
-fn open_file(path: &std::path::Path, text_in_textedit: bool) {
+pub(crate) fn open_file(path: &std::path::Path, text_in_textedit: bool) {
     #[cfg(target_os = "macos")]
     {
         let mut cmd = std::process::Command::new("open");

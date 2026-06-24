@@ -2646,6 +2646,35 @@ async fn agent(
     }
 
     tokio::spawn(async move {
+        // 📄 FAST-PATH DETERMINISTA «oferta → documento»: «hazme la oferta en un pdf» tras hablarla.
+        // No depende de que el modelo emita una acción ReAct (que a veces falla → negativa honesta):
+        // extrae los hechos del contexto y RENDERIZA de verdad. Si no hay oferta extraíble, sigue.
+        if is_offerta_to_doc(&body.task) {
+            crate::inner_state::set_focus("agente", "preparando una oferta en documento");
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "thought", "text": "Preparo la oferta como documento a partir de lo que hablamos." }).to_string(),
+                ))
+                .await;
+            if let Some(answer) = try_offerta_to_doc(&*engine, &body).await {
+                crate::awareness::record_outcome(true);
+                agent_perceive_and_remember(body.task.clone(), answer.clone());
+                let _ = tx
+                    .send(
+                        Event::default().data(
+                            serde_json::json!({ "kind": "answer", "text": answer, "steps": 1 })
+                                .to_string(),
+                        ),
+                    )
+                    .await;
+                let _ = tx
+                    .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                    .await;
+                return;
+            }
+            // Sin oferta con servicios en el contexto → cae al flujo normal (ReAct/charla).
+        }
+
         // ROUTER SEMÁNTICO (#4): para TODO mensaje que no fue charla trivial, decidimos por
         // SIGNIFICADO con embeddings (no por palabras). Solo si el margen es estrecho —de
         // verdad ambiguo— pedimos al clasificador LLM que lea el contexto completo.
@@ -6939,6 +6968,284 @@ async fn documents_offerta(Json(b): Json<OffertaGen>) -> axum::response::Respons
             .into_response(),
         Err(e) => doc_error(e),
     }
+}
+
+/// ¿La tarea pide convertir en DOCUMENTO (PDF/Word) una OFERTA ya hablada? (verbo de crear +
+/// sustantivo de oferta + formato/documento). Caso típico: «hazme la oferta en un pdf» tras
+/// haberla discutido en el chat. Es el disparador del FAST-PATH determinista de abajo.
+fn is_offerta_to_doc(task: &str) -> bool {
+    let t = task.to_lowercase();
+    let verb = [
+        "haz",
+        "hace",
+        "hazme",
+        "genera",
+        "gener",
+        "crea",
+        "créa",
+        "prepara",
+        "pasa",
+        "pása",
+        "pasame",
+        "pásame",
+        "convierte",
+        "conviert",
+        "dame",
+        "quiero",
+        "ponme",
+        "arma",
+        "monta",
+        "exporta",
+        "fammi",
+        "fai",
+        "genera",
+    ]
+    .iter()
+    .any(|v| t.contains(v));
+    let offer = [
+        "oferta",
+        "offerta",
+        "preventivo",
+        "propuesta",
+        "proposta",
+        "presupuesto",
+    ]
+    .iter()
+    .any(|v| t.contains(v));
+    let doc = t.contains("pdf")
+        || t.contains("word")
+        || t.contains("docx")
+        || t.contains("documento")
+        || t.contains("archivo")
+        || t.contains("file");
+    verb && offer && doc
+}
+
+/// Primer objeto JSON balanceado dentro de un texto (tolera ```json y prosa alrededor).
+fn first_json_object(s: &str) -> Option<String> {
+    let start = s.find('{')?;
+    let mut depth = 0i32;
+    for (i, c) in s[start..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(s[start..start + i + c.len_utf8()].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// **FAST-PATH determinista «oferta → documento».** Cuando Ariel pide convertir en PDF/Word una
+/// oferta ya hablada, NO lo dejamos al dado del bucle ReAct (el modelo local a veces no emite la
+/// acción y cae a la negativa honesta). Extraemos los HECHOS del contexto (conversación + tarea)
+/// con UNA llamada enfocada (JSON, temp 0) y renderizamos de verdad con la skill `offerta`.
+/// Devuelve el mensaje con la RUTA real, o `None` si no hay una oferta con servicios → sigue ReAct.
+async fn try_offerta_to_doc(engine: &dyn LlmEngine, body: &AgentBody) -> Option<String> {
+    let source = format!("{}\n\n{}", body.context.as_deref().unwrap_or(""), body.task);
+    let source: String = source.chars().take(6000).collect();
+    let prompt = format!(
+        "Extrae la OFERTA comercial del siguiente material y devuélvela como JSON VÁLIDO y NADA \
+         más (sin texto antes ni después, sin ```), con esta forma EXACTA:\n\
+         {{\"cliente\":\"\",\"titolo\":\"\",\"pitch\":\"\",\"servizi\":[{{\"titolo\":\"\",\"prezzo\":\"\",\"nota\":\"\"}}],\
+\"canone\":\"\",\"comparativa\":[{{\"etichetta\":\"\",\"valore\":\"\"}}],\"deducibile\":true}}\n\
+         REGLAS: usa SOLO datos PRESENTES en el material; NO inventes servicios ni precios; si un \
+         campo no aparece, déjalo vacío o la lista vacía. Si NO hay una oferta con AL MENOS un \
+         servicio con su precio, devuelve exactamente {{}}.\n\nMATERIAL:\n«««\n{source}\n»»»"
+    );
+    let gen = tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        engine.generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.0),
+            max_tokens: Some(800),
+        }),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let v: serde_json::Value = serde_json::from_str(&first_json_object(&gen.content)?).ok()?;
+    let servizi = v
+        .get("servizi")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let services: Vec<aion_docgen::OfferRow> = servizi
+        .iter()
+        .filter_map(|s| {
+            let title = s
+                .get("titolo")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim();
+            let price = s
+                .get("prezzo")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim();
+            if title.is_empty() || price.is_empty() {
+                return None;
+            }
+            Some(aion_docgen::OfferRow {
+                title: title.to_string(),
+                desc: String::new(),
+                price: price.to_string(),
+                price_note: s
+                    .get("nota")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+            })
+        })
+        .collect();
+    // Sin servicios reales = no hay oferta que renderizar → que siga el flujo normal (ReAct).
+    if services.is_empty() {
+        return None;
+    }
+    let cmp_in = v
+        .get("comparativa")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let n = cmp_in.len();
+    let comparison: Vec<aion_docgen::CompareBar> = cmp_in
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let label = c
+                .get("etichetta")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim();
+            if label.is_empty() {
+                return None;
+            }
+            let tone = if n >= 2 && i + 1 == n {
+                "green"
+            } else if i == 0 {
+                "red"
+            } else {
+                "gold"
+            };
+            // Más caro (i=0) → barra llena; el tuyo (último) → corta. Anclaje visual.
+            let pct = if n > 1 {
+                (100 - (i * 60 / (n - 1))) as u8
+            } else {
+                60
+            };
+            Some(aion_docgen::CompareBar {
+                label: label.to_string(),
+                value: c
+                    .get("valore")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+                pct,
+                tone: tone.to_string(),
+            })
+        })
+        .collect();
+    let client = v
+        .get("cliente")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let canone = v
+        .get("canone")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let facts = aion_docgen::OffertaFacts {
+        client: client.clone(),
+        hero_title: v
+            .get("titolo")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        hero_pitch: v
+            .get("pitch")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        recurring_label: if canone.is_empty() {
+            String::new()
+        } else {
+            "Canone".to_string()
+        },
+        recurring_value: canone,
+        services,
+        comparison,
+        deductible: v
+            .get("deducibile")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(true),
+        ..Default::default()
+    };
+    let brand = aion_docgen::BrandProfile::load(crate::agent_tools::brand_profile_path());
+    let style = resolve_default_style();
+    let mut content = aion_docgen::build_offerta(&facts);
+    content.doc_number = crate::agent_tools::next_preventivo_number();
+    content.doc_date = crate::agent_tools::human_date("it");
+    let want_docx = {
+        let t = body.task.to_lowercase();
+        t.contains("word") || t.contains("docx")
+    };
+    let (bytes, ext) = if want_docx {
+        (
+            aion_docgen::render_offerta_docx(&brand, &content).ok()?,
+            "docx",
+        )
+    } else {
+        (
+            aion_docgen::render_offerta_pdf(
+                &brand,
+                &style,
+                &content,
+                &aion_docgen::PdfOptions::default(),
+            )
+            .await
+            .ok()?,
+            "pdf",
+        )
+    };
+    let home = std::env::var("HOME").ok()?;
+    let who: String = client
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let who = who.trim().trim_matches('_').trim();
+    let name = if who.is_empty() {
+        "Offerta".to_string()
+    } else {
+        format!("Offerta {}", who.chars().take(50).collect::<String>())
+    };
+    let path = std::path::Path::new(&home)
+        .join("Desktop")
+        .join(format!("{name}.{ext}"));
+    std::fs::write(&path, &bytes).ok()?;
+    crate::agent_tools::open_file(&path, false);
+    Some(format!(
+        "Listo: preparé la oferta ({}) y la guardé en tu Escritorio:\n{}",
+        ext.to_uppercase(),
+        path.display()
+    ))
 }
 
 /// Genera un documento branded (PDF/Word/HTML) desde Markdown y lo devuelve como descarga.
