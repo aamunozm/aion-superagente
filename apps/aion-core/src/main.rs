@@ -49,7 +49,6 @@ mod pending;
 mod permits;
 mod personality;
 mod plan;
-mod pricing;
 mod projects;
 mod prompt_store;
 mod prompts;

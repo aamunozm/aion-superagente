@@ -364,16 +364,13 @@ export const vaultGet = (name: string) =>
 export const vaultRemove = (name: string) =>
   jpost<{ ok: boolean; error?: string }>("/api/vault/remove", { name });
 
-// ── Coste y ahorro (precios por token editables + FX en vivo) ─────────────────────────────────
-export type ModelPrice = { model: string; label: string; input_per_m: number; output_per_m: number };
-export type TokenPrices = { models: ModelPrice[]; updated_at: string };
-export type FxRates = { usd_eur: number; usd_clp: number; fetched_at: string; live: boolean };
+// ── Tokens del puente (serie diaria/mensual + desglose lectura/escritura) ─────────────────────
 export type CostData = {
   total_tokens: number;
+  read_tokens: number;
+  read_calls: number;
   daily: { day: string; tokens: number }[];
   monthly: { month: string; tokens: number }[];
-  prices: TokenPrices;
-  fx: FxRates;
 };
 export async function claudeCodeCost(): Promise<CostData | null> {
   try {
@@ -382,8 +379,6 @@ export async function claudeCodeCost(): Promise<CostData | null> {
     return null;
   }
 }
-export const setTokenPrices = (prices: TokenPrices) =>
-  jpost<{ ok: boolean }>("/api/claude-code/prices", prices);
 
 export type AionIdentity = { id: string; name: string; born_at: string };
 export async function getIdentity(): Promise<AionIdentity | null> {

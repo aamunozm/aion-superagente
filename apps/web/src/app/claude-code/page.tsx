@@ -19,7 +19,6 @@ import {
   claudeCodeCost,
   memoryNormalize,
   memoryProjects,
-  setTokenPrices,
   vaultGet,
   vaultList,
   vaultRemove,
@@ -30,7 +29,6 @@ import {
   type CostData,
   type MemoryProjects,
   type ProjectMemory,
-  type TokenPrices,
   type VaultSecret,
 } from "@/lib/api";
 
@@ -357,79 +355,50 @@ function MoneyBars({ data, color, fmtVal }: { data: ChartPoint[]; color: string;
   );
 }
 
-const CURRENCIES: ("USD" | "EUR" | "CLP")[] = ["CLP", "USD", "EUR"];
-
-/** Panel de COSTE y AHORRO en 3 monedas con gráficos en tiempo real. Honesto: coste REAL de los
- *  tokens de memoria servidos (verificable en la factura) + ahorro ESTIMADO vs cargar todo el corpus. */
+/** Panel de TOKENS del puente AION↔Claude Code con gráficos en tiempo real. HONESTO: muestra los
+ *  tokens de memoria que AION inyecta en tus sesiones (un COSTE, a cambio de continuidad) + un
+ *  ahorro ESTIMADO —solo lecturas— vs. volcar todo el corpus. Sin dinero. */
 function CostPanel({ stats }: { stats: ClaudeCodeStats | null }) {
   const [cost, setCost] = useState<CostData | null>(null);
-  const [cur, setCur] = useState<"USD" | "EUR" | "CLP">("CLP");
-  const [model, setModel] = useState("claude-sonnet");
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<TokenPrices | null>(null);
-
   const load = useCallback(() => { claudeCodeCost().then((c) => { if (c) setCost(c); }).catch(() => {}); }, []);
   useEffect(() => { load(); const iv = setInterval(load, 15_000); return () => clearInterval(iv); }, [load]);
-
   if (!cost) return null;
-  const fx = cost.fx;
-  const price = cost.prices.models.find((m) => m.model === model) ?? cost.prices.models[0];
-  const usdPerTok = (price?.input_per_m ?? 0) / 1e6;
-  const toCur = (usd: number) => (cur === "USD" ? usd : cur === "EUR" ? usd * fx.usd_eur : usd * fx.usd_clp);
-  const fmt = (usd: number) =>
-    new Intl.NumberFormat(cur === "CLP" ? "es-CL" : cur === "EUR" ? "de-DE" : "en-US", {
-      style: "currency", currency: cur, maximumFractionDigits: cur === "CLP" ? 0 : 2, minimumFractionDigits: cur === "CLP" ? 0 : 2,
-    }).format(toCur(usd));
 
   const monthKey = new Date().toISOString().slice(0, 7);
   const todayKey = new Date().toISOString().slice(0, 10);
   const monthTokens = cost.monthly.find((m) => m.month === monthKey)?.tokens ?? 0;
   const todayTokens = cost.daily.find((d) => d.day === todayKey)?.tokens ?? 0;
   const corpus = stats?.corpus_tokens ?? 0;
-  const avg = stats?.avg_tokens_per_call ?? 0;
-  const calls = stats?.total_calls ?? 0;
-  const savedUSD = Math.max(0, corpus - avg) * calls * usdPerTok;
+  const writeTokens = Math.max(0, cost.total_tokens - cost.read_tokens);
+  // Ahorro estimado SOLO sobre LECTURAS (las escrituras no leen memoria → no ahorran): cada lectura
+  // sirve ~avgRead tok relevantes en vez de los `corpus` de volcar toda la memoria.
+  const avgRead = cost.read_calls > 0 ? cost.read_tokens / cost.read_calls : 0;
+  const saved = Math.max(0, corpus - avgRead) * cost.read_calls;
+  const ft = (v: number) => fmtTokens(Math.round(v));
 
-  const dailyMoney: ChartPoint[] = cost.daily.map((d) => ({ label: d.day.slice(5), value: d.tokens * usdPerTok }));
-  const monthlyMoney: ChartPoint[] = cost.monthly.map((m) => ({ label: m.month, value: m.tokens * usdPerTok }));
+  const dailyT: ChartPoint[] = cost.daily.map((d) => ({ label: d.day.slice(5), value: d.tokens }));
+  const monthlyT: ChartPoint[] = cost.monthly.map((m) => ({ label: m.month, value: m.tokens }));
 
   return (
     <div className="card" style={{ border: "1px solid var(--border)" }}>
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
-        <div className="flex items-center gap-2">
-          <span style={{ fontSize: 16 }}>💹</span>
-          <h2 className="t-section" style={{ color: "var(--text-2)" }}>Coste y ahorro en tiempo real</h2>
-        </div>
-        <div className="flex items-center gap-2">
-          {/* Moneda */}
-          <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid var(--border)" }}>
-            {CURRENCIES.map((c) => (
-              <button key={c} onClick={() => setCur(c)} className="text-xs px-2.5 py-1"
-                style={{ background: cur === c ? "var(--accent)" : "transparent", color: cur === c ? "#fff" : "var(--text-2)" }}>{c}</button>
-            ))}
-          </div>
-          {/* Modelo (para el precio del puente) */}
-          <select value={model} onChange={(e) => setModel(e.target.value)} className="text-xs px-2 py-1 rounded-lg"
-            style={{ background: "var(--surface-1)", border: "1px solid var(--border)", color: "var(--text-2)" }}>
-            {cost.prices.models.filter((m) => m.model !== "local").map((m) => (
-              <option key={m.model} value={m.model}>{m.label}</option>
-            ))}
-          </select>
-        </div>
+      <div className="flex items-center gap-2 mb-1">
+        <span style={{ fontSize: 16 }}>📊</span>
+        <h2 className="t-section" style={{ color: "var(--text-2)" }}>Tokens del puente AION ↔ Claude Code</h2>
       </div>
       <p className="text-xs mb-4 leading-relaxed" style={{ color: "var(--text-3)" }}>
-        Lo que la <b>memoria de AION</b> le cuesta a Claude Code: tokens servidos × precio de entrada del
-        modelo. Coste <b>real</b> (verificable en tu factura); el ahorro es una <b>estimación</b> vs. cargar
-        todo el corpus en cada consulta.
+        Tokens de memoria que AION inyecta en tus sesiones de Claude Code. Son un <b>coste</b> a cambio de
+        <b> continuidad</b> (Claude conoce tus proyectos sin re-explicar). El <b>ahorro</b> es una
+        <b> estimación</b> y solo aplica a las <b>lecturas</b>: cuando Claude lee memoria recibe ~{ft(avgRead)} tok
+        relevantes en vez de los ~{ft(corpus)} de volcar todo el corpus. Las <b>escrituras</b> (remember) no ahorran.
       </p>
 
       {/* Héroes */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
         {[
-          { k: "Coste total", v: fmt(cost.total_tokens * usdPerTok), s: `${fmtTokens(cost.total_tokens)} tok servidos`, accent: "var(--text-1)" },
-          { k: "Este mes", v: fmt(monthTokens * usdPerTok), s: `${fmtTokens(monthTokens)} tok`, accent: "var(--text-1)" },
-          { k: "Hoy", v: fmt(todayTokens * usdPerTok), s: `${fmtTokens(todayTokens)} tok`, accent: "var(--text-1)" },
-          { k: "Ahorro estimado", v: fmt(savedUSD), s: "vs. cargar todo el corpus", accent: "var(--accent)" },
+          { k: "Tokens servidos (total)", v: ft(cost.total_tokens), s: `${cost.read_calls} lecturas`, accent: "var(--text-1)" },
+          { k: "Este mes", v: ft(monthTokens), s: "tokens", accent: "var(--text-1)" },
+          { k: "Hoy", v: ft(todayTokens), s: "tokens", accent: "var(--text-1)" },
+          { k: "Ahorro estimado", v: ft(saved), s: "tok · solo lecturas, vs volcar el corpus", accent: "var(--accent)" },
         ].map((h) => (
           <div key={h.k} className="rounded-lg p-3" style={{ background: "var(--surface-1)" }}>
             <div className="text-xl font-bold tabular-nums" style={{ color: h.accent }}>{h.v}</div>
@@ -441,45 +410,21 @@ function CostPanel({ stats }: { stats: ClaudeCodeStats | null }) {
 
       {/* Gráfico diario (área bursátil) */}
       <div className="mb-5">
-        <div className="text-xs font-medium uppercase tracking-wide mb-1" style={{ color: "var(--text-3)" }}>Coste diario</div>
-        <AreaChart data={dailyMoney} color="var(--accent)" fmtVal={fmt} />
+        <div className="text-xs font-medium uppercase tracking-wide mb-1" style={{ color: "var(--text-3)" }}>Tokens servidos por día</div>
+        <AreaChart data={dailyT} color="var(--accent)" fmtVal={ft} />
       </div>
 
       {/* Gráfico mensual (barras) */}
       <div className="mb-4">
-        <div className="text-xs font-medium uppercase tracking-wide mb-2" style={{ color: "var(--text-3)" }}>Coste mensual</div>
-        <MoneyBars data={monthlyMoney} color="var(--accent)" fmtVal={fmt} />
+        <div className="text-xs font-medium uppercase tracking-wide mb-2" style={{ color: "var(--text-3)" }}>Tokens por mes</div>
+        <MoneyBars data={monthlyT} color="var(--accent)" fmtVal={ft} />
       </div>
 
-      {/* Pie: FX + precios */}
-      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]" style={{ color: "var(--text-3)" }}>
-        <span>
-          FX {fx.live ? "en vivo" : "caché"}: 1 USD = {fx.usd_clp.toFixed(0)} CLP · {fx.usd_eur.toFixed(3)} EUR
-          {fx.fetched_at ? ` · ${new Date(fx.fetched_at).toLocaleDateString()}` : ""}
-        </span>
-        <button className="btn text-xs" onClick={() => { setDraft(JSON.parse(JSON.stringify(cost.prices))); setEditing((v) => !v); }}>
-          {editing ? "Cerrar" : "Editar precios"}
-        </button>
+      {/* Desglose lectura/escritura (transparencia) */}
+      <div className="text-[11px]" style={{ color: "var(--text-3)" }}>
+        <span style={{ color: "var(--accent)" }}>Lecturas: {ft(cost.read_tokens)} tok</span> ({cost.read_calls} consultas) ·{" "}
+        Escrituras: {ft(writeTokens)} tok <span style={{ opacity: 0.8 }}>(guardan memoria, no ahorran)</span>
       </div>
-
-      {editing && draft && (
-        <div className="mt-3 rounded-lg p-3" style={{ background: "var(--surface-1)" }}>
-          <p className="text-[11px] mb-2" style={{ color: "var(--text-3)" }}>
-            Precio de ENTRADA (USD por 1M tokens). Anthropic no tiene API pública de precios → ajústalos
-            con los vigentes. {cost.prices.updated_at}
-          </p>
-          {draft.models.map((m, i) => (
-            <div key={m.model} className="flex items-center gap-2 mb-1.5 text-sm">
-              <span className="w-44 shrink-0 truncate" style={{ color: "var(--text-2)" }}>{m.label}</span>
-              <input type="number" step="0.01" value={m.input_per_m}
-                onChange={(e) => setDraft((d) => { if (!d) return d; const c = { ...d, models: [...d.models] }; c.models[i] = { ...m, input_per_m: parseFloat(e.target.value) || 0 }; return c; })}
-                className="w-28 text-sm px-2 py-1 rounded" style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text-1)" }} />
-              <span className="text-[10px]" style={{ color: "var(--text-3)" }}>USD/1M</span>
-            </div>
-          ))}
-          <button className="btn btn-gold text-sm mt-2" onClick={async () => { if (draft) { await setTokenPrices(draft).catch(() => {}); setEditing(false); load(); } }}>Guardar precios</button>
-        </div>
-      )}
     </div>
   );
 }

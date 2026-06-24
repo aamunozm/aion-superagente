@@ -967,7 +967,6 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/claude-code/audit", get(claude_code_audit))
         .route("/api/claude-code/stats", get(claude_code_stats))
         .route("/api/claude-code/cost", get(claude_code_cost))
-        .route("/api/claude-code/prices", post(claude_code_set_prices))
         // Bootstrap del token local: la UI lo pide una vez al arrancar (GET, Origin local).
         .route("/api/auth/token", get(api_auth_token))
         .route("/api/apikeys", get(apikeys_list).post(apikeys_set))
@@ -7905,17 +7904,35 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
     }))
 }
 
-/// **Coste y ahorro** del puente: serie diaria/mensual de tokens servidos + tabla de precios
-/// (editable) + tipos de cambio en vivo. El frontend calcula el dinero (3 monedas, por modelo).
+/// **Tokens del puente**: serie diaria/mensual de tokens servidos + total, y el desglose
+/// lectura/escritura (las escrituras `remember`/`forget` NO ahorran; solo las lecturas comparan
+/// contra volcar el corpus). Sin precios: el dashboard muestra TOKENS, no dinero (honesto).
 async fn claude_code_cost() -> Json<serde_json::Value> {
     use std::collections::BTreeMap;
     let entries = crate::claude_mcp::audit_tail(5000);
     let mut by_day: BTreeMap<String, u64> = BTreeMap::new();
     let mut by_month: BTreeMap<String, u64> = BTreeMap::new();
     let mut total: u64 = 0;
+    let mut read_tokens: u64 = 0;
+    let mut read_calls: u64 = 0;
     for e in &entries {
         let tok = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let tool = e.get("tool").and_then(|v| v.as_str()).unwrap_or("");
         total += tok;
+        // LECTURAS de memoria (lo único que "ahorra" vs. volcar el corpus). Escrituras no cuentan.
+        let is_read = matches!(
+            tool,
+            "aion_brief"
+                | "aion_memory_search"
+                | "aion_library_search"
+                | "aion_graph_query"
+                | "aion_project_context"
+                | "aion_episodic_recall"
+        );
+        if is_read {
+            read_tokens += tok;
+            read_calls += 1;
+        }
         if let Some(ts) = e.get("ts").and_then(|v| v.as_str()) {
             // ts RFC3339 → "YYYY-MM-DD" y "YYYY-MM" por prefijo (estable, sin parseo de fecha).
             if ts.len() >= 10 {
@@ -7936,17 +7953,11 @@ async fn claude_code_cost() -> Json<serde_json::Value> {
         .collect();
     Json(serde_json::json!({
         "total_tokens": total,
+        "read_tokens": read_tokens,
+        "read_calls": read_calls,
         "daily": daily,
         "monthly": monthly,
-        "prices": crate::pricing::load(),
-        "fx": crate::pricing::fx().await,
     }))
-}
-
-/// Actualiza la tabla de precios por token (editable desde la UI, sin API oficial de Anthropic).
-async fn claude_code_set_prices(Json(p): Json<crate::pricing::Prices>) -> Json<serde_json::Value> {
-    crate::pricing::save(&p);
-    Json(serde_json::json!({ "ok": true }))
 }
 
 // ── Bandeja de AION (mensajes proactivos del agente hacia ti) ───────────────
