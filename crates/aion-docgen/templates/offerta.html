@@ -42,6 +42,9 @@
   .head .right { text-align: right; }
   .head .doc-kicker { font-size: 11pt; font-weight: 800; color: var(--ink); letter-spacing: 0.02em; }
   .head .doc-sub { font-size: 8.5pt; color: var(--muted); margin-top: 2px; }
+  .head .doc-ref { font-size: 8pt; color: var(--muted); margin-top: 4px; font-family: var(--font);
+    letter-spacing: 0.03em; }
+  .head .doc-ref .n { font-weight: 700; color: var(--ink); }
   .head .attn { font-size: 8.5pt; color: var(--muted); margin-top: 12px; }
   .head .attn .to { color: var(--text); margin-top: 2px; }
 
@@ -86,6 +89,8 @@
   .otable .pr .note { display: block; font-size: 7.5pt; font-weight: 400; color: var(--muted); }
   .otable tr.total td { background: var(--ink); color: #fff; font-weight: 800; font-size: 11pt; padding: 10px 12px; }
   .otable tr.total td.r { text-align: right; }
+  .otable tr.total td.r .anchor { text-decoration: line-through; opacity: 0.55; font-weight: 600;
+    font-size: 9pt; margin-right: 7px; }
   .onote { font-size: 8.5pt; color: var(--muted); margin: 7px 0 0; }
 
   /* ── Franja destacada ────────────────────────────────────────────── */
@@ -154,6 +159,9 @@
     <div class="right">
       {% if o.doc_kicker %}<div class="doc-kicker">{{ o.doc_kicker }}</div>{% endif %}
       {% if o.doc_subtitle %}<div class="doc-sub">{{ o.doc_subtitle }}</div>{% endif %}
+      {% if o.doc_number or o.doc_date %}
+      <div class="doc-ref">{% if o.doc_number %}<span class="n">Rif. {{ o.doc_number }}</span>{% endif %}{% if o.doc_number and o.doc_date %} · {% endif %}{{ o.doc_date }}</div>
+      {% endif %}
       {% if o.attn_label or o.attn_to %}
       <div class="attn">{{ o.attn_label }}<div class="to">{{ o.attn_to }}</div></div>
       {% endif %}
@@ -202,7 +210,7 @@
       </tr>
       {% endfor %}
       {% if o.offer_total_value %}
-      <tr class="total"><td>{{ o.offer_total_label }}</td><td class="r">{{ o.offer_total_value }}</td></tr>
+      <tr class="total"><td>{{ o.offer_total_label }}</td><td class="r">{% if o.offer_total_anchor %}<span class="anchor">{{ o.offer_total_anchor }}</span>{% endif %}{{ o.offer_total_value }}</td></tr>
       {% endif %}
     </tbody>
   </table>

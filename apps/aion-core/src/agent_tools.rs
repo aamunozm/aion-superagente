@@ -1331,6 +1331,35 @@ pub(crate) fn brand_profile_path() -> std::path::PathBuf {
 }
 
 /// Fecha legible para el idioma de salida (es/it con mes en palabras; resto ISO).
+/// **Número de preventivo secuencial y persistente** (`PREV-AAAA-NNN`). La secuencia reinicia
+/// cada año natural. El contador vive en `~/.aion/preventivo_seq.json`; el daemon es el escritor
+/// único, así que un read-modify-write con escritura atómica (tmp→rename) basta —cada oferta
+/// generada recibe un número único y trazable, como un preventivo profesional real.
+pub(crate) fn next_preventivo_number() -> String {
+    use chrono::Datelike;
+    let year = chrono::Local::now().year();
+    let path = crate::app_data_dir().join("preventivo_seq.json");
+    let mut seq: u32 = 0;
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+            // Solo continúa la secuencia si es del MISMO año; si cambió el año, reinicia.
+            if v.get("year").and_then(|y| y.as_i64()) == Some(year as i64) {
+                seq = v.get("seq").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+            }
+        }
+    }
+    seq += 1;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let json = serde_json::json!({ "year": year, "seq": seq }).to_string();
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, &json).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+    format!("PREV-{year}-{seq:03}")
+}
+
 pub(crate) fn human_date(lang: &str) -> String {
     use chrono::Datelike;
     let now = chrono::Local::now();
@@ -1614,7 +1643,10 @@ impl Tool for GenerateOffertaTool {
         }
         let brand = aion_docgen::BrandProfile::load(brand_profile_path());
         let style = aion_docgen::style::by_name(&style_name).unwrap_or_default();
-        let content = aion_docgen::build_offerta(&f);
+        let mut content = aion_docgen::build_offerta(&f);
+        // Numeración + fecha del preventivo (metadatos profesionales, trazables).
+        content.doc_number = next_preventivo_number();
+        content.doc_date = human_date(&brand.lang);
         let bytes = aion_docgen::render_offerta_pdf(
             &brand,
             &style,

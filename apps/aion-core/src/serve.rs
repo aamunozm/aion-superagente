@@ -6810,7 +6810,10 @@ async fn documents_offerta(Json(b): Json<OffertaGen>) -> axum::response::Respons
                 .and_then(aion_docgen::style::by_name)
         })
         .unwrap_or_default();
-    let content = aion_docgen::build_offerta(&b.facts);
+    let mut content = aion_docgen::build_offerta(&b.facts);
+    // Numeración + fecha del preventivo (igual que el tool del agente: documento trazable).
+    content.doc_number = crate::agent_tools::next_preventivo_number();
+    content.doc_date = crate::agent_tools::human_date(&brand.lang);
     let title = if b.facts.client.trim().is_empty() {
         "offerta".to_string()
     } else {
