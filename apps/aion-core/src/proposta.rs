@@ -130,6 +130,7 @@ pub async fn compose(
 
     // ── 2. Análisis SEO REAL del sitio del cliente (si hay web) ──
     let mut seo_findings = String::new();
+    let mut seo_score: Option<u32> = None;
     if let Some(url) = &web_url {
         if let Ok(rep) = tokio::time::timeout(
             std::time::Duration::from_secs(60),
@@ -138,6 +139,7 @@ pub async fn compose(
         .await
         .unwrap_or(Err("timeout".into()))
         {
+            seo_score = Some(rep.score);
             seo_findings = format!(
                 "ANÁLISIS SEO REAL del sito del cliente ({}, punteggio {}/100):\n{}",
                 rep.url, rep.score, rep.markdown
@@ -249,10 +251,28 @@ pub async fn compose(
     }
     brand.lang = "it".into();
     let st = crate::serve::resolve_default_style();
-    brand.ink = st.ink;
-    brand.accent = st.accent;
 
-    // ── 6. Render PDF con la marca ──
+    // ── 6. GRÁFICO on-brand: medidor SVG del score SEO (vector, nítido) al inicio del cuerpo ──
+    let mut body_full = String::new();
+    if let Some(score) = seo_score {
+        let gauge = aion_docgen::charts::score_gauge(score, "SEO oggi", &st);
+        let verdict = if score >= 75 {
+            "una buona base"
+        } else if score >= 50 {
+            "diverse criticità"
+        } else {
+            "gravi carenze"
+        };
+        body_full.push_str(&format!(
+            "<div class=\"kpi-hero\">{gauge}<div class=\"kpi-note\"><strong>Punteggio SEO del sito attuale: {score}/100.</strong> L'analisi rivela {verdict} che frenano la visibilità su Google. Di seguito, cosa significa e come lo risolviamo.</div></div>\n\n"
+        ));
+    }
+    body_full.push_str(&body_md);
+
+    brand.ink = st.ink.clone();
+    brand.accent = st.accent.clone();
+
+    // ── 7. Render PDF con la marca ──
     let title = if cliente_nome.is_empty() {
         "Proposta".to_string()
     } else {
@@ -261,7 +281,7 @@ pub async fn compose(
             cliente_nome.chars().take(50).collect::<String>()
         )
     };
-    let mut req = aion_docgen::DocRequest::new("base", &title, &body_md);
+    let mut req = aion_docgen::DocRequest::new("base", &title, &body_full);
     req.meta.date = crate::agent_tools::human_date("it");
     req.meta.number = Some(crate::agent_tools::next_preventivo_number());
     req.brand = brand;
@@ -269,7 +289,7 @@ pub async fn compose(
         .await
         .map_err(|e| format!("no pude renderizar el PDF: {e}"))?;
 
-    // ── 7. Guardar + abrir ──
+    // ── 8. Guardar + abrir ──
     let home = std::env::var("HOME").map_err(|_| "no encuentro tu carpeta".to_string())?;
     let safe: String = cliente_nome
         .chars()
