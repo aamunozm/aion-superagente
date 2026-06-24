@@ -374,6 +374,9 @@ function CostPanel({ stats }: { stats: ClaudeCodeStats | null }) {
   // sirve ~avgRead tok relevantes en vez de los `corpus` de volcar toda la memoria.
   const avgRead = cost.read_calls > 0 ? cost.read_tokens / cost.read_calls : 0;
   const saved = Math.max(0, corpus - avgRead) * cost.read_calls;
+  // Porcentaje de ahorro POR LECTURA vs volcar el corpus servible entero: cada lectura sirve
+  // ~avgRead en vez de `corpus`. Es la respuesta honesta a "¿cuánto % ahorro?" (acotado [0,100)).
+  const savedPct = corpus > 0 && avgRead > 0 ? Math.min(99.9, Math.max(0, (1 - avgRead / corpus) * 100)) : 0;
   const ft = (v: number) => fmtTokens(Math.round(v));
 
   const dailyT: ChartPoint[] = cost.daily.map((d) => ({ label: d.day.slice(5), value: d.tokens }));
@@ -389,7 +392,9 @@ function CostPanel({ stats }: { stats: ClaudeCodeStats | null }) {
         Tokens de memoria que AION inyecta en tus sesiones de Claude Code. Son un <b>coste</b> a cambio de
         <b> continuidad</b> (Claude conoce tus proyectos sin re-explicar). El <b>ahorro</b> es una
         <b> estimación</b> y solo aplica a las <b>lecturas</b>: cuando Claude lee memoria recibe ~{ft(avgRead)} tok
-        relevantes en vez de los ~{ft(corpus)} de volcar todo el corpus. Las <b>escrituras</b> (remember) no ahorran.
+        relevantes en vez de volcar el <b>corpus servible</b> (~{ft(corpus)} tok) —un <b>{savedPct.toFixed(1)}%</b> menos
+        por lectura—. El corpus servible excluye recuerdos privados e introspección de AION, que nunca salen al puente.
+        Las <b>escrituras</b> (remember) no ahorran.
       </p>
 
       {/* Héroes */}
@@ -398,7 +403,7 @@ function CostPanel({ stats }: { stats: ClaudeCodeStats | null }) {
           { k: "Tokens servidos (total)", v: ft(cost.total_tokens), s: `${cost.read_calls} lecturas`, accent: "var(--text-1)" },
           { k: "Este mes", v: ft(monthTokens), s: "tokens", accent: "var(--text-1)" },
           { k: "Hoy", v: ft(todayTokens), s: "tokens", accent: "var(--text-1)" },
-          { k: "Ahorro estimado", v: ft(saved), s: "tok · solo lecturas, vs volcar el corpus", accent: "var(--accent)" },
+          { k: "Ahorro por lectura", v: `${savedPct.toFixed(1)}%`, s: `~${ft(saved)} tok ahorrados · vs volcar el corpus`, accent: "var(--accent)" },
         ].map((h) => (
           <div key={h.k} className="rounded-lg p-3" style={{ background: "var(--surface-1)" }}>
             <div className="text-xl font-bold tabular-nums" style={{ color: h.accent }}>{h.v}</div>
@@ -759,19 +764,19 @@ export default function ClaudeCodePage() {
                 </div>
                 <div className="text-center shrink-0">
                   <div className="text-3xl font-bold" style={{ color: "var(--text-1)" }}>~{fmtTokens(corpusTokens)}</div>
-                  <div className="text-[11px] mt-0.5" style={{ color: "var(--text-3)" }}>memoria accesible</div>
+                  <div className="text-[11px] mt-0.5" style={{ color: "var(--text-3)" }}>corpus servible</div>
                 </div>
                 <div className="flex-1" style={{ minWidth: 220 }}>
                   <p className="text-sm leading-relaxed" style={{ color: "var(--text-2)" }}>
-                    El puente sirve <b>solo lo relevante bajo demanda</b>: Claude accede a un corpus de
-                    ~{fmtTokens(corpusTokens)} tokens de memoria pagando ~{fmtTokens(avgPerCall)} por consulta,
-                    sin cargarla entera en el contexto.
+                    El puente sirve <b>solo lo relevante bajo demanda</b>: Claude accede a un corpus servible de
+                    ~{fmtTokens(corpusTokens)} tokens (memoria útil, sin recuerdos privados ni introspección de AION)
+                    pagando ~{fmtTokens(avgPerCall)} por consulta, sin cargarla entera en el contexto.
                   </p>
                 </div>
               </div>
             </div>
 
-            {/* ── Coste y ahorro en tiempo real (USD/EUR/CLP) ── */}
+            {/* ── Tokens del puente + ahorro estimado en tiempo real ── */}
             <CostPanel stats={stats} />
 
             {/* ── Privacidad y datos confidenciales ── */}

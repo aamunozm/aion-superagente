@@ -7856,18 +7856,26 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
     // Solo las últimas 30 sesiones al cliente (el chart muestra una cola; acota el payload).
     let sessions_tail: Vec<serde_json::Value> =
         sessions.iter().rev().take(30).rev().cloned().collect();
-    // Tamaño del CORPUS de memoria accesible bajo demanda (tokens estimados de toda la memoria
-    // vigente). NO es un "ahorro": es el contexto al que Claude Code accede sin cargarlo entero —
-    // por consulta solo paga `avg_tokens_per_call`. Framing honesto (no "X millones ahorrados").
+    // Tamaño del CORPUS SERVIBLE: la memoria vigente que el puente PODRÍA servir a Claude Code,
+    // es decir EXCLUYENDO lo que nunca viaja al puente (ruido introspectivo/conversacional y
+    // recuerdos confidenciales). Es el baseline honesto del "ahorro": por consulta Claude paga
+    // solo `avg_tokens_per_call` en vez de volcar todo este corpus servible. Contar el ruido aquí
+    // inflaría el ahorro contra una línea base que el puente jamás serviría.
     let (corpus_tokens, memory_count) = crate::shared_memory()
         .map(|m| {
-            let contents = m.contents();
-            let tok = contents
+            let servable: Vec<String> = m
+                .contents()
+                .into_iter()
+                .filter(|c| {
+                    !crate::claude_code::is_bridge_noise(c) && !crate::redact::is_confidential(c)
+                })
+                .collect();
+            let tok = servable
                 .iter()
                 .map(|c| c.chars().count() as u64)
                 .sum::<u64>()
                 / 4;
-            (tok, contents.len() as u64)
+            (tok, servable.len() as u64)
         })
         .unwrap_or((0, 0));
     let avg_per_call = if total > 0 {

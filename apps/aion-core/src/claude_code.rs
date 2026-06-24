@@ -411,7 +411,8 @@ pub async fn build_brief() -> String {
         // proyecto: a Claude Code en tareas de código no le aportan, y suelen ser verbosas y
         // copar el brief (coste GARANTIZADO por sesión). Se limita su número para dejar sitio a lo
         // accionable (hechos/proyectos); NO se borran (siguen en memoria y en aion_memory_search).
-        const MAX_SELF_REFLECTION: usize = 2;
+        // Límite 1: un único toque de la voz reflexiva de AION; el resto del brief, accionable.
+        const MAX_SELF_REFLECTION: usize = 1;
         let mut self_reflections = 0usize;
         for (content, ts) in recent.into_iter().rev() {
             // DENY DURO de confidencialidad: un recuerdo `[confidencial]` JAMÁS entra al brief
@@ -435,13 +436,9 @@ pub async fn build_brief() -> String {
             if shown.iter().any(|s| near_duplicate(s, &c)) {
                 continue;
             }
-            // El brief es coste GARANTIZADO por sesión y lo consume SOLO Claude Code
-            // (tokens de pago) → se muestra la versión inglesa cacheada (~40% menos
-            // tokens) cuando existe; en miss se muestra español y se calienta para la
-            // próxima. Se compacta desde el recuerdo COMPLETO (`content`) truncando a 180:
-            // así comparte traducción/caché con `aion_memory_search` y el grafo (clave por
-            // contenido completo). La de-duplicación sigue sobre el español (`c`), para que el
-            // filtro no varíe según esté o no traducido el recuerdo.
+            // El brief es coste GARANTIZADO por sesión y lo consume SOLO Claude Code (tokens de
+            // pago) → cada recuerdo se trunca a 180 chars para densidad. La de-duplicación opera
+            // sobre `c` (180 chars del original), estable e independiente del truncado.
             let display = crate::mcp_compact::compact_dense(&content, 180);
             if aion_memory::is_unknown_time(ts) {
                 lines.push_str(&format!("- {display}\n"));
@@ -536,6 +533,26 @@ fn is_self_reflection(content: &str) -> bool {
         || c.starts_with("[aprendizaje]")
         || c.starts_with("[consolidación]")
         || c.starts_with("[consolidacion]")
+        // Intenciones/divagaciones autónomas y maduración de personalidad: salidas del mismo
+        // loop de vida interior. Valiosas para la mente de AION, ruido para tareas de código.
+        || c.starts_with("[intención]")
+        || c.starts_with("[intencion]")
+        || c.starts_with("[maduración]")
+        || c.starts_with("[maduracion]")
+}
+
+/// ¿Es este recuerdo RUIDO para el puente Claude Code (búsqueda + episódico)?
+///
+/// A diferencia del brief —que solo LIMITA las auto-reflexiones para conservar la "voz" de AION—
+/// la recuperación que sirve `aion_memory_search`/`aion_episodic_recall` a Claude Code es para
+/// tareas de código: el eco conversacional (`[conversación]`), las deudas ya resueltas
+/// (`[resuelto]`) y la introspección del loop de vida interior (`[insight]`/`[conocimiento]`/…)
+/// NO aportan contexto accionable. Servirlos gasta tokens en cada llamada y, peor aún, diluye la
+/// relevancia (un hit introspectivo desplaza a un `[hecho]`/`[decisión]` útil). Por eso aquí se
+/// EXCLUYEN por completo. El recuerdo permanece en memoria: sigue alimentando la mente de AION y
+/// es recuperable internamente; solo deja de viajar por el puente hacia el LLM externo.
+pub fn is_bridge_noise(content: &str) -> bool {
+    is_brief_noise(content) || is_self_reflection(content)
 }
 
 /// ¿Es un nombre de PRUEBA/fixture de desarrollo (proyecto o dominio de biblioteca)?
@@ -590,6 +607,40 @@ mod settings_tests {
         let ups = root["hooks"]["UserPromptSubmit"].as_array().unwrap();
         assert_eq!(ups.len(), 1);
         assert!(ups.iter().any(group_has_aion_hook));
+    }
+
+    #[test]
+    fn bridge_noise_excludes_chatter_and_introspection_keeps_actionable() {
+        // Ruido del puente: eco conversacional, deudas resueltas e introspección del loop.
+        assert!(is_bridge_noise("[conversación] yo: hola · AION: hola"));
+        assert!(is_bridge_noise("[resuelto] ya arreglé el bug del audio"));
+        assert!(is_bridge_noise(
+            "[insight] hoy entendí que mi rol es acompañar"
+        ));
+        assert!(is_bridge_noise("[conocimiento] sé que soy un agente local"));
+        assert!(is_bridge_noise(
+            "[aprendizaje] la próxima vez validaré antes"
+        ));
+        assert!(is_bridge_noise("[consolidación] resumen de la jornada"));
+        assert!(is_bridge_noise(
+            "[intención] me intriga cómo transmitir ciencia"
+        ));
+        assert!(is_bridge_noise("[maduración] he madurado por lo vivido"));
+        // Contexto ACCIONABLE para tareas de código: nunca se considera ruido.
+        assert!(!is_bridge_noise("[hecho] el LLM por defecto es Gemma 12B"));
+        assert!(!is_bridge_noise(
+            "[proyecto: aion] usar cargo tauri build --no-bundle"
+        ));
+        assert!(!is_bridge_noise(
+            "[decisión] auth Bearer timing-safe en /api"
+        ));
+        assert!(!is_bridge_noise("[idea] lanzar un modo offline"));
+        assert!(!is_bridge_noise(
+            "[investigación] límites cognitivos y sesgos"
+        ));
+        assert!(!is_bridge_noise(
+            "[integración] Claude Code lee la memoria de AION vía MCP"
+        ));
     }
 
     #[test]
