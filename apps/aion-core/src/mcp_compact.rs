@@ -1,153 +1,20 @@
-//! **Compactación EN para el puente MCP con Claude Code.**
+//! **Compactación para el puente MCP con Claude Code.**
 //!
-//! AION es local-first: el chat con Gemma corre on-device y sus tokens son *gratis*.
-//! Pero cuando un agente externo (Claude Code) consulta la memoria de AION vía MCP
-//! (`aion_memory_search`, `aion_brief`…), ese texto entra en el contexto de un modelo
-//! de **pago por token**. La memoria de AION está en español o italiano (Ariel es chileno
-//! viviendo en Italia), y ambas lenguas cuestan ~40% más tokens que el mismo hecho en
-//! inglés (medido con tiktoken sobre recuerdos reales). Ese 40% es el único ahorro que
-//! importa, y solo aquí.
+//! AION es local-first: el chat con Gemma corre on-device y sus tokens son *gratis*. Cuando un
+//! agente externo (Claude Code) consulta la memoria vía MCP, ese texto entra en el contexto de un
+//! modelo de pago, así que se sirve TRUNCADO a un presupuesto de caracteres (brief 180,
+//! `aion_memory_search` 300, grafo 160…) — el ahorro real del puente es el **retrieval bajo
+//! demanda** (servir solo lo relevante), no más.
 //!
-//! **Diseño** (el idioma se ata al CONSUMIDOR, no al almacenamiento):
-//! - La memoria se guarda y se sirve a Gemma SIEMPRE en su idioma original (íntegra).
-//! - Solo el puente MCP recibe una versión **inglesa** equivalente.
-//! - La traduce **Gemma local** (gratis), fiel y literal — NO un quita-stopwords.
-//! - Se **precomputa y cachea** por hash de contenido; nunca se traduce en caliente
-//!   dentro de la llamada MCP (eso metería latencia de Gemma a cada búsqueda).
-//! - **Fail-open absoluto**: si no hay traducción cacheada, se sirve el español
-//!   original y se dispara la traducción en segundo plano para la próxima vez.
-//!
-//! Nunca corrompe ni bloquea: en el peor caso, Claude Code ve español (lo entiende
-//! igual), solo paga unos tokens de más hasta que la caché se calienta.
-
-use aion_kernel::traits::{GenerateRequest, LlmEngine};
-use aion_kernel::types::Message;
-use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-
-tokio::task_local! {
-    /// Acumulador POR LLAMADA MCP de los CHARS que ahorró la traducción ES→EN servida en
-    /// esa llamada (0 si se sirvió español / cache miss). El handler envuelve cada
-    /// `tools/call` con `metered_scope` y al terminar lee el total para auditarlo, así el
-    /// ahorro de la traducción deja de ser invisible. Fuera de un scope `record_saved` es
-    /// no-op, así que la compactación sigue funcionando igual desde cualquier otro contexto.
-    static SAVED_CHARS: std::cell::Cell<usize>;
-}
-
-/// Ejecuta `fut` dentro de un ámbito de medición y devuelve `(salida, chars_ahorrados)`.
-/// El total son los chars que la traducción al inglés recortó en TODA la llamada (suma de
-/// cada `compact_for_bridge`, incluido el por-pasaje de `compact_grounding`).
-pub async fn metered_scope<F: std::future::Future>(fut: F) -> (F::Output, usize) {
-    SAVED_CHARS
-        .scope(std::cell::Cell::new(0), async move {
-            let out = fut.await;
-            let saved = SAVED_CHARS.with(|c| c.get());
-            (out, saved)
-        })
-        .await
-}
-
-/// Suma chars ahorrados al acumulador de la llamada en curso. No-op si no hay scope activo.
-fn record_saved(chars: usize) {
-    let _ = SAVED_CHARS.try_with(|c| c.set(c.get() + chars));
-}
-
-/// Caché persistente { hash_contenido → versión inglesa }. Se carga del disco una vez.
-fn cache() -> &'static Mutex<HashMap<String, String>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        let map = std::fs::read_to_string(cache_path())
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
-        Mutex::new(map)
-    })
-}
-
-fn cache_path() -> std::path::PathBuf {
-    crate::app_data_dir().join("mcp_compact_en.json")
-}
-
-/// Clave estable: SHA-256 del contenido, hex truncado (colisión despreciable).
-fn key(content: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(content.as_bytes());
-    let d = h.finalize();
-    hex16(&d[..8])
-}
-
-fn hex16(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Separa una etiqueta de procedencia inicial `[hecho] …` del cuerpo. La etiqueta es
-/// estructura (no se traduce); el cuerpo sí. Devuelve `(Some("[hecho]"), "…")`.
-fn split_tag(s: &str) -> (Option<&str>, &str) {
-    let s = s.trim_start();
-    if s.starts_with('[') {
-        if let Some(close) = s.find(']') {
-            let tag = &s[..=close]; // "[hecho]"
-            let body = s[close + 1..].trim_start();
-            return (Some(tag), body);
-        }
-    }
-    (None, s)
-}
-
-/// Búsqueda en caché por clave ya calculada.
-fn cached(k: &str) -> Option<String> {
-    cache().lock().ok()?.get(k).cloned()
-}
-
-/// Versión cacheada en inglés para este contenido, si existe. Instantáneo, fail-open.
-pub fn english_for(content: &str) -> Option<String> {
-    cached(&key(content))
-}
-
-/// Límite de traducciones de FONDO simultáneas. Una a la vez: una tarea de fondo no debe
-/// competir con el chat del usuario por el modelo local (que es el mismo proceso Ollama).
-fn translate_gate() -> &'static tokio::sync::Semaphore {
-    static SEM: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
-    SEM.get_or_init(|| tokio::sync::Semaphore::new(1))
-}
-
-/// Claves cuya traducción está EN CURSO — evita disparar dos veces la misma (p. ej. si el
-/// mismo recuerdo se recupera en dos búsquedas casi simultáneas).
-fn inflight() -> &'static Mutex<std::collections::HashSet<String>> {
-    static IN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
-    IN.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
-}
-
-/// RAII: quita la clave del conjunto "en vuelo" pase lo que pase (incluido early-return).
-struct InflightGuard(String);
-impl Drop for InflightGuard {
-    fn drop(&mut self) {
-        if let Ok(mut s) = inflight().lock() {
-            s.remove(&self.0);
-        }
-    }
-}
-
-/// Sirve la versión óptima para el puente MCP: inglés si está cacheado; si no, devuelve
-/// el español original ESTA vez y calienta la traducción en segundo plano.
-pub fn compact_for_bridge(content: &str) -> String {
-    if let Some(en) = english_for(content) {
-        // Mide lo ahorrado por servir inglés en vez del español original (clamp a 0 por si
-        // una traducción puntual saliera más larga). Lo recoge el scope de la llamada MCP.
-        record_saved(content.chars().count().saturating_sub(en.chars().count()));
-        return en;
-    }
-    let owned = content.to_string();
-    tokio::spawn(async move {
-        let _ = ensure_english(&owned).await;
-    });
-    content.to_string()
-}
+//! **Histórico:** hubo una capa de traducción ES→EN aquí (warmer, caché, QE back-translation).
+//! Se RETIRÓ (2026-06-24) tras auditar su ahorro REAL: ~1% sobre las rutas traducibles, porque las
+//! salidas están topadas (traducir solo densificaba, no abarataba) — no compensaba su complejidad
+//! ni el coste de arranque del modelo de traducción. Hoy la memoria se sirve en su idioma original,
+//! simplemente truncada al presupuesto.
 
 /// Trunca `s` a lo sumo `max_chars` SIN cortar a media palabra: si el corte cae pasada la
 /// mitad, retrocede al último espacio. Barato y suficiente para los snippets del puente.
-fn take_words(s: &str, max_chars: usize) -> String {
+pub fn take_words(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
     }
@@ -159,437 +26,32 @@ fn take_words(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// Versión para consumidores que TRUNCAN el recuerdo a un presupuesto de chars (brief=180,
-/// `aion_memory_search`=300, grafo=160…). Traduce el FRAGMENTO que se va a servir (los primeros
-/// `max_chars` en frontera de palabra), NO el recuerdo completo: así lo servido es la traducción
-/// inglesa de ese fragmento (~17% menos tokens que el mismo texto en español). Servir los primeros
-/// `max_chars` de la traducción del completo ocuparía lo mismo (cero ahorro), solo metería más
-/// información — por eso se traduce el fragmento. La clave de caché es el hash del fragmento, y el
-/// warmer precalienta los cortes 180/300 de TODA la memoria, así que acierta desde la 1ª consulta.
-/// Fail-open: en miss sirve el español truncado y calienta el fragmento en segundo plano.
+/// Sirve un recuerdo al puente truncado al presupuesto de caracteres (en su idioma original).
 pub fn compact_take(content: &str, max_chars: usize) -> String {
-    let es_frag = take_words(content, max_chars);
-    if let Some(en) = english_for(&es_frag) {
-        // Ahorro: chars que el inglés recortó frente al español servido. Lo recoge el scope MCP.
-        record_saved(es_frag.chars().count().saturating_sub(en.chars().count()));
-        return en;
-    }
-    // MISS: calienta la traducción de ESTE fragmento para la próxima vez.
-    let owned = es_frag.clone();
-    tokio::spawn(async move {
-        let _ = ensure_english(&owned).await;
-    });
-    es_frag
+    take_words(content, max_chars)
 }
 
-/// Clave de RESUMEN denso. Lleva prefijo `d{budget}:` porque un resumen depende del presupuesto
-/// objetivo (no colisiona con las claves de traducción fiel, que son 16 hex puros).
-fn dense_key(content: &str, budget: usize) -> String {
-    format!("d{budget}:{}", key(content))
-}
-
-/// Genera (y cachea) un RESUMEN denso en inglés de un recuerdo LARGO: la traducción fiel + el
-/// truncado ciego pierden la cola del recuerdo; un resumen que conserva TODOS los hechos y quita
-/// solo relleno cabe en menos tokens SIN perder información. Solo se aplica a contenido largo
-/// (> 2× el presupuesto). Red de seguridad estricta (mandato de honestidad de Ariel): preserva
-/// nombres/números/fechas/paths literales y se valida con QE back-translation; si la QE no pasa,
-/// NO cachea resumen y el caller cae a la traducción fiel (`compact_take`). Mismo gate de
-/// concurrencia y dedup en vuelo que la traducción.
-async fn ensure_dense(content: &str, budget: usize) -> Option<String> {
-    let k = dense_key(content, budget);
-    if let Some(en) = cached(&k) {
-        return Some(en);
-    }
-    let trimmed = content.trim();
-    // Solo merece resumir lo LARGO; lo corto se sirve con traducción fiel (sin riesgo).
-    if trimmed.chars().count() <= budget * 2 {
-        return None;
-    }
-    if !crate::language_detector::needs_english_translation(trimmed) {
-        return None;
-    }
-    let (tag, body) = split_tag(trimmed);
-    if body.chars().count() < 40 {
-        return None;
-    }
-    if !inflight()
-        .lock()
-        .map(|mut s| s.insert(k.clone()))
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    let _guard = InflightGuard(k.clone());
-    let _permit = translate_gate().acquire().await.ok()?;
-    if let Some(en) = cached(&k) {
-        return Some(en);
-    }
-    let engine = local_engine()?;
-    let req = GenerateRequest {
-        messages: vec![Message::user(format!(
-            "You are condensing a personal-memory note (written in Spanish or Italian) into the \
-             SHORTEST faithful English summary for another AI agent. First understand what the \
-             author MEANS, then write the densest English that still keeps EVERY distinct fact. \
-             Preserve every name, number, date, path and identifier EXACTLY as written; drop only \
-             filler, repetition and rhetorical padding. Never invent, infer or add anything not in \
-             the note. If everything is already essential, return it faithfully. Output ONLY the \
-             English summary, with no preamble, quotes or notes.\n\n{body}"
-        ))],
-        think: false,
-        temperature: Some(0.1),
-        max_tokens: Some(220),
-    };
-    let en = engine.generate(req).await.ok()?.content.trim().to_string();
-    // Sanidad: vacío o absurdamente corto frente al cuerpo → no sustituye al original.
-    if en.is_empty() || en.chars().count() < 20 {
-        return None;
-    }
-    // QE: el resumen debe seguir significando lo mismo que el ORIGINAL completo. Si no pasa, no
-    // se cachea resumen → el caller sirve traducción fiel (fidelidad por encima del ahorro).
-    if !back_translation_faithful(&engine, body, &en).await {
-        tracing::warn!("mcp_compact: resumen denso rechazado por QE; se servirá traducción fiel");
-        return None;
-    }
-    let full = match tag {
-        Some(t) => format!("{t} {en}"),
-        None => en,
-    };
-    store(&k, &full);
-    Some(full)
-}
-
-/// Como [`compact_take`], pero para recuerdos LARGOS sirve un RESUMEN denso en inglés (que
-/// conserva todos los hechos en menos tokens) en vez de truncar a ciegas. Para recuerdos que
-/// caben holgadamente usa la traducción fiel directa. Fail-open en cascada: sin resumen cacheado
-/// sirve la traducción fiel truncada esta vez y genera el resumen en segundo plano; si la QE del
-/// resumen falla, se queda permanentemente en la traducción fiel. Usado por el brief y
-/// `aion_memory_search`, las dos rutas de mayor volumen.
+/// Igual que [`compact_take`]: trunca al presupuesto. (Antes generaba un resumen denso en inglés;
+/// retirado junto con la traducción.) Usado por el brief y `aion_memory_search`.
 pub fn compact_dense(content: &str, max_chars: usize) -> String {
-    // Corto → nada que condensar sin arriesgar: traducción fiel.
-    if content.chars().count() <= max_chars * 2 {
-        return compact_take(content, max_chars);
-    }
-    if let Some(en) = cached(&dense_key(content, max_chars)) {
-        // El resumen ya es denso (≤ presupuesto); el clamp es solo una red de seguridad.
-        let en_served = take_words(&en, max_chars);
-        let es_served = take_words(content, max_chars);
-        record_saved(
-            es_served
-                .chars()
-                .count()
-                .saturating_sub(en_served.chars().count()),
-        );
-        return en_served;
-    }
-    // MISS: genera el resumen en segundo plano y sirve traducción fiel truncada esta vez.
-    let owned = content.to_string();
-    tokio::spawn(async move {
-        let _ = ensure_dense(&owned, max_chars).await;
-    });
-    compact_take(content, max_chars)
+    take_words(content, max_chars)
 }
 
-/// Compacta un bloque de *grounding* de biblioteca para el puente MCP: traduce SOLO la
-/// prosa de cada pasaje a su versión inglesa cacheada, conservando intacta la ESTRUCTURA
-/// (la cabecera, los prefijos `[N] (fuente: …)` y las líneas `[tema: …]`). Trabaja línea a
-/// línea con `compact_for_bridge`, así que hereda su comportamiento: inglés si está cacheado;
-/// si no, español esta vez + calienta en segundo plano. Fail-open por línea — NUNCA bloquea
-/// ni corrompe. Se aplica solo aquí (puente de pago), nunca a la ruta local de Gemma.
+/// Sirve contenido al puente tal cual (identidad). Se conserva como punto único por si en el
+/// futuro se reintroduce algún post-proceso del puente; hoy no transforma.
+pub fn compact_for_bridge(content: &str) -> String {
+    content.to_string()
+}
+
+/// Bloque de *grounding* de biblioteca para el puente: hoy se sirve sin transformar (la estructura
+/// y la prosa quedan intactas). Se conserva la firma para los llamadores.
 pub fn compact_grounding(blob: &str) -> String {
-    blob.lines()
-        .map(|line| {
-            // Pasaje: `[N] (fuente: X) contenido…` (o `… · vía A → B) contenido…`). El primer
-            // `") "` cierra el prefijo estructural; lo que sigue es la prosa a compactar. Las
-            // líneas `[tema: …]` y la cabecera no tienen `") "` → se devuelven tal cual.
-            if line.starts_with('[') {
-                if let Some(pos) = line.find(") ") {
-                    let (prefix, content) = line.split_at(pos + 2);
-                    return format!("{prefix}{}", compact_for_bridge(content));
-                }
-            }
-            line.to_string()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Cortes (en chars) a los que los consumidores del puente truncan un recuerdo antes de traducir:
-/// brief usa 180, `aion_memory_search` usa 300. El warmer precalienta AMBOS con el MISMO
-/// `take_words` que usa `compact_take`, para que la clave (hash del fragmento) acierte desde la 1ª
-/// consulta. Si cambias esos cortes en `claude_code.rs`/`claude_mcp.rs`, actualízalos aquí.
-const WARM_PREFIXES: [usize; 2] = [180, 300];
-
-/// WARMER de arranque: pre-traduce los FRAGMENTOS (cortes 180/300) de un lote de recuerdos para
-/// que incluso la PRIMERA consulta MCP de la sesión sirva inglés (sin esto, el primer hit a un
-/// recuerdo aún sin traducir va en español hasta que la caché se calienta sola). Cachea por el
-/// hash del fragmento exacto que sirve `compact_take`, así brief (180) y `aion_memory_search` (300)
-/// aciertan desde la 1ª vez. Reusa `ensure_english_inner`: respeta caché, gate de concurrencia (1
-/// traducción a la vez, no compite con el chat), dedup en vuelo y fail-open. Tarea de fondo, sin
-/// prisa. Devuelve cuántas tradujo de nuevo.
-pub async fn warm(contents: Vec<String>) -> usize {
-    let mut done = 0usize;
-    for c in contents {
-        for &n in &WARM_PREFIXES {
-            let frag = take_words(&c, n);
-            // Si el recuerdo es más corto que el corte, ambos cortes dan el MISMO fragmento:
-            // el segundo es un cache hit barato (no retraduce).
-            if english_for(&frag).is_some() {
-                continue;
-            }
-            // Sin QE (recuerdos propios + meaning-first fiable); la QE encarece el arranque y la
-            // mantiene el camino reactivo.
-            if ensure_english_inner(&frag, false).await.is_some() {
-                done += 1;
-            }
-        }
-    }
-    if done > 0 {
-        tracing::info!(
-            traducidos = done,
-            "mcp_compact: warmer pre-tradujo fragmentos de recuerdos al inglés"
-        );
-    }
-    done
-}
-
-/// Motor LOCAL para traducir. Usa el modelo de FONDO configurado (`utility_model` ligero
-/// si existe, si no `local_model`) — un componente INTERCAMBIABLE, nunca uno fijo: en un
-/// equipo modesto puedes traducir con un modelo de 1-3B aunque chatees con otro. Siempre
-/// local (gratis) aunque el motor de chat sea una API externa de pago. Si no hay modelo
-/// local configurado, devuelve `None` → la compactación se salta (fail-open a español):
-/// el modelo NO es una pieza obligatoria de AION.
-fn local_engine() -> Option<Arc<dyn LlmEngine>> {
-    // Modelo de TRADUCCIÓN (no el genérico de fondo): permite enchufar un especializado
-    // —TranslateGemma/GemmaX2— por config/env sin tocar código. Fail-open: si no hay ninguno
-    // especializado, `translation_model()` cae al de fondo de siempre.
-    let model = crate::provider::load().translation_model();
-    if model.is_empty() {
-        return None;
-    }
-    Some(Arc::new(aion_llm::OllamaEngine::new(
-        aion_llm::OllamaEngine::base_url_from_env(),
-        &model,
-    )))
-}
-
-/// Traduce+compacta el contenido a inglés con Gemma local y lo cachea. Idempotente.
-/// Aplica la QE por back-translation (red de seguridad contra errores graves). Esta es la
-/// ruta REACTIVA (servir bajo demanda), donde la QE importa.
-pub async fn ensure_english(content: &str) -> Option<String> {
-    ensure_english_inner(content, true).await
-}
-
-/// Igual pero `run_qe` controla si se verifica con back-translation. El WARMER de arranque
-/// llama con `false`: pre-traduce recuerdos PROPIOS del usuario (no adversarios, bien
-/// formados) con el prompt meaning-first, y saltarse la QE evita ~2× llamadas LLM + 2
-/// embeddings por recuerdo en la ventana de arranque (que competiría con el chat). La QE
-/// sigue protegiendo el camino reactivo y los recuerdos nuevos.
-async fn ensure_english_inner(content: &str, run_qe: bool) -> Option<String> {
-    let k = key(content);
-    if let Some(en) = cached(&k) {
-        return Some(en);
-    }
-    let trimmed = content.trim();
-    // Saltar lo trivial y lo que NO tiene señal de español/italiano (ya está en inglés/código
-    // → traducirlo no ahorra nada). Gate sesgado a traducir: ver `needs_english_translation`.
-    if trimmed.chars().count() < 40 {
-        return None;
-    }
-    if !crate::language_detector::needs_english_translation(trimmed) {
-        return None;
-    }
-    let (tag, body) = split_tag(trimmed);
-    if body.chars().count() < 20 {
-        return None;
-    }
-
-    // DEDUP EN VUELO: si ya hay una traducción de este contenido en curso, no dispares otra.
-    if !inflight()
-        .lock()
-        .map(|mut s| s.insert(k.clone()))
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    let _guard = InflightGuard(k.clone());
-
-    // LÍMITE DE CONCURRENCIA: como mucho una traducción de fondo a la vez → no compite con
-    // el chat del usuario por el modelo local. El resto espera su turno aquí.
-    let _permit = translate_gate().acquire().await.ok()?;
-
-    // Otra traducción pudo cachear esto mientras esperábamos el turno: no lo rehagas.
-    if let Some(en) = cached(&k) {
-        return Some(en);
-    }
-
-    // Sin modelo local configurado → no traducimos (el modelo no es obligatorio).
-    let engine = local_engine()?;
-    let req = GenerateRequest {
-        // MEANING-FIRST (mini-MAPS, arXiv 2305.04118): primero ENTENDER lo que el autor quiere
-        // decir —resolver typos, interpretar jerga/regionalismos e idioms por su sentido,
-        // desambiguar— y LUEGO expresar ese significado en inglés, en vez de traducir palabra
-        // por palabra. Sin coste extra (una sola llamada). Restringido a NO inventar: preserva
-        // hechos/nombres/números/rutas tal cual. Ataca el error de interpretación silencioso.
-        messages: vec![Message::user(format!(
-            "You are translating a personal-memory note written in Spanish or Italian (it may \
-             contain typos, slang or regional expressions) into English for another AI agent. \
-             First understand what the author MEANS — silently fix obvious typos, interpret \
-             idioms and regionalisms by their intended sense, and resolve ambiguity — then \
-             express that meaning in clear, natural English. Translate the MEANING, not \
-             word-for-word. Preserve EVERY fact, name, number, path and identifier EXACTLY as \
-             written; never invent or add anything that is not in the note. Be concise but omit \
-             nothing. Output ONLY the English translation, with no preamble, quotes or notes.\
-             \n\n{body}"
-        ))],
-        think: false,
-        temperature: Some(0.1),
-        max_tokens: Some(220),
-    };
-    let en = engine.generate(req).await.ok()?.content.trim().to_string();
-    // Sanidad: una traducción vacía o sospechosamente corta no reemplaza al original.
-    if en.is_empty() || en.chars().count() < body.chars().count() / 5 {
-        return None;
-    }
-    // QE POR BACK-TRANSLATION (Fase 2, sin referencia ni API de pago): verifica que la
-    // traducción "vuelve" a significar lo mismo. Atrapa errores GRAVES (alucinación, tema
-    // cambiado, hechos perdidos) que el meaning-first no garantiza. Si NO pasa, se cachea el
-    // ORIGINAL bajo esta clave → el puente sirve texto FIEL (sin ahorro, pero correcto) y no
-    // se reintenta. Es una red de seguridad GRUESA, no fina (ver umbral en la fn).
-    if run_qe && !back_translation_faithful(&engine, body, &en).await {
-        tracing::warn!(
-            "mcp_compact: traducción rechazada por QE back-translation; se sirve el original"
-        );
-        store(&k, content);
-        return Some(content.to_string());
-    }
-    let full = match tag {
-        Some(t) => format!("{t} {en}"),
-        None => en,
-    };
-    store(&k, &full);
-    Some(full)
-}
-
-/// QE SIN REFERENCIA por **back-translation**: traduce `english` de vuelta al idioma del
-/// `original` y mide la similitud semántica (BGE-M3, el mismo embedder del retrieval) entre
-/// original y back-translation. `true` = fiel (≥ umbral) o no medible (fail-open).
-///
-/// Umbral CONSERVADOR (def. 0.50). Calibrado con datos: el round-trip de texto coloquial,
-/// con jerga o typos baja a ~0.67 AUNQUE la traducción sea correcta (la vuelta es estándar),
-/// mientras que un error catastrófico (tema equivocado) cae a ~0.34. Por eso esto SOLO
-/// rechaza desastres; lo sutil lo cubre el prompt meaning-first. NO confiar en el LLM
-/// juzgándose a sí mismo (sobreestima): por eso comparamos significados con embeddings.
-/// Config: `AION_TRANSLATION_QE=0` lo desactiva; `AION_TRANSLATION_QE_MIN` ajusta el corte.
-/// Embedder BGE-M3 compartido (reusa el cliente HTTP/keep-alive en vez de crear uno por
-/// llamada de QE — relevante por el volumen del calentado).
-fn shared_embedder() -> &'static aion_memory::OllamaEmbedder {
-    static E: OnceLock<aion_memory::OllamaEmbedder> = OnceLock::new();
-    E.get_or_init(aion_memory::OllamaEmbedder::default_local)
-}
-
-async fn back_translation_faithful(
-    engine: &Arc<dyn LlmEngine>,
-    original: &str,
-    english: &str,
-) -> bool {
-    if std::env::var("AION_TRANSLATION_QE").as_deref() == Ok("0") {
-        return true;
-    }
-    let min = std::env::var("AION_TRANSLATION_QE_MIN")
-        .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.50);
-    // Idioma destino de la vuelta: italiano solo si la señal es claramente IT (y no ES);
-    // por defecto español (la lengua principal de la memoria).
-    let lang = if crate::language_detector::has_italian_signal(original)
-        && !crate::language_detector::has_spanish_signal(original)
-    {
-        "Italian"
-    } else {
-        "Spanish"
-    };
-    let req = GenerateRequest {
-        messages: vec![Message::user(format!(
-            "Translate the following English text back into {lang}, faithfully and naturally, \
-             preserving all facts, names, numbers and paths. Output ONLY the {lang} \
-             translation, with no preamble or notes.\n\n{english}"
-        ))],
-        think: false,
-        temperature: Some(0.1),
-        max_tokens: Some(240),
-    };
-    // Si no se puede traducir de vuelta → no podemos medir → confiar (fail-open).
-    let Ok(out) = engine.generate(req).await else {
-        return true;
-    };
-    let back = out.content.trim();
-    if back.is_empty() {
-        return true;
-    }
-    // Comparación semántica con BGE-M3. Si el embedder falla → confiar (fail-open).
-    let embedder = shared_embedder();
-    let (Ok(a), Ok(b)) = (embedder.embed(original).await, embedder.embed(back).await) else {
-        return true;
-    };
-    let sim = aion_memory::cosine(&a, &b);
-    tracing::debug!(sim, min, "mcp_compact: QE back-translation");
-    sim >= min
-}
-
-/// Caché máxima de traducciones. Generosa: la memoria del usuario crece despacio. Al
-/// superarla se descarta una entrada arbitraria (evita crecimiento ilimitado del archivo).
-const MAX_ENTRIES: usize = 10_000;
-
-/// Inserta en caché (acotada) y persiste de forma atómica. La serialización ocurre bajo un
-/// lock BREVE; la escritura a disco va FUERA del lock para no bloquear a los lectores.
-fn store(k: &str, value: &str) {
-    let json = {
-        let Ok(mut c) = cache().lock() else { return };
-        c.insert(k.to_string(), value.to_string());
-        if c.len() > MAX_ENTRIES {
-            if let Some(victim) = c.keys().next().cloned() {
-                c.remove(&victim);
-            }
-        }
-        tracing::debug!(
-            cached = c.len(),
-            "mcp_compact: recuerdo traducido a inglés y cacheado"
-        );
-        serde_json::to_string(&*c).ok()
-    }; // lock liberado aquí
-    if let Some(json) = json {
-        crate::write_atomic(&cache_path(), &json);
-    }
+    blob.to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn key_is_stable_and_distinct() {
-        assert_eq!(key("hola mundo"), key("hola mundo"));
-        assert_ne!(key("hola mundo"), key("hola mundos"));
-    }
-
-    #[test]
-    fn split_tag_extracts_provenance() {
-        let (tag, body) = split_tag("[hecho] Ariel usa Rust");
-        assert_eq!(tag, Some("[hecho]"));
-        assert_eq!(body, "Ariel usa Rust");
-    }
-
-    #[test]
-    fn split_tag_handles_no_tag() {
-        let (tag, body) = split_tag("sin etiqueta aquí");
-        assert_eq!(tag, None);
-        assert_eq!(body, "sin etiqueta aquí");
-    }
-
-    #[test]
-    fn english_for_miss_is_none() {
-        assert!(english_for("contenido jamás cacheado xyzzy 9f3a").is_none());
-    }
 
     #[test]
     fn take_words_does_not_split_words() {
@@ -603,44 +65,26 @@ mod tests {
         assert!(s.starts_with(&t), "es un prefijo del original");
     }
 
-    // Necesita runtime: en cache miss `compact_take` hace `tokio::spawn` del calentado.
-    #[tokio::test]
-    async fn compact_take_miss_serves_spanish_truncated() {
-        // Contenido jamás cacheado → fail-open: español truncado al presupuesto, prefijo fiel.
-        let content =
-            "Este es un recuerdo en español jamás traducido zzqq7f3a que excede el corte.";
+    #[test]
+    fn compact_take_truncates_to_budget() {
+        let content = "Este es un recuerdo en español que excede claramente el corte impuesto.";
         let out = compact_take(content, 30);
         assert!(out.chars().count() <= 30);
         assert!(content.starts_with(&out));
     }
 
-    // Necesita runtime: en miss `compact_dense` hace `tokio::spawn` (resumen + traducción).
-    #[tokio::test]
-    async fn compact_dense_miss_falls_back_to_faithful_spanish() {
-        // Recuerdo largo jamás cacheado → sin resumen → fail-open a traducción fiel truncada
-        // (español, prefijo fiel) sin exceder el presupuesto. La fidelidad nunca se sacrifica.
-        let content =
-            "Recuerdo largo en español sin traducir wqx84: ".to_string() + &"dato ".repeat(40);
+    #[test]
+    fn compact_dense_truncates_to_budget() {
+        let content = "Recuerdo largo en español: ".to_string() + &"dato ".repeat(40);
         let out = compact_dense(&content, 60);
         assert!(out.chars().count() <= 60);
         assert!(content.starts_with(&out));
     }
 
-    // Necesita runtime: en cache miss `compact_for_bridge` hace `tokio::spawn` del calentado.
-    #[tokio::test]
-    async fn compact_grounding_preserves_structure() {
-        let blob = "Conocimiento de TU BIBLIOTECA relevante para esto:\n\
-                    [1] (fuente: manual.pdf) Este pasaje habla de la garantía del producto.\n\
-                    [2] (fuente: guia.pdf · vía A → B) Otro pasaje sobre la instalación.\n\
-                    [tema: Garantías] resumen del tema sin tocar";
-        let out = compact_grounding(blob);
-        let lines: Vec<&str> = out.lines().collect();
-        // Cabecera, prefijos de fuente/vía y línea de tema quedan intactos (sin caché, el
-        // contenido se sirve en español → fail-open; lo que comprobamos es la ESTRUCTURA).
-        assert!(lines[0].starts_with("Conocimiento de TU BIBLIOTECA"));
-        assert!(lines[1].starts_with("[1] (fuente: manual.pdf) "));
-        assert!(lines[2].starts_with("[2] (fuente: guia.pdf · vía A → B) "));
-        assert!(lines[3].starts_with("[tema: Garantías] "));
-        assert_eq!(lines.len(), 4);
+    #[test]
+    fn compact_grounding_is_identity() {
+        let blob =
+            "Conocimiento de TU BIBLIOTECA:\n[1] (fuente: manual.pdf) Pasaje sobre garantía.";
+        assert_eq!(compact_grounding(blob), blob);
     }
 }

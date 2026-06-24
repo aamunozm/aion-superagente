@@ -245,20 +245,6 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // WARMER DE COMPACTACIÓN MCP: pre-traduce al inglés TODA la memoria vigente (clave por
-    // recuerdo completo) para que CUALQUIER consulta de Claude Code en la sesión —brief,
-    // aion_memory_search o grafo— sirva inglés desde la primera vez y ahorre tokens; sin esto
-    // el ahorro es perezoso (el primer hit a un recuerdo aún sin traducir va en español). En
-    // segundo plano y detrás de la precarga del modelo; el gate interno (1 traducción a la vez)
-    // evita competir con el chat. Fail-open total. AION_MCP_WARM=0 lo desactiva.
-    tokio::spawn(async {
-        if std::env::var("AION_MCP_WARM").as_deref() == Ok("0") {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(25)).await; // tras calentar el modelo
-        warm_mcp_translations().await;
-    });
-
     // RITUAL DE NOMBRE: si aún no eligió su nombre, AION elige UNO PROPIO (una vez).
     // Así cada agente tiene nombre + id únicos: un individuo, no "un AION cualquiera".
     tokio::spawn(async {
@@ -7497,26 +7483,25 @@ async fn memory_projects() -> Json<serde_json::Value> {
     let total_bytes = mem.byte_size().max(1);
     let total_count = mem.len();
 
-    // Ahorro de tokens por proyecto desde la auditoría (últimas 5000 llamadas MCP).
+    // Uso por proyecto desde la auditoría (últimas 5000 llamadas MCP): nº de consultas y tokens
+    // servidos. (Ya no hay "tokens ahorrados" por proyecto: la traducción ES→EN se retiró.)
     let audit = crate::claude_mcp::audit_tail(5000);
-    let mut agg: HashMap<String, (i64, i64, i64)> = HashMap::new(); // (calls, served, saved)
+    let mut agg: HashMap<String, (i64, i64)> = HashMap::new(); // (calls, served)
     for e in &audit {
         let proj = e.get("project").and_then(|v| v.as_str()).unwrap_or("");
         if proj.is_empty() {
             continue;
         }
         let served = e.get("est_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-        let saved = e.get("saved_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-        let row = agg.entry(proj.to_string()).or_insert((0, 0, 0));
+        let row = agg.entry(proj.to_string()).or_insert((0, 0));
         row.0 += 1;
         row.1 += served;
-        row.2 += saved;
     }
 
     let projects: Vec<serde_json::Value> = breakdown
         .iter()
         .map(|p| {
-            let (calls, served, saved) = agg.get(&p.project).copied().unwrap_or((0, 0, 0));
+            let (calls, served) = agg.get(&p.project).copied().unwrap_or((0, 0));
             let pct = p.bytes as f64 / total_bytes as f64 * 100.0;
             serde_json::json!({
                 "project": p.project,
@@ -7526,7 +7511,6 @@ async fn memory_projects() -> Json<serde_json::Value> {
                 "last_activity": p.last_activity,
                 "calls": calls,
                 "tokens_served": served,
-                "tokens_saved": saved,
             })
         })
         .collect();
@@ -7698,49 +7682,6 @@ async fn claude_code_set(Json(b): Json<ClaudeCodeConnectBody>) -> Json<serde_jso
     Json(serde_json::json!({ "ok": true }))
 }
 
-/// Conexión 1-click: genera token NUEVO (revoca el anterior), lo registra en la
-/// CLI de Claude (scope user) y activa el endpoint /mcp.
-/// Pre-traduce al inglés la memoria vigente para el puente MCP (clave por recuerdo completo).
-/// Reutilizada por el warmer de arranque y por `connect`. Acota a `AION_MCP_WARM_N` recuerdos
-/// (def. 4000, los más recientes primero): cubre toda la memoria de un uso normal sin disparar
-/// la traducción a lo bestia. Fail-open: sin memoria accesible, no hace nada.
-async fn warm_mcp_translations() {
-    let n: usize = std::env::var("AION_MCP_WARM_N")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(4000);
-    let mut contents: Vec<String> = match crate::shared_memory() {
-        Ok(mem) => mem.recent_with_ids(n).into_iter().map(|(_, c)| c).collect(),
-        Err(_) => Vec::new(),
-    };
-    // También pre-traduce los pasajes de la BIBLIOTECA (los sirve `aion_graph_query` como
-    // excerpt de 180 chars vía `compact_for_bridge`). Acotado por AION_MCP_WARM_LIB_N (def 400)
-    // para no traducir bibliotecas enormes de golpe; el resto se calienta reactivo en la 1ª
-    // consulta. `library_search` (grounding por pasaje variable) sigue calentándose reactivo.
-    let lib_n: usize = std::env::var("AION_MCP_WARM_LIB_N")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(400);
-    if lib_n > 0 {
-        let lib = crate::library::Library::open(crate::knowledge_path());
-        let mut taken = 0usize;
-        'outer: for (domain, source, _) in lib.documents() {
-            for (_, content) in lib.chunks_of(&domain, &source) {
-                contents.push(content.chars().take(180).collect());
-                taken += 1;
-                if taken >= lib_n {
-                    break 'outer;
-                }
-            }
-        }
-    }
-    if contents.is_empty() {
-        return;
-    }
-    crate::mcp_compact::warm(contents).await;
-}
-
 async fn claude_code_connect(Json(b): Json<ClaudeCodeConnectBody>) -> Json<serde_json::Value> {
     let mut cfg = crate::claude_code::load();
     // Token ESTABLE entre reinicios/OTA (el mismo que protege `/api/*`): un token efímero por
@@ -7758,8 +7699,6 @@ async fn claude_code_connect(Json(b): Json<ClaudeCodeConnectBody>) -> Json<serde
                 cfg.created_at = Some(chrono::Utc::now());
             }
             crate::claude_code::save(&cfg);
-            // Calienta las traducciones EN en segundo plano para que la primera sesión ya ahorre.
-            tokio::spawn(warm_mcp_translations());
             Json(serde_json::json!({ "ok": true, "registered": true }))
         }
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
@@ -7813,36 +7752,12 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
     let mut tokens_served: u64 = 0;
     let mut writes: u64 = 0;
     let mut errors: u64 = 0;
-    // Ahorro de la TRADUCCIÓN ES→EN (lo que recortó servir inglés cacheado al puente). Es
-    // distinto del ahorro del RAG (servir solo lo relevante) que mide `total_savings_est`.
-    let mut tokens_saved_tr: u64 = 0;
-    let mut by_tool_translation: std::collections::HashMap<String, u64> =
-        std::collections::HashMap::new();
-    // Tokens servidos SOLO por las rutas de LECTURA que traducen (denominador honesto del
-    // ahorro EN: las escrituras remember/forget no traducen y NO deben contar como "servido EN",
-    // que era lo que hundía el porcentaje del panel).
-    let mut tokens_served_translation: u64 = 0;
     for e in &entries {
         let tool = e.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
         let tok = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-        let saved = e.get("saved_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
         *by_tool.entry(tool.to_string()).or_insert(0) += 1;
         *by_tool_tokens.entry(tool.to_string()).or_insert(0) += tok;
         tokens_served += tok;
-        tokens_saved_tr += saved;
-        if matches!(
-            tool,
-            "aion_brief"
-                | "aion_memory_search"
-                | "aion_library_search"
-                | "aion_graph_query"
-                | "aion_episodic_recall"
-        ) {
-            tokens_served_translation += tok;
-        }
-        if saved > 0 {
-            *by_tool_translation.entry(tool.to_string()).or_insert(0) += saved;
-        }
         if tool == "aion_remember" {
             writes += 1;
         }
@@ -7850,28 +7765,10 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
             errors += 1;
         }
     }
-    // % de ahorro de la TRADUCCIÓN ES→EN: solo sobre las rutas de lectura que de verdad traducen
-    // (brief/search/library/graph) y solo sobre las ÚLTIMAS 48 H. El histórico previo al arreglo
-    // del hit-rate —y las escrituras remember/forget, que no traducen— anclaban este % en ~0
-    // aunque cada llamada nueva ya recorte tokens. La ventana temporal refleja el comportamiento
-    // ACTUAL (caché caliente) y descarta el histórico roto sin depender de cuántas llamadas haya.
-    // % de ahorro de la TRADUCCIÓN ES→EN sobre las rutas de LECTURA que de verdad traducen
-    // (brief/search/library/graph/episodic), agregado LIFETIME y CONSISTENTE con el bar de
-    // abajo. Denominador = lo servido por esas rutas en su equivalente español
-    // (servido_en + ahorrado). Las escrituras remember/forget NO entran (no traducen): eran
-    // las que hundían este porcentaje a ~0 al contar como "servido" sin ahorrar nada.
-    let translation_savings_pct: u64 = {
-        let es_equiv = tokens_served_translation + tokens_saved_tr;
-        if es_equiv > 0 {
-            (tokens_saved_tr as f64 / es_equiv as f64 * 100.0).round() as u64
-        } else {
-            0
-        }
-    };
     // SESIONES: agrupa las llamadas por cercanía temporal (un hueco > 30 min abre una sesión
     // nueva). Claude Code no envía un id de sesión, así que se infiere del tiempo. Por sesión:
-    // inicio, nº de llamadas, tokens servidos y tokens ahorrados por la traducción.
-    let mut timeline: Vec<(chrono::DateTime<chrono::Utc>, u64, u64)> = entries
+    // inicio, nº de llamadas y tokens servidos.
+    let mut timeline: Vec<(chrono::DateTime<chrono::Utc>, u64)> = entries
         .iter()
         .filter_map(|e| {
             let ts = e
@@ -7880,22 +7777,20 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())?
                 .with_timezone(&chrono::Utc);
             let served = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let saved = e.get("saved_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            Some((ts, served, saved))
+            Some((ts, served))
         })
         .collect();
-    timeline.sort_by_key(|(ts, _, _)| *ts);
+    timeline.sort_by_key(|(ts, _)| *ts);
     const SESSION_GAP_SECS: i64 = 30 * 60;
     let mut sessions: Vec<serde_json::Value> = Vec::new();
     let mut i = 0usize;
     while i < timeline.len() {
         let start = timeline[i].0;
-        let (mut calls, mut served, mut saved) = (0u64, 0u64, 0u64);
+        let (mut calls, mut served) = (0u64, 0u64);
         let mut last = start;
         while i < timeline.len() && (timeline[i].0 - last).num_seconds() <= SESSION_GAP_SECS {
             calls += 1;
             served += timeline[i].1;
-            saved += timeline[i].2;
             last = timeline[i].0;
             i += 1;
         }
@@ -7903,38 +7798,30 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
             "started_at": start.to_rfc3339(),
             "calls": calls,
             "tokens_served": served,
-            "tokens_saved": saved,
         }));
     }
     // Solo las últimas 30 sesiones al cliente (el chart muestra una cola; acota el payload).
     let sessions_tail: Vec<serde_json::Value> =
         sessions.iter().rev().take(30).rev().cloned().collect();
-    // Coste hipotético de volcar la memoria vigente completa en cada sesión.
-    let (full_dump_tokens, memory_count) = crate::shared_memory()
+    // Tamaño del CORPUS de memoria accesible bajo demanda (tokens estimados de toda la memoria
+    // vigente). NO es un "ahorro": es el contexto al que Claude Code accede sin cargarlo entero —
+    // por consulta solo paga `avg_tokens_per_call`. Framing honesto (no "X millones ahorrados").
+    let (corpus_tokens, memory_count) = crate::shared_memory()
         .map(|m| {
             let contents = m.contents();
-            let dump_tok = contents
+            let tok = contents
                 .iter()
                 .map(|c| c.chars().count() as u64)
                 .sum::<u64>()
                 / 4;
-            (dump_tok, contents.len() as u64)
+            (tok, contents.len() as u64)
         })
         .unwrap_or((0, 0));
-    // Eficiencia media por llamada: cuánto ahorra servir bajo demanda vs. dump completo.
     let avg_per_call = if total > 0 {
         tokens_served / total as u64
     } else {
         0
     };
-    let savings_pct: u64 = if full_dump_tokens > 0 && avg_per_call < full_dump_tokens {
-        ((full_dump_tokens - avg_per_call) as f64 / full_dump_tokens as f64 * 100.0).round() as u64
-    } else {
-        0
-    };
-    // Tokens ahorrados acumulados (estimación): lo que se habría enviado de más
-    // en cada llamada × número de llamadas.
-    let total_savings_est = full_dump_tokens.saturating_sub(avg_per_call) * total as u64;
     // Stats del grafo de conocimiento.
     let g = crate::graph::KnowledgeGraph::open(crate::graph_path());
     let g_stats = g.stats();
@@ -7952,20 +7839,14 @@ async fn claude_code_stats() -> Json<serde_json::Value> {
         "by_tool": by_tool,
         "by_tool_tokens": by_tool_tokens,
         "tokens_served": tokens_served,
-        "tokens_served_translation": tokens_served_translation,
         "writes": writes,
         "errors": errors,
-        "full_dump_tokens": full_dump_tokens,
+        "corpus_tokens": corpus_tokens,
         "memory_count": memory_count,
         "avg_tokens_per_call": avg_per_call,
-        "savings_pct": savings_pct,
-        "total_savings_est": total_savings_est,
         "graph_concepts": graph_concepts,
         "graph_communities": graph_communities,
         "last_activity": last,
-        "tokens_saved_translation": tokens_saved_tr,
-        "translation_savings_pct": translation_savings_pct,
-        "by_tool_translation": by_tool_translation,
         "sessions": sessions_tail,
     }))
 }

@@ -535,7 +535,7 @@ export default function MindPage() {
               <Stat
                 value={cc?.total_calls ?? "—"}
                 label="llamadas Claude Code"
-                sub={cc?.savings_pct != null ? `${cc.savings_pct}% menos tokens` : undefined}
+                sub={cc?.avg_tokens_per_call != null ? `~${cc.avg_tokens_per_call} tok/consulta` : undefined}
               />
             </div>
           </Panel>

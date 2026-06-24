@@ -236,26 +236,14 @@ export type ClaudeCodeStats = {
   tokens_served: number;
   writes: number;
   errors?: number;
-  full_dump_tokens: number;
+  /** Tokens del corpus de memoria accesible bajo demanda (NO un "ahorro": es el contexto al
+   *  que Claude accede sin cargarlo entero; por consulta solo paga avg_tokens_per_call). */
+  corpus_tokens?: number;
   memory_count?: number;
   avg_tokens_per_call?: number;
-  savings_pct?: number;
-  total_savings_est?: number;
   graph_concepts?: number;
   graph_communities?: number;
   last_activity?: string | null;
-  // Ahorro de la traducción ES→EN del puente (distinto del ahorro del RAG de arriba).
-  tokens_saved_translation?: number;
-  /** Tokens servidos SOLO por las rutas de lectura que traducen (denominador honesto del bar). */
-  tokens_served_translation?: number;
-  translation_savings_pct?: number;
-  by_tool_translation?: Record<string, number>;
-  sessions?: {
-    started_at: string;
-    calls: number;
-    tokens_served: number;
-    tokens_saved: number;
-  }[];
 };
 export async function claudeCodeGet(): Promise<ClaudeCodeStatus> {
   try {
@@ -300,7 +288,6 @@ export type ProjectMemory = {
   last_activity?: string | null;
   calls: number;
   tokens_served: number;
-  tokens_saved: number;
 };
 export type MemoryProjects = {
   projects: ProjectMemory[];

@@ -246,13 +246,14 @@ const AION_MCP_TOOLS: [&str; 8] = [
 /// Permite detectar idempotencia y revertir sin tocar hooks de otras herramientas.
 const AION_HOOK_MARKER: &str = "/tmp/.aion_brief_";
 
-/// Comando del hook `UserPromptSubmit`. En el PRIMER prompt de CADA sesión (cualquier
-/// proyecto, rama o carpeta) inyecta un recordatorio para que Claude Code llame a `aion_brief`
-/// y cargue el contexto del proyecto — mecanismo DETERMINISTA que no depende del criterio del
-/// LLM. Portable: extrae `session_id` con `sed` (macOS NO trae `jq` de fábrica) y cae a
-/// `nosession` si no lo encuentra. El sentinel en `/tmp` evita repetir en cada mensaje de la
-/// misma sesión (coste cero a partir del 2º prompt).
-const AION_BRIEF_HOOK_CMD: &str = "SID=$(sed -n 's/.*\"session_id\"[^\"]*\"\\([^\"]*\\)\".*/\\1/p'); [ -z \"$SID\" ] && SID=nosession; S=\"/tmp/.aion_brief_$SID\"; if [ ! -f \"$S\" ]; then touch \"$S\"; printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"[AION] Primera vez en esta sesion: llama mcp__aion__aion_brief AHORA, antes de responder, para cargar el contexto del proyecto y ahorrar tokens. Usa tambien aion_memory_search antes de asumir contexto sobre el usuario o sus proyectos.\"}}'; fi";
+/// Comando del hook `UserPromptSubmit`. En el PRIMER prompt de CADA sesión (cualquier proyecto,
+/// rama o carpeta) inyecta un recordatorio CONDICIONAL: que Claude Code llame a `aion_brief` SOLO
+/// si la sesión trata del trabajo de Ariel (código, proyectos, decisiones, preferencias) y que lo
+/// OMITA en preguntas triviales o no relacionadas — así el brief (~450 tok) no se paga en sesiones
+/// que no usan la memoria de AION (gate del coste por sesión). Portable: extrae `session_id` con
+/// `sed` (macOS NO trae `jq`) y cae a `nosession`. El sentinel en `/tmp` evita repetir tras el 1er
+/// prompt (coste cero desde el 2º).
+const AION_BRIEF_HOOK_CMD: &str = "SID=$(sed -n 's/.*\"session_id\"[^\"]*\"\\([^\"]*\\)\".*/\\1/p'); [ -z \"$SID\" ] && SID=nosession; S=\"/tmp/.aion_brief_$SID\"; if [ ! -f \"$S\" ]; then touch \"$S\"; printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"[AION] Primera vez en esta sesion. SI trata sobre codigo, proyectos, decisiones o preferencias de Ariel, llama mcp__aion__aion_brief (y aion_memory_search antes de asumir contexto sobre el o sus proyectos). Si es trivial, generica o no relacionada con su trabajo, OMITELO para no gastar tokens.\"}}'; fi";
 
 /// ¿El grupo de hooks contiene el hook de AION? (busca el marcador en cualquier `command`).
 fn group_has_aion_hook(group: &serde_json::Value) -> bool {
@@ -315,7 +316,9 @@ fn apply_aion_settings(root: &mut serde_json::Value) -> Result<(), String> {
         }
     }
 
-    // (2) Hook UserPromptSubmit — solo si AION no lo instaló ya (idempotente por marcador).
+    // (2) Hook UserPromptSubmit — AUTO-SANA: quita cualquier hook de AION previo (por el marcador)
+    // y reinserta el actual, así una versión vieja del comando se actualiza sola en el próximo
+    // arranque. Idempotente (drop+readd del mismo) y preserva los hooks NO-AION del usuario.
     let ups_arr = obj
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}))
@@ -325,15 +328,14 @@ fn apply_aion_settings(root: &mut serde_json::Value) -> Result<(), String> {
         .or_insert_with(|| serde_json::json!([]))
         .as_array_mut()
         .ok_or_else(|| "hooks.UserPromptSubmit no es un array".to_string())?;
-    if !ups_arr.iter().any(group_has_aion_hook) {
-        ups_arr.push(serde_json::json!({
-            "hooks": [{
-                "type": "command",
-                "timeout": 5,
-                "command": AION_BRIEF_HOOK_CMD,
-            }]
-        }));
-    }
+    ups_arr.retain(|g| !group_has_aion_hook(g));
+    ups_arr.push(serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "timeout": 5,
+            "command": AION_BRIEF_HOOK_CMD,
+        }]
+    }));
     Ok(())
 }
 
