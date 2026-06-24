@@ -49,6 +49,7 @@ mod pending;
 mod permits;
 mod personality;
 mod plan;
+mod project_rag;
 mod projects;
 mod prompt_store;
 mod prompts;

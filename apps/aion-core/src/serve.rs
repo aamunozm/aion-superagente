@@ -2552,7 +2552,9 @@ async fn agent(
     // contexto del agente (grounding), para que razone fundamentado en el proyecto.
     let mut body = body;
     if let Some(pid) = body.project_id.clone() {
-        let g = crate::projects::grounding(&pid);
+        // RAG por proyecto: recupera los fragmentos de fuentes más relevantes A LA PREGUNTA
+        // (recuperación semántica, no el prefijo del documento), aislado por proyecto.
+        let g = crate::project_rag::grounding_for_query(&pid, &body.task).await;
         if !g.trim().is_empty() {
             body.context = Some(match body.context.take() {
                 Some(c) if !c.trim().is_empty() => format!("{g}\n\n{c}"),
@@ -6304,6 +6306,8 @@ async fn project_source_add(Json(b): Json<SrcAdd>) -> Json<serde_json::Value> {
         }
     }
     let s = crate::projects::add_source(&b.project_id, &title, &b.kind, &content);
+    // Re-indexa el RAG del proyecto en segundo plano (no bloquea la respuesta).
+    crate::project_rag::reindex_bg(&b.project_id);
     Json(serde_json::json!({ "ok": true, "source": s }))
 }
 
@@ -6347,6 +6351,7 @@ async fn project_source_upload(Json(b): Json<SrcUpload>) -> Json<serde_json::Val
     // Recorta para no inflar el grounding; el documento completo queda referenciado.
     let content: String = text.chars().take(40000).collect();
     let s = crate::projects::add_source(&b.project_id, &safe, "archivo", &content);
+    crate::project_rag::reindex_bg(&b.project_id);
     Json(serde_json::json!({ "ok": true, "source": s }))
 }
 
@@ -6368,6 +6373,7 @@ struct SrcRemove {
 }
 async fn project_source_remove(Json(b): Json<SrcRemove>) -> Json<serde_json::Value> {
     crate::projects::remove_source(&b.project_id, &b.id);
+    crate::project_rag::reindex_bg(&b.project_id);
     Json(serde_json::json!({ "ok": true }))
 }
 

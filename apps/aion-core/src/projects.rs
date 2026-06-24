@@ -77,6 +77,11 @@ fn sources_path(pid: &str) -> PathBuf {
 fn studio_path(pid: &str) -> PathBuf {
     base().join(pid).join("studio.json")
 }
+/// Carpeta de datos de un proyecto (respeta `AION_PROJECTS_DIR`). La usa el índice RAG por
+/// proyecto ([`crate::project_rag`]) para guardar su archivo aislado junto al resto del proyecto.
+pub fn project_dir(pid: &str) -> PathBuf {
+    base().join(pid)
+}
 
 fn read_vec<T: DeserializeOwned>(path: &PathBuf) -> Vec<T> {
     match std::fs::read_to_string(path) {
@@ -284,6 +289,19 @@ pub fn clear_chat(pid: &str) {
 /// Contexto de anclaje (grounding) del proyecto para el chat/agente: el objetivo
 /// más el texto de las fuentes ACTIVAS (recortado). Así el agente responde con
 /// foco en el material del proyecto, no en general.
+/// Cabecera del grounding: solo identidad del proyecto (nombre + objetivo), sin fuentes. La
+/// reutiliza el RAG por proyecto para anteponerla a los fragmentos recuperados.
+pub fn header(pid: &str) -> String {
+    let Some(p) = get(pid) else {
+        return String::new();
+    };
+    let mut s = format!("PROYECTO EN FOCO: «{}».", p.name);
+    if !p.desc.is_empty() {
+        s.push_str(&format!(" Objetivo: {}.", p.desc));
+    }
+    s
+}
+
 pub fn grounding(pid: &str) -> String {
     let Some(p) = get(pid) else {
         return String::new();
