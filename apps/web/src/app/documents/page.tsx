@@ -15,7 +15,7 @@ export default function DocumentsPage() {
         <div>
           <h1 className="font-display text-2xl font-bold" style={{ color: "var(--text-1)" }}>Documentos</h1>
           <p className="text-sm mt-1" style={{ color: "var(--text-3)" }}>
-            Elige o extrae un estilo, ajústalo, duplícalo o guárdalo, y genera ofertas con esa apariencia.
+            Elige o extrae un estilo, ajústalo, duplícalo o guárdalo, y genera documentos con esa apariencia.
           </p>
         </div>
         <DocStudio />

@@ -6,8 +6,6 @@ import {
   docStyleSave,
   docStyleRemove,
   docStyleExtract,
-  documentsOfferta,
-  offertaPreviewHtml,
   documentsGenerate,
   type DocStyleT,
   type StyleEntry,
@@ -65,30 +63,6 @@ export default function DocStudio() {
   const [palette, setPalette] = useState<string[]>([]);
   const [fonts, setFonts] = useState<string[]>([]);
   const [saveName, setSaveName] = useState("");
-
-  // Oferta — datos
-  const [client, setClient] = useState("");
-  const [subtitle, setSubtitle] = useState("Crescita digitale per la tua azienda");
-  const [heroKicker, setHeroKicker] = useState("La tua presenza online che lavora per te");
-  const [heroTitle, setHeroTitle] = useState("Più clienti, in automatico.");
-  const [heroPitch, setHeroPitch] = useState(
-    "Sito **trovato su Google**, app che **risponde subito** e dashboard dei risultati. Tutto gestito, a canone fisso.",
-  );
-  const [cardsText, setCardsText] = useState(
-    "Sito & SEO | Gestione e posizionamento ogni mese\nApp con AI | Risponde ai contatti in modo **naturale**\nDashboard | Risultati trasparenti, nero su bianco",
-  );
-  const [servicesText, setServicesText] = useState(
-    "Primo mese — tutto incluso | € 300,00 | \nDal secondo mese | € 200,00 | / mese",
-  );
-  const [recurring, setRecurring] = useState("€ 200,00 / mese");
-  const [benefitsText, setBenefitsText] = useState(
-    "Si ripaga da sola. | Basta un cliente in più al mese.\nZero vincoli. | Interrompi quando vuoi, senza penali.",
-  );
-  const [compareText, setCompareText] = useState(
-    "Persona dedicata | € 1.800+/mese | 95\nAgenzia tradizionale | € 800–1.500/mese | 60\nLa nostra offerta | € 200/mese | 14",
-  );
-  const [validity, setValidity] = useState(30);
-  const [deductible, setDeductible] = useState(true);
 
   // Documento simple (markdown → PDF/Word con el estilo elegido)
   const [simpleTitle, setSimpleTitle] = useState("Informe");
@@ -172,66 +146,6 @@ export default function DocStudio() {
     await docStyleRemove(name).catch(() => {});
     setBusy("");
     load();
-  }
-
-  function buildFacts() {
-    const split = (t: string) =>
-      t.split("\n").map((l) => l.split("|").map((x) => x.trim())).filter((p) => p[0]);
-    const services = split(servicesText).map((p) => ({ title: p[0], desc: "", price: p[1] ?? "", price_note: p[2] ?? "" }));
-    const highlights = split(cardsText).map((p) => ({ title: p[0], body: p[1] ?? "" }));
-    const benefits = split(benefitsText).map((p) => ({ lead: p[0], body: p[1] ?? "" }));
-    const cmp = split(compareText);
-    const comparison = cmp.map((p, i) => ({
-      label: p[0],
-      value: p[1] ?? "",
-      pct: Math.max(0, Math.min(100, parseInt(p[2] ?? "50", 10) || 50)),
-      tone: i === cmp.length - 1 ? "green" : i === 0 ? "red" : "gold",
-    }));
-    return {
-      kicker: "OFFERTA SERVIZI 2026",
-      subtitle,
-      client,
-      hero_kicker: heroKicker,
-      hero_title: heroTitle,
-      hero_pitch: heroPitch,
-      highlights,
-      services,
-      recurring_label: "Dal 2° mese (IVA esclusa)",
-      recurring_value: recurring,
-      benefits,
-      comparison,
-      validity_days: validity,
-      deductible,
-    };
-  }
-
-  async function generate(format: "pdf" | "html" | "docx") {
-    setBusy("gen");
-    setNote("");
-    try {
-      await documentsOfferta(buildFacts(), selected, format);
-      setNote(`✓ Oferta generada (${format.toUpperCase()}) con «${selected?.name ?? "estilo por defecto"}».`);
-    } catch (e) {
-      setNote(`⚠️ ${(e as Error).message}`);
-    }
-    setBusy("");
-  }
-
-  async function preview() {
-    setBusy("preview");
-    setNote("");
-    try {
-      const html = await offertaPreviewHtml(buildFacts(), selected);
-      const w = window.open("", "_blank");
-      if (w) {
-        w.document.open();
-        w.document.write(html);
-        w.document.close();
-      }
-    } catch (e) {
-      setNote(`⚠️ ${(e as Error).message}`);
-    }
-    setBusy("");
   }
 
   async function generateSimple(format: "pdf" | "docx") {
@@ -327,34 +241,6 @@ export default function DocStudio() {
           </div>
         </section>
       )}
-
-      {/* ── Generar oferta ── */}
-      <section className="card">
-        <h2 className="t-section mb-3" style={{ color: "var(--text-2)" }}>Generar oferta</h2>
-        <div className="grid sm:grid-cols-2 gap-3">
-          <Field label="Cliente"><input className="input" value={client} onChange={(e) => setClient(e.target.value)} placeholder="Avv. Lisa Armenio" /></Field>
-          <Field label="Subtítulo"><input className="input" value={subtitle} onChange={(e) => setSubtitle(e.target.value)} /></Field>
-          <Field label="Kicker (hero)"><input className="input" value={heroKicker} onChange={(e) => setHeroKicker(e.target.value)} /></Field>
-          <Field label="Titular (hero)"><input className="input" value={heroTitle} onChange={(e) => setHeroTitle(e.target.value)} /></Field>
-          <div className="sm:col-span-2"><Field label="Frase de valor (admite **negrita**)"><input className="input" value={heroPitch} onChange={(e) => setHeroPitch(e.target.value)} /></Field></div>
-          <div className="sm:col-span-2"><Field label="Tarjetas «qué incluimos» — Título | descripción"><textarea className="input font-mono text-xs" rows={3} value={cardsText} onChange={(e) => setCardsText(e.target.value)} /></Field></div>
-          <div className="sm:col-span-2"><Field label="Servicios — Título | precio | nota"><textarea className="input font-mono text-xs" rows={2} value={servicesText} onChange={(e) => setServicesText(e.target.value)} /></Field></div>
-          <Field label="Canone recurrente"><input className="input" value={recurring} onChange={(e) => setRecurring(e.target.value)} /></Field>
-          <Field label="Validez (días)"><input className="input" type="number" value={validity} onChange={(e) => setValidity(Number(e.target.value))} /></Field>
-          <div className="sm:col-span-2"><Field label="Propuestas de valor — Lead | texto"><textarea className="input font-mono text-xs" rows={2} value={benefitsText} onChange={(e) => setBenefitsText(e.target.value)} /></Field></div>
-          <div className="sm:col-span-2"><Field label="Comparativa — Etiqueta | valor | % (0–100, el último = verde)"><textarea className="input font-mono text-xs" rows={3} value={compareText} onChange={(e) => setCompareText(e.target.value)} /></Field></div>
-          <label className="text-xs flex items-center gap-2" style={{ color: "var(--text-2)" }}>
-            <input type="checkbox" checked={deductible} onChange={(e) => setDeductible(e.target.checked)} />
-            Coste deducible (franja + callout)
-          </label>
-        </div>
-        <div className="flex gap-2 mt-4 items-center flex-wrap">
-          <button className="btn btn-gold" disabled={busy === "gen"} onClick={() => generate("pdf")}>{busy === "gen" ? "Generando…" : "⬇︎ Generar PDF"}</button>
-          <button className="btn btn-ghost text-xs" disabled={busy === "gen"} onClick={() => generate("docx")}>⬇︎ Word</button>
-          <button className="btn btn-ghost text-xs" disabled={busy === "preview"} onClick={preview}>{busy === "preview" ? "…" : "👁 Vista previa"}</button>
-          <button className="btn btn-ghost text-xs" disabled={busy === "gen"} onClick={() => generate("html")}>HTML</button>
-        </div>
-      </section>
 
       {/* ── Documento simple (markdown + estilo) ── */}
       <section className="card">
