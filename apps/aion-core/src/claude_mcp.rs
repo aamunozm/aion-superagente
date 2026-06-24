@@ -314,6 +314,10 @@ pub async fn mcp_post(headers: HeaderMap, Json(req): Json<Value>) -> Response {
             let result = call_tool(name, &args).await;
             match result {
                 Ok(text) => {
+                    // REDACCIÓN DE EGRESO: Claude Code es REMOTO (Anthropic). Antes de servir,
+                    // se redactan secretos/PII (IBAN, tarjetas, claves, contraseñas) de forma
+                    // determinista. Cow::Borrowed si no hay nada → cero copia.
+                    let text = crate::redact::redact_secrets(&text).into_owned();
                     audit(name, &summary, text.chars().count(), true, &project);
                     rpc_result(
                         id,
@@ -350,6 +354,7 @@ pub async fn mcp_post(headers: HeaderMap, Json(req): Json<Value>) -> Response {
                 return rpc_error(id, -32002, "Recurso desconocido").into_response();
             }
             let brief = crate::claude_code::build_brief().await;
+            let brief = crate::redact::redact_secrets(&brief).into_owned(); // egreso remoto
             rpc_result(
                 id,
                 json!({ "contents": [{ "uri": uri, "mimeType": "text/plain", "text": brief }] }),
@@ -544,7 +549,15 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 return Ok("Sin recuerdos relevantes para esa consulta.".into());
             }
             let cutoff = (best * 0.75).max(0.28);
-            let useful: Vec<_> = hits.into_iter().filter(|h| h.score >= cutoff).collect();
+            // DENY DURO de confidencialidad: los recuerdos marcados `[confidencial]` NUNCA salen al
+            // puente (Claude Code es remoto), pase lo que pase con su relevancia.
+            let useful: Vec<_> = hits
+                .into_iter()
+                .filter(|h| h.score >= cutoff && !crate::redact::is_confidential(&h.content))
+                .collect();
+            if useful.is_empty() {
+                return Ok("Sin recuerdos relevantes para esa consulta.".into());
+            }
             // OPTIMIZACIÓN DE TOKENS DEL PUENTE: Claude Code paga por token, así que se
             // sirve la versión inglesa cacheada (≈14-40% menos tokens, medido) cuando existe;
             // en miss se sirve el español original y se calienta la caché en segundo plano.
@@ -819,8 +832,10 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             let now = chrono::Utc::now().timestamp();
             let mut out = String::new();
             for h in hits {
-                // ES/IT→EN para el puente (fail-open a original; se calienta en 2º plano).
-                // Igual que memory_search: corte de 300 chars, ruta calentada por el warmer.
+                // DENY DURO: un micromomento confidencial nunca sale al puente remoto.
+                if crate::redact::is_confidential(&h.detail) {
+                    continue;
+                }
                 let detail = crate::mcp_compact::compact_dense(h.detail.trim(), 300);
                 out.push_str(&format!(
                     "- hace {} (relevancia {:.2}): {}\n",

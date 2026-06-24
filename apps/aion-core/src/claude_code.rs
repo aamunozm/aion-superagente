@@ -414,6 +414,11 @@ pub async fn build_brief() -> String {
         const MAX_SELF_REFLECTION: usize = 2;
         let mut self_reflections = 0usize;
         for (content, ts) in recent.into_iter().rev() {
+            // DENY DURO de confidencialidad: un recuerdo `[confidencial]` JAMÁS entra al brief
+            // (que va al puente remoto). Va antes que cualquier otro filtro.
+            if crate::redact::is_confidential(&content) {
+                continue;
+            }
             // Fuera el eco conversacional y las deudas ya resueltas: son turnos de charla
             // efímera cuyos HECHOS ya viven como [hecho]/[proyecto] aparte. No pagan su sitio
             // en el brief (que es coste por sesión). El recuerdo sigue en memoria y buscable.

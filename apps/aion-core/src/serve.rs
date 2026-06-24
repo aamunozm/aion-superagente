@@ -61,14 +61,17 @@ fn active_engine() -> Arc<dyn LlmEngine> {
     build_engine(&crate::provider::load())
 }
 
-/// Construye el motor LLM a partir de la configuración del proveedor.
+/// Construye el motor LLM a partir de la configuración del proveedor. Si es un proveedor EXTERNO
+/// (de pago/red, p. ej. DeepSeek), se envuelve en `RedactingEngine`: redacta secretos/PII de TODO
+/// mensaje antes de que salga del Mac → privacidad máxima aunque uses un LLM externo. El motor
+/// LOCAL (Ollama/Gemma) NO se envuelve (privado y gratis; usa la memoria íntegra).
 fn build_engine(cfg: &crate::provider::ProviderConfig) -> Arc<dyn LlmEngine> {
     if cfg.kind == "external" && !cfg.api_key.is_empty() && !cfg.base_url.is_empty() {
-        Arc::new(aion_llm::OpenAiEngine::new(
+        crate::redact::RedactingEngine::wrap(Arc::new(aion_llm::OpenAiEngine::new(
             &cfg.base_url,
             &cfg.api_key,
             &cfg.model,
-        ))
+        )))
     } else {
         Arc::new(OllamaEngine::new(
             OllamaEngine::base_url_from_env(),

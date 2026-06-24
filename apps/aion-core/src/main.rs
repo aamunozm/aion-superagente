@@ -53,6 +53,7 @@ mod projects;
 mod prompt_store;
 mod prompts;
 mod provider;
+mod redact;
 mod reflection;
 mod research_memory;
 mod self_model;

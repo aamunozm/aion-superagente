@@ -275,6 +275,46 @@ function MemoryByProject() {
   );
 }
 
+/** Panel informativo de PRIVACIDAD: explica el blindaje de secretos/datos confidenciales,
+ *  incluido el caso de usar un LLM externo de pago. Honesto sobre los límites. */
+function PrivacyPanel() {
+  return (
+    <div className="card" style={{ border: "1px solid var(--border)" }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span style={{ fontSize: 16 }}>🔒</span>
+        <h2 className="t-section" style={{ color: "var(--text-2)" }}>Privacidad y datos confidenciales</h2>
+      </div>
+      <p className="text-sm leading-relaxed mb-3" style={{ color: "var(--text-2)" }}>
+        AION es <b>local</b> (Gemma on-device, privado). Claude Code y cualquier LLM externo son
+        <b> remotos</b>. Antes de que CUALQUIER texto salga del Mac hacia un modelo remoto, AION
+        <b> redacta secretos automáticamente</b> — de forma determinista, local y sin latencia.
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mb-3">
+        {[
+          { t: "Redacción de egreso", d: "IBAN, tarjetas (Luhn), claves de API (sk-/ghp_/AKIA/JWT…) y contraseñas → [IBAN] · [TARJETA] · [CLAVE]. Validado con checksums para no sobre-redactar." },
+          { t: "Marca [confidencial]", d: "Cualquier recuerdo marcado [confidencial] NUNCA se sirve al puente ni a un LLM externo (deny duro), da igual su relevancia." },
+          { t: "LLM externo de pago", d: "Si activas un proveedor externo (DeepSeek, etc.), la MISMA redacción corre antes de que el texto salga del Mac → privacidad máxima también ahí." },
+          { t: "Solo en egresos remotos", d: "El Gemma local recibe la memoria íntegra (privado y gratis). La redacción solo actúa hacia modelos remotos." },
+        ].map((b) => (
+          <div key={b.t} className="rounded-lg p-3" style={{ background: "var(--surface-1)" }}>
+            <div className="text-sm font-medium mb-0.5" style={{ color: "var(--accent)" }}>{b.t}</div>
+            <div className="text-xs leading-relaxed" style={{ color: "var(--text-3)" }}>{b.d}</div>
+          </div>
+        ))}
+      </div>
+      <div className="rounded-lg p-3 text-xs leading-relaxed" style={{ background: "var(--surface-1)", color: "var(--text-3)", borderLeft: "3px solid #f59e0b" }}>
+        <b style={{ color: "var(--text-2)" }}>Límites honestos.</b> La redacción protege el canal de la
+        memoria de AION. NO cubre lo que escribes <b>directamente</b> en Claude Code ni los archivos
+        que Claude lee del repo — eso sale igual. Para máxima privacidad real con datos bancarios:
+        (1) márcalos <code className="font-mono">[confidencial]</code> o guárdalos fuera del chat,
+        (2) usa cuenta <b>Commercial/API o Enterprise</b> de Anthropic (no entrena con tus datos +
+        retención cero), evitando cuentas Consumer (Free/Pro/Max) que por defecto entrenan salvo
+        opt-out. <i>Próximo paso: bóveda local cifrada para claves estructuradas.</i>
+      </div>
+    </div>
+  );
+}
+
 export default function ClaudeCodePage() {
   const { t } = useT();
   const [cc, setCc] = useState<ClaudeCodeStatus | null>(null);
@@ -475,6 +515,9 @@ export default function ClaudeCodePage() {
                 </div>
               </div>
             </div>
+
+            {/* ── Privacidad y datos confidenciales ── */}
+            <PrivacyPanel />
 
             {/* ── Métricas en grid 3×2 ── */}
             <div className="grid grid-cols-3 gap-3">
