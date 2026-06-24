@@ -7215,16 +7215,51 @@ fn first_json_object(s: &str) -> Option<String> {
 /// con UNA llamada enfocada (JSON, temp 0) y renderizamos de verdad con la skill `offerta`.
 /// Devuelve el mensaje con la RUTA real, o `None` si no hay una oferta con servicios → sigue ReAct.
 async fn try_offerta_to_doc(engine: &dyn LlmEngine, body: &AgentBody) -> Option<String> {
-    let source = format!("{}\n\n{}", body.context.as_deref().unwrap_or(""), body.task);
-    let source: String = source.chars().take(6000).collect();
+    // MATERIAL DEL PROYECTO (lo que faltaba): instrucciones de Ariel (notas) + contenido COMPLETO
+    // de las fuentes ACTIVAS. Así el agente usa los DATOS y la PLANTILLA reales de las fuentes y
+    // OBEDECE las instrucciones, en vez de inventar la oferta desde la conversación.
+    let mut project_block = String::new();
+    if let Some(pid) = body.project_id.as_deref() {
+        let notes = crate::projects::source_notes_block(pid);
+        if !notes.trim().is_empty() {
+            project_block.push_str(&notes);
+        }
+        for s in crate::projects::sources(pid)
+            .into_iter()
+            .filter(|s| s.active)
+        {
+            if s.content.trim().is_empty() {
+                continue;
+            }
+            let body_txt: String = s.content.chars().take(3000).collect();
+            project_block.push_str(&format!(
+                "\n[FUENTE «{}» ({})]:\n{}\n",
+                s.title, s.kind, body_txt
+            ));
+        }
+    }
+    let convo = body.context.as_deref().unwrap_or("");
+    // El PROYECTO va primero (no se trunca): sus datos y plantilla mandan sobre la charla.
+    let material = format!(
+        "{project_block}\n\n=== CONVERSACIÓN RECIENTE ===\n{convo}\n\n=== PETICIÓN ===\n{}",
+        body.task
+    );
+    let material: String = material.chars().take(12000).collect();
     let prompt = format!(
-        "Extrae la OFERTA comercial del siguiente material y devuélvela como JSON VÁLIDO y NADA \
-         más (sin texto antes ni después, sin ```), con esta forma EXACTA:\n\
+        "Preparas una OFERTA comercial. Extrae la oferta del MATERIAL y devuélvela como JSON VÁLIDO \
+         y NADA más (sin texto antes/después, sin ```), forma EXACTA:\n\
          {{\"cliente\":\"\",\"titolo\":\"\",\"pitch\":\"\",\"servizi\":[{{\"titolo\":\"\",\"prezzo\":\"\",\"nota\":\"\"}}],\
 \"canone\":\"\",\"comparativa\":[{{\"etichetta\":\"\",\"valore\":\"\"}}],\"deducibile\":true}}\n\
-         REGLAS: usa SOLO datos PRESENTES en el material; NO inventes servicios ni precios; si un \
-         campo no aparece, déjalo vacío o la lista vacía. Si NO hay una oferta con AL MENOS un \
-         servicio con su precio, devuelve exactamente {{}}.\n\nMATERIAL:\n«««\n{source}\n»»»"
+         REGLAS (en este orden de prioridad):\n\
+         1. Las INSTRUCCIONES DE ARIEL (notas de las fuentes) son ÓRDENES: cúmplelas. Si una nota \
+         dice usar los datos de NUESTRA empresa o tomar una oferta/plantilla, HAZLO.\n\
+         2. Usa los SERVICIOS, PRECIOS y COMPARATIVA de las FUENTES (la oferta/plantilla del proyecto \
+         es la base); replica su estructura.\n\
+         3. El CLIENTE es el que indiquen las notas/fuentes (p. ej. la fuente marcada «nuestro \
+         cliente»), SALVO que la conversación pida explícitamente otro cliente distinto.\n\
+         4. Usa SOLO datos PRESENTES; NO inventes servicios ni precios. Si no hay una oferta con al \
+         menos un servicio con su precio, devuelve exactamente {{}}.\n\
+         \nMATERIAL:\n«««\n{material}\n»»»"
     );
     let gen = tokio::time::timeout(
         std::time::Duration::from_secs(45),
