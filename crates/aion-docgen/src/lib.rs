@@ -26,8 +26,8 @@ mod template;
 pub use aion_browser::PdfOptions;
 pub use brand::BrandProfile;
 pub use offerta::{
-    build_offerta, render_offerta_html, render_offerta_pdf, Benefit, Card, CompareBar, Condition,
-    OfferRow, OffertaContent, OffertaFacts,
+    build_offerta, render_offerta_docx, render_offerta_html, render_offerta_pdf, Benefit, Card,
+    CompareBar, Condition, OfferRow, OffertaContent, OffertaFacts,
 };
 pub use style::{presets as style_presets, DocStyle};
 pub use style_extract::{extract_style, Extracted};

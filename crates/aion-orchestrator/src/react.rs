@@ -271,7 +271,10 @@ primer paso; NUNCA respondas 'no se ha proporcionado información' sobre ti mism
              informe», «en PDF», «en Word/Pages»): usa SIEMPRE make_document con «Título ::: \
              contenido completo ::: formato» (formato: txt, md, rtf, docx para Word/Pages, o pdf; \
              por defecto txt). TÚ redactas todo el contenido. Para una NOTA en la app Notas usa \
-             make_note «Título ::: contenido». Son robustos y NO necesitan ver la pantalla ni \
+             make_note «Título ::: contenido». Para una OFERTA o propuesta comercial a un cliente \
+             usa generate_offerta (genera un PDF RICO: hero, tabla de precios, comparativa y firma; \
+             entrada «clave: valor», ver su descripción). Para un documento PROFESIONAL con tu marca \
+             en PDF/Word usa generate_document. Son robustos y NO necesitan ver la pantalla ni \
              teclear. NUNCA uses screen_see/screen_elements/pc_type para redactar un documento o nota.\n\
              • PREGUNTAR AL USUARIO: si te falta un dato que SOLO el usuario tiene (qué app o \
              ventana, qué archivo, una preferencia, una aclaración), NO uses herramientas para \

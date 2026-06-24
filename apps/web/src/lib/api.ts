@@ -657,7 +657,7 @@ export const docStyleExtract = (content_b64: string, kind: string, name: string)
 export async function documentsOfferta(
   facts: Record<string, unknown>,
   style: DocStyleT | null,
-  format: "pdf" | "html" = "pdf",
+  format: "pdf" | "html" | "docx" = "pdf",
 ): Promise<void> {
   const res = await fetch(`${BRIDGE_URL}/api/documents/offerta`, {
     method: "POST",
@@ -690,6 +690,7 @@ export async function documentsGenerate(req: {
   subtitle?: string;
   number?: string;
   client?: { name: string; company?: string; email?: string; address?: string };
+  style?: DocStyleT | null;
 }): Promise<void> {
   const res = await fetch(`${BRIDGE_URL}/api/documents/generate`, {
     method: "POST",

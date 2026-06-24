@@ -2893,6 +2893,7 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::PcKeyTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::GenerateDocumentTool::new()));
+        tools.register(Arc::new(crate::agent_tools::GenerateOffertaTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
         // 📘 SkillBook (Hermes): memoria PROCEDIMENTAL — cómo hacer cosas que ya funcionaron.
@@ -3368,6 +3369,7 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::PcKeyTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::GenerateDocumentTool::new()));
+        tools.register(Arc::new(crate::agent_tools::GenerateOffertaTool::new()));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
         // 💬 COMUNICACIONES en modo autónomo: SOLO lectura (agenda y contactos) para que el
@@ -6531,6 +6533,9 @@ struct DocGenReq {
     lang: Option<String>,
     #[serde(default)]
     client: Option<DocClient>,
+    /// Estilo elegido en la galería: tiñe el documento (colores ink/accent de la marca).
+    #[serde(default)]
+    style: Option<aion_docgen::DocStyle>,
 }
 fn doc_tmpl_base() -> String {
     "base".into()
@@ -6827,6 +6832,26 @@ async fn documents_offerta(Json(b): Json<OffertaGen>) -> axum::response::Respons
             Err(e) => doc_error(e),
         };
     }
+    if b.format.eq_ignore_ascii_case("docx") {
+        return match aion_docgen::render_offerta_docx(&brand, &content) {
+            Ok(bytes) => (
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            .to_string(),
+                    ),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{title}.docx\""),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response(),
+            Err(e) => doc_error(e),
+        };
+    }
     match aion_docgen::render_offerta_pdf(
         &brand,
         &style,
@@ -6859,6 +6884,11 @@ async fn documents_generate(Json(b): Json<DocGenReq>) -> axum::response::Respons
     let mut brand = aion_docgen::BrandProfile::load(crate::agent_tools::brand_profile_path());
     if let Some(l) = b.lang.as_deref().filter(|s| !s.is_empty()) {
         brand.lang = l.to_string();
+    }
+    // Estilo de la galería: aplica su paleta al documento simple (ink/accent de la marca).
+    if let Some(st) = &b.style {
+        brand.ink = st.ink.clone();
+        brand.accent = st.accent.clone();
     }
     let date = b
         .date

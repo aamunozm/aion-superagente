@@ -1482,6 +1482,143 @@ impl Tool for GenerateDocumentTool {
     }
 }
 
+/// **Generador de OFERTAS comerciales ricas** (skill `offerta`): hero, tarjetas, tabla de
+/// precios, gráfico comparativo, beneficios y firma — nivel agencia, con el estilo elegido.
+pub struct GenerateOffertaTool;
+impl GenerateOffertaTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for GenerateOffertaTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[async_trait]
+impl Tool for GenerateOffertaTool {
+    fn name(&self) -> &str {
+        "generate_offerta"
+    }
+    fn description(&self) -> &str {
+        "Crea una OFERTA/propuesta comercial RICA en PDF (estilo agencia: hero, tarjetas, tabla \
+         de precios, comparativa de costes, beneficios, firma) y la abre. Úsala para «hazme una \
+         oferta/propuesta para [cliente]». Entrada: una línea por dato, formato «clave: valor». \
+         Claves simples: cliente, titular, pitch, subtitulo, canone (precio recurrente), estilo \
+         (Slate · oro | Plasma · teal | Editoriale · serif | Notte · bold). Claves REPETIBLES: \
+         servizio: Título | precio | nota · valore: Lead | texto · tarjeta: Título | descripción \
+         · comparativa: Etiqueta | valor | porcentaje. TÚ redactas los datos. Requiere Chrome."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let mut f = aion_docgen::OffertaFacts {
+            deductible: true,
+            validity_days: 30,
+            ..Default::default()
+        };
+        let mut style_name = String::new();
+        for line in input.lines() {
+            let Some((k, v)) = line.trim().split_once(':') else {
+                continue;
+            };
+            let key = k.trim().to_lowercase();
+            let val = v.trim().to_string();
+            let parts: Vec<String> = val.split('|').map(|x| x.trim().to_string()).collect();
+            let p = |i: usize| parts.get(i).cloned().unwrap_or_default();
+            match key.as_str() {
+                "cliente" | "client" => f.client = val,
+                "titular" | "titolo" | "hero" => f.hero_title = val,
+                "pitch" | "frase" => f.hero_pitch = val,
+                "subtitulo" | "subtítulo" | "subtitle" => f.subtitle = val,
+                "kicker" => f.hero_kicker = val,
+                "estilo" | "style" | "stile" => style_name = val,
+                "canone" | "recurrente" | "mensual" => {
+                    f.recurring_value = val;
+                    f.recurring_label = "Dal 2° mese (IVA esclusa)".into();
+                }
+                "servizio" | "servicio" | "service" => f.services.push(aion_docgen::OfferRow {
+                    title: p(0),
+                    desc: String::new(),
+                    price: p(1),
+                    price_note: p(2),
+                }),
+                "valore" | "valor" | "beneficio" => f.benefits.push(aion_docgen::Benefit {
+                    lead: p(0),
+                    body: p(1),
+                }),
+                "tarjeta" | "card" | "scheda" => f.highlights.push(aion_docgen::Card {
+                    title: p(0),
+                    body: p(1),
+                }),
+                "comparativa" | "confronto" => f.comparison.push(aion_docgen::CompareBar {
+                    label: p(0),
+                    value: p(1),
+                    pct: p(2).parse().unwrap_or(50),
+                    tone: p(3),
+                }),
+                _ => {}
+            }
+        }
+        if f.client.is_empty() && f.services.is_empty() {
+            return Err("necesito al menos «cliente:» y un «servizio: Título | precio» (ver formato en la descripción)".into());
+        }
+        // Tono automático para barras sin tono: la más cara roja, la más barata (última) verde.
+        let n = f.comparison.len();
+        for (i, b) in f.comparison.iter_mut().enumerate() {
+            if b.tone.is_empty() {
+                b.tone = if i + 1 == n {
+                    "green".into()
+                } else if i == 0 {
+                    "red".into()
+                } else {
+                    "gold".into()
+                };
+            }
+        }
+        let brand = aion_docgen::BrandProfile::load(brand_profile_path());
+        let style = aion_docgen::style::by_name(&style_name).unwrap_or_default();
+        let content = aion_docgen::build_offerta(&f);
+        let bytes = aion_docgen::render_offerta_pdf(
+            &brand,
+            &style,
+            &content,
+            &aion_docgen::PdfOptions::default(),
+        )
+        .await?;
+        let home =
+            std::env::var("HOME").map_err(|_| "no encuentro tu carpeta de usuario".to_string())?;
+        let who: String = f
+            .client
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let who = who.trim().trim_matches('_').trim();
+        let name = if who.is_empty() {
+            "Offerta".to_string()
+        } else {
+            format!("Offerta {}", who.chars().take(50).collect::<String>())
+        };
+        let path = std::path::Path::new(&home)
+            .join("Desktop")
+            .join(format!("{name}.pdf"));
+        std::fs::write(&path, &bytes).map_err(|e| format!("no pude escribir la oferta: {e}"))?;
+        open_file(&path, false);
+        Ok(format!(
+            "oferta creada y abierta en el Escritorio (estilo {}): {}",
+            style.name,
+            path.display()
+        ))
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Creation
+    }
+}
+
 /// **Terminal real**: ejecuta un comando de shell y devuelve su salida. Es la forma
 /// ROBUSTA de "control del terminal" (no puppetea Terminal.app ni necesita permisos
 /// de Accesibilidad/Pantalla). Cada comando pasa por confirmación HITL (fail-closed).

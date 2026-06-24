@@ -321,6 +321,89 @@ pub async fn render_offerta_pdf(
         .map_err(|e| e.to_string())
 }
 
+/// Aplana una oferta a Markdown (versión EDITABLE; pierde el layout visual rico pero conserva
+/// todo el contenido). Base para el DOCX.
+fn offerta_to_markdown(o: &OffertaContent) -> String {
+    let mut m = String::new();
+    let title = if o.hero_title.trim().is_empty() {
+        o.doc_kicker.as_str()
+    } else {
+        o.hero_title.as_str()
+    };
+    m.push_str(&format!("# {}\n\n", title.replace('\n', " ")));
+    if !o.doc_subtitle.is_empty() {
+        m.push_str(&format!("*{}*\n\n", o.doc_subtitle));
+    }
+    if !o.attn_to.is_empty() {
+        m.push_str(&format!("{} {}\n\n", o.attn_label, o.attn_to));
+    }
+    if !o.hero_body.is_empty() {
+        m.push_str(&format!("{}\n\n", o.hero_body));
+    }
+    if !o.intro.is_empty() {
+        m.push_str(&format!("{}\n\n", o.intro));
+    }
+    if !o.cards.is_empty() {
+        if !o.cards_title.is_empty() {
+            m.push_str(&format!("## {}\n\n", o.cards_title));
+        }
+        for c in &o.cards {
+            m.push_str(&format!("- **{}**: {}\n", c.title, c.body));
+        }
+        m.push('\n');
+    }
+    if !o.offer_rows.is_empty() {
+        if !o.offer_title.is_empty() {
+            m.push_str(&format!("## {}\n\n", o.offer_title));
+        }
+        m.push_str("| Servizio | Importo |\n|---|---|\n");
+        for r in &o.offer_rows {
+            m.push_str(&format!("| {} | {} {} |\n", r.title, r.price, r.price_note));
+        }
+        m.push('\n');
+        if !o.offer_total_value.is_empty() {
+            m.push_str(&format!(
+                "**{}: {}**\n\n",
+                o.offer_total_label, o.offer_total_value
+            ));
+        }
+    }
+    if !o.benefits.is_empty() {
+        if !o.benefits_title.is_empty() {
+            m.push_str(&format!("## {}\n\n", o.benefits_title));
+        }
+        for b in &o.benefits {
+            m.push_str(&format!("- **{}** {}\n", b.lead, b.body));
+        }
+        m.push('\n');
+    }
+    if !o.conditions.is_empty() {
+        if !o.conditions_title.is_empty() {
+            m.push_str(&format!("## {}\n\n", o.conditions_title));
+        }
+        for c in &o.conditions {
+            m.push_str(&format!("- **{}:** {}\n", c.label, c.body));
+        }
+        m.push('\n');
+    }
+    m
+}
+
+/// Renderiza la oferta a **DOCX** editable (Word/Pages). Versión estructurada y simplificada
+/// del contenido (no el layout visual rico del PDF, pero editable).
+pub fn render_offerta_docx(
+    brand: &BrandProfile,
+    content: &OffertaContent,
+) -> Result<Vec<u8>, String> {
+    let md = offerta_to_markdown(content);
+    let title = if content.hero_title.trim().is_empty() {
+        content.doc_kicker.clone()
+    } else {
+        content.hero_title.replace('\n', " ")
+    };
+    crate::docx::render(&title, &brand.company, &brand.accent, &md)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

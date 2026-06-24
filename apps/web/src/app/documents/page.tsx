@@ -9,6 +9,7 @@ import {
   docStyleExtract,
   documentsOfferta,
   offertaPreviewHtml,
+  documentsGenerate,
   type DocStyleT,
   type StyleEntry,
 } from "@/lib/api";
@@ -84,6 +85,10 @@ export default function DocumentsPage() {
   );
   const [validity, setValidity] = useState(30);
   const [deductible, setDeductible] = useState(true);
+
+  // Documento simple (markdown → PDF/Word con el estilo elegido)
+  const [simpleTitle, setSimpleTitle] = useState("Informe");
+  const [simpleMd, setSimpleMd] = useState("## Introducción\n\nEscribe aquí tu **documento** en Markdown. Usa tablas, listas y negritas.\n\n## Conclusión\n\n…");
 
   const load = useCallback(() => {
     docStylesList()
@@ -178,7 +183,7 @@ export default function DocumentsPage() {
     };
   }
 
-  async function generate(format: "pdf" | "html") {
+  async function generate(format: "pdf" | "html" | "docx") {
     setBusy("gen");
     setNote("");
     try {
@@ -201,6 +206,18 @@ export default function DocumentsPage() {
         w.document.write(html);
         w.document.close();
       }
+    } catch (e) {
+      setNote(`⚠️ ${(e as Error).message}`);
+    }
+    setBusy("");
+  }
+
+  async function generateSimple(format: "pdf" | "docx") {
+    setBusy("simple");
+    setNote("");
+    try {
+      await documentsGenerate({ title: simpleTitle, markdown: simpleMd, format, template: "base", style: selected });
+      setNote(`✓ Documento «${simpleTitle}» generado (${format.toUpperCase()}) con «${selected?.name ?? "estilo por defecto"}».`);
     } catch (e) {
       setNote(`⚠️ ${(e as Error).message}`);
     }
@@ -318,8 +335,30 @@ export default function DocumentsPage() {
           </div>
           <div className="flex gap-2 mt-4 items-center">
             <button className="btn btn-gold" disabled={busy === "gen"} onClick={() => generate("pdf")}>{busy === "gen" ? "Generando…" : "⬇︎ Generar PDF"}</button>
+            <button className="btn btn-ghost text-xs" disabled={busy === "gen"} onClick={() => generate("docx")}>⬇︎ Word</button>
             <button className="btn btn-ghost text-xs" disabled={busy === "preview"} onClick={preview}>{busy === "preview" ? "…" : "👁 Vista previa"}</button>
             <button className="btn btn-ghost text-xs" disabled={busy === "gen"} onClick={() => generate("html")}>HTML</button>
+          </div>
+        </section>
+
+        {/* ── Documento simple (markdown + estilo) ── */}
+        <section className="card">
+          <h2 className="t-section mb-3" style={{ color: "var(--text-2)" }}>
+            Documento simple (Markdown → PDF/Word con el estilo elegido)
+          </h2>
+          <div className="flex flex-col gap-3">
+            <Field label="Título">
+              <input className="input" value={simpleTitle} onChange={(e) => setSimpleTitle(e.target.value)} />
+            </Field>
+            <Field label="Contenido (Markdown: ## títulos, **negrita**, tablas, listas)">
+              <textarea className="input font-mono text-xs" rows={6} value={simpleMd} onChange={(e) => setSimpleMd(e.target.value)} />
+            </Field>
+            <div className="flex gap-2">
+              <button className="btn btn-gold" disabled={busy === "simple"} onClick={() => generateSimple("pdf")}>
+                {busy === "simple" ? "Generando…" : "⬇︎ PDF"}
+              </button>
+              <button className="btn btn-ghost text-xs" disabled={busy === "simple"} onClick={() => generateSimple("docx")}>⬇︎ Word</button>
+            </div>
           </div>
         </section>
       </div>
