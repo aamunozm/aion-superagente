@@ -42,7 +42,10 @@ if command -v swiftc >/dev/null 2>&1; then
       -framework AVFoundation -framework Vision -framework CoreImage \
       -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$FP/Info.plist"
   done
-  echo "   face-probe: arm64 + x86_64 listos"
+  # El bundle universal resuelve el externalBin al sufijo -universal-apple-darwin (lipo'd),
+  # igual que los sidecars aion-core/control-plane.
+  lipo -create "$DEST/face-probe-$ARM" "$DEST/face-probe-$X86" -output "$DEST/face-probe-$UNI"
+  echo "   face-probe: $(lipo -archs "$DEST/face-probe-$UNI")"
 else
   echo "==> AVISO: swiftc no disponible; face-probe NO se compila (la cara quedará inactiva)"
 fi
