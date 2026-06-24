@@ -40,6 +40,11 @@ pub struct Source {
     /// grounding del agente, aparte del contenido recuperado.
     #[serde(default)]
     pub note: String,
+    /// Ruta de ORIGEN en disco si la fuente proviene de una **carpeta enlazada** (espejo). Vacío
+    /// si es manual. Permite sincronizar: al re-leer la carpeta, las fuentes cuyo archivo ya no
+    /// existe se eliminan.
+    #[serde(default)]
+    pub path: String,
     /// Si está ACTIVA, se usa para anclar (grounding) el chat/agente del proyecto.
     #[serde(default = "yes")]
     pub active: bool,
@@ -174,6 +179,7 @@ pub fn add_source(pid: &str, title: &str, kind: &str, content: &str) -> Source {
         kind: kind.trim().to_string(),
         content: content.trim().to_string(),
         note: String::new(),
+        path: String::new(),
         active: true,
         created: now(),
     };
@@ -182,6 +188,91 @@ pub fn add_source(pid: &str, title: &str, kind: &str, content: &str) -> Source {
     write_vec(&sources_path(pid), &all);
     touch(pid);
     s
+}
+
+// ── Carpetas enlazadas (espejo del disco) ───────────────────────────────────────
+
+fn folders_path(pid: &str) -> PathBuf {
+    base().join(pid).join("folders.json")
+}
+/// Carpetas del disco enlazadas a este proyecto (rutas absolutas).
+pub fn folders(pid: &str) -> Vec<String> {
+    read_vec(&folders_path(pid))
+}
+/// Enlaza una carpeta (idempotente).
+pub fn link_folder(pid: &str, path: &str) {
+    let mut all = folders(pid);
+    let p = path.trim().to_string();
+    if !p.is_empty() && !all.iter().any(|x| x == &p) {
+        all.push(p);
+        write_vec(&folders_path(pid), &all);
+        touch(pid);
+    }
+}
+/// Desenlaza una carpeta y elimina TODAS sus fuentes (las que vinieron de ahí).
+pub fn unlink_folder(pid: &str, path: &str) {
+    let p = path.trim();
+    let all: Vec<String> = folders(pid).into_iter().filter(|x| x != p).collect();
+    write_vec(&folders_path(pid), &all);
+    let kept: Vec<Source> = sources(pid)
+        .into_iter()
+        .filter(|s| !is_under(&s.path, p))
+        .collect();
+    write_vec(&sources_path(pid), &kept);
+    touch(pid);
+}
+
+fn is_under(file: &str, folder: &str) -> bool {
+    !file.is_empty()
+        && (file == folder || file.starts_with(&format!("{}/", folder.trim_end_matches('/'))))
+}
+
+/// Inserta o ACTUALIZA una fuente de archivo identificada por su `path` de origen (espejo de
+/// carpeta). Devuelve `true` si era nueva. Conserva el comentario (`note`) y el estado `active`.
+pub fn upsert_file_source(pid: &str, title: &str, content: &str, path: &str) -> bool {
+    let mut all = sources(pid);
+    if let Some(s) = all
+        .iter_mut()
+        .find(|s| !s.path.is_empty() && s.path == path)
+    {
+        s.title = title.trim().to_string();
+        s.content = content.trim().to_string();
+        write_vec(&sources_path(pid), &all);
+        touch(pid);
+        false
+    } else {
+        let s = Source {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: title.trim().to_string(),
+            kind: "archivo".into(),
+            content: content.trim().to_string(),
+            note: String::new(),
+            path: path.trim().to_string(),
+            active: true,
+            created: now(),
+        };
+        all.insert(0, s);
+        write_vec(&sources_path(pid), &all);
+        touch(pid);
+        true
+    }
+}
+
+/// Elimina las fuentes que provienen de `folder` cuyo archivo YA NO está en `keep` (se borró del
+/// disco). Devuelve cuántas quitó. Es lo que hace que «sacar un documento → desaparece de la memoria».
+pub fn prune_folder(pid: &str, folder: &str, keep: &std::collections::HashSet<String>) -> usize {
+    let before = sources(pid);
+    let n0 = before.len();
+    let kept: Vec<Source> = before
+        .into_iter()
+        .filter(|s| !is_under(&s.path, folder) || keep.contains(&s.path))
+        .collect();
+    let removed = n0 - kept.len();
+    if removed > 0 {
+        write_vec(&sources_path(pid), &kept);
+        touch(pid);
+    }
+    removed
 }
 
 pub fn toggle_source(pid: &str, sid: &str, active: bool) {

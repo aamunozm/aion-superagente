@@ -13,6 +13,9 @@ import {
   projectSourceToggle,
   projectSourceRemove,
   projectSourceNote,
+  projectFolderLink,
+  projectFolderSync,
+  projectFolderUnlink,
   projectDiscover,
   projectStudioGenerate,
   projectStudioAudio,
@@ -62,6 +65,10 @@ export default function ProjectWorkspace() {
   // Fuentes
   const [adding, setAdding] = useState(false);
   const [srcKind, setSrcKind] = useState("nota");
+  // Carpeta enlazada (espejo del disco).
+  const [folders, setFolders] = useState<string[]>([]);
+  const [folderPath, setFolderPath] = useState("");
+  const [folderBusy, setFolderBusy] = useState(false);
   const [srcTitle, setSrcTitle] = useState("");
   const [srcContent, setSrcContent] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -100,6 +107,7 @@ export default function ProjectWorkspace() {
     setProject(r.project);
     setSources(r.sources ?? []);
     setOutputs(r.outputs ?? []);
+    setFolders(r.folders ?? []);
     // Restaura la conversación PERSISTIDA del proyecto (ya no se pierde al salir y volver).
     projectChatHistory(id)
       .then((h) =>
@@ -128,6 +136,32 @@ export default function ProjectWorkspace() {
       setSrcContent("");
       setAdding(false);
     }
+  }
+  async function linkFolder() {
+    const path = folderPath.trim();
+    if (!path) return;
+    setFolderBusy(true);
+    const r = await projectFolderLink(id, path).catch(() => null);
+    setFolderBusy(false);
+    if (r?.ok) {
+      setFolderPath("");
+      setAdding(false);
+      await load();
+    } else {
+      alert(r?.error ?? "No pude leer esa carpeta.");
+    }
+  }
+  async function syncFolders() {
+    setFolderBusy(true);
+    await projectFolderSync(id).catch(() => {});
+    setFolderBusy(false);
+    await load();
+  }
+  async function unlinkFolder(path: string) {
+    setFolderBusy(true);
+    await projectFolderUnlink(id, path).catch(() => {});
+    setFolderBusy(false);
+    await load();
   }
   async function uploadFile(file: File) {
     setUploading(true);
@@ -345,8 +379,8 @@ export default function ProjectWorkspace() {
 
           {adding && (
             <div className="p-3 flex flex-col gap-2" style={{ borderBottom: "1px solid var(--border)", background: "var(--surface-1)" }}>
-              <div className="flex gap-1">
-                {["nota", "texto", "web", "archivo"].map((k) => (
+              <div className="flex gap-1 flex-wrap">
+                {["nota", "texto", "web", "archivo", "carpeta"].map((k) => (
                   <button
                     key={k}
                     onClick={() => setSrcKind(k)}
@@ -361,7 +395,25 @@ export default function ProjectWorkspace() {
                 ))}
               </div>
 
-              {srcKind === "archivo" ? (
+              {srcKind === "carpeta" ? (
+                <>
+                  <input
+                    className="input text-sm font-mono"
+                    placeholder="/Users/tu-usuario/Documents/Proyecto…"
+                    value={folderPath}
+                    onChange={(e) => setFolderPath(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && linkFolder()}
+                  />
+                  <button className="btn text-sm" disabled={folderBusy || !folderPath.trim()} onClick={linkFolder}>
+                    {folderBusy ? "Leyendo la carpeta…" : "Enlazar y leer la carpeta"}
+                  </button>
+                  <p className="text-[10px] leading-snug" style={{ color: "var(--text-3)" }}>
+                    Pega la ruta de una carpeta de tu Mac. AION lee todos sus documentos (PDF, Word, TXT, MD…) a la
+                    memoria del proyecto. Es un <strong>espejo</strong>: si sacas un archivo de la carpeta, al
+                    <em> sincronizar</em> desaparece de la memoria.
+                  </p>
+                </>
+              ) : srcKind === "archivo" ? (
                 <>
                   <input
                     ref={fileRef}
@@ -411,9 +463,41 @@ export default function ProjectWorkspace() {
           )}
 
           <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
-            {sources.length === 0 && (
+            {folders.length > 0 && (
+              <div className="rounded-lg p-2 mb-1" style={{ background: "var(--surface)", border: "1px dashed var(--accent)" }}>
+                <div className="flex items-center gap-2 mb-1">
+                  <Icon name="folder" size={13} />
+                  <span className="text-[11px] font-semibold uppercase tracking-wide flex-1" style={{ color: "var(--text-2)" }}>
+                    Carpetas enlazadas
+                  </span>
+                  <button
+                    onClick={syncFolders}
+                    disabled={folderBusy}
+                    className="text-[11px] px-2 py-0.5 rounded-md"
+                    style={{ background: "var(--accent)", color: "#04201f" }}
+                    title="Volver a leer el disco (refleja archivos añadidos o quitados)"
+                  >
+                    {folderBusy ? "…" : "↻ Sincronizar"}
+                  </button>
+                </div>
+                {folders.map((f) => (
+                  <div key={f} className="flex items-center gap-1.5 group/f">
+                    <span className="text-[10px] font-mono truncate flex-1" style={{ color: "var(--text-3)" }} title={f}>{f}</span>
+                    <button
+                      onClick={() => unlinkFolder(f)}
+                      className="text-[10px] opacity-0 group-hover/f:opacity-60 hover:!opacity-100"
+                      style={{ color: "var(--danger)" }}
+                      title="Desenlazar (quita sus documentos de la memoria)"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {sources.length === 0 && folders.length === 0 && (
               <p className="text-xs text-center mt-6" style={{ color: "var(--text-3)" }}>
-                Añade documentos, notas o webs. El chat se basará en las activas.
+                Añade documentos, notas, webs o una carpeta. El chat se basará en las activas.
               </p>
             )}
             {sources.map((s) => (

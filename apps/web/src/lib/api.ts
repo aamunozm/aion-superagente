@@ -538,7 +538,7 @@ export const projectRemove = (id: string) => jpost<{ ok: boolean }>("/api/projec
 export const projectUpdate = (id: string, name: string, desc: string) =>
   jpost<{ ok: boolean; project?: Project; error?: string }>("/api/project/update", { id, name, desc });
 export const projectGet = (id: string) =>
-  jpost<{ ok: boolean; project?: Project; sources?: ProjectSource[]; outputs?: ProjectOutput[]; error?: string }>(
+  jpost<{ ok: boolean; project?: Project; sources?: ProjectSource[]; outputs?: ProjectOutput[]; folders?: string[]; error?: string }>(
     "/api/project/get",
     { id },
   );
@@ -562,6 +562,21 @@ export const projectSourceRemove = (project_id: string, id: string) =>
 /** Comentario de Ariel sobre una fuente: instrucción que el agente tiene SIEMPRE en cuenta. */
 export const projectSourceNote = (project_id: string, id: string, note: string) =>
   jpost<{ ok: boolean }>("/api/project/source/note", { project_id, id, note });
+/** Carpeta del Mac enlazada al proyecto (espejo): lee todos sus documentos a la memoria. */
+export const projectFolderLink = (project_id: string, path: string) =>
+  jpost<{ ok: boolean; added?: number; updated?: number; removed?: number; error?: string }>(
+    "/api/project/folder/link",
+    { project_id, path },
+  );
+/** Re-sincroniza las carpetas enlazadas (saco un archivo del disco → desaparece de la memoria). */
+export const projectFolderSync = (project_id: string) =>
+  jpost<{ ok: boolean; added?: number; updated?: number; removed?: number }>(
+    "/api/project/folder/sync",
+    { project_id },
+  );
+/** Desenlaza una carpeta y quita sus documentos de la memoria del proyecto. */
+export const projectFolderUnlink = (project_id: string, path: string) =>
+  jpost<{ ok: boolean }>("/api/project/folder/unlink", { project_id, path });
 export type DiscoverResult = { title: string; url: string; snippet: string };
 export const projectDiscover = (project_id: string, query: string) =>
   jpost<{ ok: boolean; results?: DiscoverResult[]; error?: string }>("/api/project/discover", {

@@ -939,6 +939,9 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/project/source/toggle", post(project_source_toggle))
         .route("/api/project/source/note", post(project_source_note))
         .route("/api/project/source/remove", post(project_source_remove))
+        .route("/api/project/folder/link", post(project_folder_link))
+        .route("/api/project/folder/sync", post(project_folder_sync))
+        .route("/api/project/folder/unlink", post(project_folder_unlink))
         .route("/api/project/discover", post(project_discover))
         .route(
             "/api/project/studio/generate",
@@ -6331,6 +6334,7 @@ async fn project_get(Json(b): Json<ProjId>) -> Json<serde_json::Value> {
             "project": p,
             "sources": crate::projects::sources(&b.id),
             "outputs": crate::projects::outputs(&b.id),
+            "folders": crate::projects::folders(&b.id),
         })),
         None => Json(serde_json::json!({ "ok": false, "error": "proyecto no encontrado" })),
     }
@@ -6446,6 +6450,127 @@ struct SrcRemove {
 }
 async fn project_source_remove(Json(b): Json<SrcRemove>) -> Json<serde_json::Value> {
     crate::projects::remove_source(&b.project_id, &b.id);
+    crate::project_rag::reindex_bg(&b.project_id);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// Extensiones de documento que la carpeta enlazada ingiere (texto extraíble).
+const FOLDER_EXTS: &[&str] = &["pdf", "txt", "md", "markdown", "docx", "rtf", "csv"];
+
+/// Recorre una carpeta (recursivo, acotado) y devuelve los archivos soportados (rutas absolutas).
+/// Límite duro de archivos para no desbordar en carpetas enormes; ignora ocultos y symlinks.
+fn walk_folder(root: &std::path::Path, max: usize) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if out.len() >= max {
+            break;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue; // ocultos / .DS_Store
+            }
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(p);
+            } else if ft.is_file() {
+                let ext = p
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if FOLDER_EXTS.contains(&ext.as_str()) {
+                    out.push(p);
+                    if out.len() >= max {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Sincroniza una carpeta del disco DENTRO del proyecto (espejo): añade/actualiza las fuentes de
+/// sus documentos y ELIMINA las de archivos que ya no están. Devuelve (añadidas, actualizadas, quitadas).
+async fn sync_folder_into_project(pid: &str, folder: &str) -> (usize, usize, usize) {
+    let root = std::path::Path::new(folder);
+    let files = walk_folder(root, 300);
+    let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let (mut added, mut updated) = (0usize, 0usize);
+    for f in &files {
+        let abs = f.to_string_lossy().to_string();
+        let text = match crate::library::extract_text(f) {
+            Ok(t) if !t.trim().is_empty() => t,
+            _ => continue, // sin texto extraíble (imagen, binario) → se ignora
+        };
+        let content: String = text.chars().take(40000).collect();
+        let title = f
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| abs.clone());
+        keep.insert(abs.clone());
+        if crate::projects::upsert_file_source(pid, &title, &content, &abs) {
+            added += 1;
+        } else {
+            updated += 1;
+        }
+    }
+    let removed = crate::projects::prune_folder(pid, folder, &keep);
+    (added, updated, removed)
+}
+
+#[derive(Deserialize)]
+struct FolderLink {
+    project_id: String,
+    path: String,
+}
+/// Enlaza una carpeta del Mac al proyecto y la lee por primera vez (espejo).
+async fn project_folder_link(Json(b): Json<FolderLink>) -> Json<serde_json::Value> {
+    let path = b.path.trim();
+    if !std::path::Path::new(path).is_dir() {
+        return Json(
+            serde_json::json!({ "ok": false, "error": "esa ruta no es una carpeta válida en este Mac" }),
+        );
+    }
+    crate::projects::link_folder(&b.project_id, path);
+    let (added, updated, removed) = sync_folder_into_project(&b.project_id, path).await;
+    crate::project_rag::reindex_bg(&b.project_id);
+    Json(serde_json::json!({ "ok": true, "added": added, "updated": updated, "removed": removed }))
+}
+
+#[derive(Deserialize)]
+struct FolderSync {
+    project_id: String,
+}
+/// Re-sincroniza TODAS las carpetas enlazadas del proyecto (espejo del disco).
+async fn project_folder_sync(Json(b): Json<FolderSync>) -> Json<serde_json::Value> {
+    let (mut a, mut u, mut r) = (0usize, 0usize, 0usize);
+    for folder in crate::projects::folders(&b.project_id) {
+        if std::path::Path::new(&folder).is_dir() {
+            let (x, y, z) = sync_folder_into_project(&b.project_id, &folder).await;
+            a += x;
+            u += y;
+            r += z;
+        }
+    }
+    crate::project_rag::reindex_bg(&b.project_id);
+    Json(serde_json::json!({ "ok": true, "added": a, "updated": u, "removed": r }))
+}
+
+#[derive(Deserialize)]
+struct FolderUnlink {
+    project_id: String,
+    path: String,
+}
+/// Desenlaza una carpeta y quita sus documentos de la memoria del proyecto.
+async fn project_folder_unlink(Json(b): Json<FolderUnlink>) -> Json<serde_json::Value> {
+    crate::projects::unlink_folder(&b.project_id, &b.path);
     crate::project_rag::reindex_bg(&b.project_id);
     Json(serde_json::json!({ "ok": true }))
 }
