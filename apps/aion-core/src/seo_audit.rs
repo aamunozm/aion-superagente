@@ -84,13 +84,56 @@ fn count(html: &str, tag: &str) -> usize {
     tags(html, tag).len()
 }
 
+/// Decodifica las entidades HTML más comunes (numéricas `&#8211;` y nombradas `&amp;`) para que el
+/// texto del sitio se lea natural en el informe, no como «&#8211;».
+fn decode_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == '&' {
+            if let Some(semi) = bytes[i..].iter().position(|&c| c == ';') {
+                let ent: String = bytes[i + 1..i + semi].iter().collect();
+                let rep = match ent.as_str() {
+                    "amp" => Some('&'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "quot" => Some('"'),
+                    "apos" | "#39" | "#x27" => Some('\''),
+                    "nbsp" => Some(' '),
+                    "copy" => Some('©'),
+                    "reg" => Some('®'),
+                    "#8211" | "#x2013" => Some('–'),
+                    "#8212" | "#x2014" => Some('—'),
+                    "#8217" | "#x2019" => Some('\u{2019}'),
+                    "#8216" | "#x2018" => Some('\u{2018}'),
+                    "#8220" | "#x201C" => Some('\u{201C}'),
+                    "#8221" | "#x201D" => Some('\u{201D}'),
+                    _ => ent
+                        .strip_prefix('#')
+                        .and_then(|n| n.parse::<u32>().ok())
+                        .and_then(char::from_u32),
+                };
+                if let Some(c) = rep {
+                    out.push(c);
+                    i += semi + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
 fn first_title(html: &str) -> String {
     let low = html.to_lowercase();
     if let Some(a) = low.find("<title") {
         if let Some(s) = html[a..].find('>') {
             let from = a + s + 1;
             if let Some(e) = html[from..].to_lowercase().find("</title>") {
-                return html[from..from + e].trim().to_string();
+                return decode_entities(html[from..from + e].trim());
             }
         }
     }
@@ -173,7 +216,7 @@ pub async fn audit(url: &str) -> Result<SeoReport, String> {
         ck(
             "Title",
             "✗",
-            "falta la etiqueta <title> (crítico).".into(),
+            "falta la etiqueta «title» (crítico).".into(),
             0,
             16,
         )
@@ -226,21 +269,21 @@ pub async fn audit(url: &str) -> Result<SeoReport, String> {
         1 => ck(
             "Encabezado H1",
             "✓",
-            "exactamente un <h1> en el código.".into(),
+            "exactamente un «H1» en el código.".into(),
             10,
             10,
         ),
         0 => ck(
             "Encabezado H1",
             "⚠",
-            "ningún <h1> en el HTML de origen (si es JS, los buscadores pueden no verlo).".into(),
+            "ningún «H1» en el HTML de origen (si es JS, los buscadores pueden no verlo).".into(),
             3,
             10,
         ),
         n => ck(
             "Encabezado H1",
             "⚠",
-            format!("{n} <h1> (debería haber 1)."),
+            format!("{n} «H1» (debería haber 1)."),
             5,
             10,
         ),
@@ -276,7 +319,7 @@ pub async fn audit(url: &str) -> Result<SeoReport, String> {
         ck(
             "Móvil (viewport)",
             "✗",
-            "falta <meta viewport> (mala experiencia móvil).".into(),
+            "falta «meta viewport» (mala experiencia móvil).".into(),
             0,
             10,
         )
@@ -294,7 +337,7 @@ pub async fn audit(url: &str) -> Result<SeoReport, String> {
         ck(
             "Idioma (lang)",
             "⚠",
-            "el <html> no declara idioma.".into(),
+            "el «html» no declara idioma.".into(),
             0,
             5,
         )
@@ -418,14 +461,9 @@ pub async fn audit(url: &str) -> Result<SeoReport, String> {
     md.push_str(&format!(
         "## Resumen ejecutivo\n\n**Puntuación SEO: {score}/100** — {veredicto}\n\nSitio analizado: {url}\n\n"
     ));
-    // Escapa `<`/`>`/`|` para que nombres de etiqueta (<h1>, <title>…) NO se interpreten como
-    // HTML real al renderizar el Markdown (si no, rompen la tabla del PDF).
-    let esc = |s: &str| {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('|', "\\|")
-    };
+    // Solo escapamos `|` (separador de tabla). Los textos de detalle NO usan `<>` a propósito
+    // (se nombran las etiquetas en texto plano) para no pelear con el render de Markdown.
+    let esc = |s: &str| s.replace('|', "\\|");
     md.push_str("## Resultados\n\n| | Control | Detalle |\n|---|---|---|\n");
     for c in &checks {
         md.push_str(&format!(
@@ -512,11 +550,11 @@ mod tests {
 
     #[test]
     fn parsea_title_meta_y_cuenta_encabezados() {
-        let html = r#"<html lang="it"><head><title>Hola Mundo</title>
+        let html = r#"<html lang="it"><head>«title»Hola Mundo</title>
             <meta name="description" content="una descripción"/>
             <meta property="og:title" content="OG"/>
             <link rel="canonical" href="https://x.it/"/></head>
-            <body><h1>A</h1><h2>B</h2><img src="a.jpg"/><img src="b.jpg" alt="ok"/></body></html>"#;
+            <body>«H1»A</h1><h2>B</h2><img src="a.jpg"/><img src="b.jpg" alt="ok"/></body></html>"#;
         assert_eq!(first_title(html), "Hola Mundo");
         let metas = tags(html, "meta");
         assert_eq!(
