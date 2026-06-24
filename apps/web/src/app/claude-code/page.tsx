@@ -443,6 +443,18 @@ function PrivacyPanel() {
         <span style={{ fontSize: 16 }}>🔒</span>
         <h2 className="t-section" style={{ color: "var(--text-2)" }}>Privacidad y datos confidenciales</h2>
       </div>
+      <div
+        className="rounded-lg p-3 mb-3 flex items-start gap-2.5"
+        style={{ background: "var(--accent-subtle)", border: "1px solid var(--accent)" }}
+      >
+        <span style={{ fontSize: 16, lineHeight: 1.2 }} aria-hidden>🛡️</span>
+        <div className="text-sm leading-relaxed" style={{ color: "var(--text-1)" }}>
+          <b>Regla de oro para datos sensibles</b> (bancos, cuentas, claves): guárdalos en la
+          <b> Bóveda</b> (abajo) o etiqueta el recuerdo como <code className="font-mono">[confidencial]</code>.
+          Solo eso garantiza al 100% que <b>nunca</b> salgan a Claude ni a un LLM externo. La redacción
+          automática es la red de seguridad, no la garantía.
+        </div>
+      </div>
       <p className="text-sm leading-relaxed mb-3" style={{ color: "var(--text-2)" }}>
         AION es <b>local</b> (Gemma on-device, privado). Claude Code y cualquier LLM externo son
         <b> remotos</b>. Antes de que CUALQUIER texto salga del Mac hacia un modelo remoto, AION
@@ -468,7 +480,7 @@ function PrivacyPanel() {
         (1) márcalos <code className="font-mono">[confidencial]</code> o guárdalos fuera del chat,
         (2) usa cuenta <b>Commercial/API o Enterprise</b> de Anthropic (no entrena con tus datos +
         retención cero), evitando cuentas Consumer (Free/Pro/Max) que por defecto entrenan salvo
-        opt-out. <i>Próximo paso: bóveda local cifrada para claves estructuradas.</i>
+        opt-out. <i>La bóveda cifrada (Llavero macOS) para claves y datos bancarios ya está disponible aquí abajo.</i>
       </div>
     </div>
   );
