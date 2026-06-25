@@ -7127,7 +7127,9 @@ async fn board_seed(Json(b): Json<BoardSeed>) -> Json<serde_json::Value> {
     let seeded = if b.playbook {
         crate::board::seed_playbook(&b.project_id, tmpl, "ariel")
     } else {
-        crate::board::ensure_template(&b.project_id, tmpl);
+        // Fija las columnas de la plantilla (reemplaza el genérico auto-sembrado al abrir el tablero)
+        // siempre que no haya tarjetas; si ya hay trabajo, no toca las columnas.
+        crate::board::set_template(&b.project_id, tmpl);
         0
     };
     let mut snap = board_snapshot(&b.project_id);

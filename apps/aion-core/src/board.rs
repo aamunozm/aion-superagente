@@ -222,6 +222,23 @@ pub fn ensure_template(pid: &str, template: &str) -> Board {
     b
 }
 
+/// **Fija** las columnas de una plantilla, REEMPLAZANDO las que hubiera, SIEMPRE que el tablero aún
+/// no tenga tarjetas (no se ha usado). Esto resuelve el caso real: al abrir el tablero de un
+/// proyecto nuevo se auto-siembra el genérico ([`ensure`]); si luego el usuario elige «sembrar plan
+/// web+SEO», queremos que las columnas pasen a las de esa plantilla, no que se ignore por «ya tiene
+/// columnas». Si ya hay tarjetas, NO toca las columnas (no huérfana el trabajo). Devuelve `true` si
+/// reemplazó.
+pub fn set_template(pid: &str, template: &str) -> bool {
+    let mut b = load(pid);
+    if b.cards.is_empty() {
+        b.statuses = stage_template(template);
+        save(pid, &b);
+        true
+    } else {
+        false
+    }
+}
+
 // ── Columnas (estados) ──────────────────────────────────────────────────────────
 
 pub fn list_statuses(pid: &str) -> Vec<Status> {
@@ -761,10 +778,12 @@ pub fn playbook(name: &str) -> Vec<PlaybookStep> {
 /// checklist). Idempotente sobre las COLUMNAS (no las duplica); las tarjetas se añaden siempre que
 /// el tablero no tuviera ninguna, para no duplicar al re-sembrar. Devuelve cuántas tarjetas creó.
 pub fn seed_playbook(pid: &str, name: &str, actor: &str) -> usize {
-    ensure_template(pid, name);
     if !load(pid).cards.is_empty() {
-        return 0; // ya hay trabajo: no re-sembrar.
+        return 0; // ya hay trabajo: no re-sembrar ni tocar columnas.
     }
+    // Tablero sin usar → FIJA las columnas de esta plantilla (reemplaza el genérico auto-sembrado al
+    // abrir el tablero), para que las tarjetas del playbook caigan en sus etapas reales.
+    set_template(pid, name);
     let mut n = 0;
     for s in playbook(name) {
         if let Ok(card) = card_create(pid, actor, &s.title, s.stage, "") {
@@ -894,9 +913,20 @@ mod tests {
     fn playbook_web_seo_siembra_etapas_y_tempistica() {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (dir, pid) = isolate();
+        // Reproduce el caso REAL: al abrir el tablero se auto-siembra el genérico (5 columnas);
+        // sembrar el plan web+SEO debe REEMPLAZAR esas columnas (no quedarse en el genérico).
+        assert_eq!(
+            ensure(&pid).statuses.len(),
+            5,
+            "genérico auto-sembrado al abrir"
+        );
         let n = seed_playbook(&pid, "web-seo", "aion");
         assert_eq!(n, 8, "el playbook web-seo tiene 8 pasos");
-        assert_eq!(list_statuses(&pid).len(), 7, "7 etapas web-seo");
+        assert_eq!(
+            list_statuses(&pid).len(),
+            7,
+            "7 etapas web-seo (reemplazó el genérico)"
+        );
         // Todas las tarjetas tienen estimación (tempística) y checklist.
         let cards = load(&pid).cards;
         assert!(cards.iter().all(|c| c.estimate_days.is_some()));
