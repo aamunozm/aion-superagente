@@ -111,13 +111,39 @@ function preferredGender(): "f" | "m" | null {
   const g = localStorage.getItem("aion.voice.gender");
   return g === "f" || g === "m" ? g : null;
 }
+/** Voz del SISTEMA elegida explícitamente en Ajustes (nombre exacto de una voz de macOS). */
+function preferredSystemVoiceName(): string {
+  if (typeof localStorage === "undefined") return "";
+  return localStorage.getItem("aion.voice.system") || "";
+}
+/** La voz del sistema que se usaría para `bcp47`, respetando lo elegido en Ajustes/onboarding
+ *  (voz exacta > género > mejor disponible). Para la previsualización «Probar voz». */
+export function pickSystemVoice(bcp47: string): SpeechSynthesisVoice | null {
+  return pickVoice(bcp47, preferredGender(), preferredSystemVoiceName());
+}
+/** Todas las voces del sistema (macOS) instaladas, para listarlas en Ajustes. */
+export function systemVoices(): { name: string; lang: string; localService: boolean }[] {
+  if (!speechSupported()) return [];
+  return window.speechSynthesis
+    .getVoices()
+    .map((v) => ({ name: v.name, lang: v.lang, localService: v.localService }));
+}
 
-// Elige la mejor voz instalada para el idioma: por GÉNERO si se pidió y prefiriendo las de mayor
-// calidad (Premium/Enhanced/Siri) y locales de macOS. Así la voz suena "Siri-grade" sin empotrar nada.
-function pickVoice(bcp47: string, gender?: "f" | "m" | null): SpeechSynthesisVoice | null {
+// Elige la voz del sistema: la EXACTA elegida en Ajustes si la hay; si no, por GÉNERO; prefiriendo
+// siempre las de mayor calidad (Premium/Enhanced/Siri) y locales. Suena "Siri-grade" sin empotrar nada.
+function pickVoice(
+  bcp47: string,
+  gender?: "f" | "m" | null,
+  exactName?: string,
+): SpeechSynthesisVoice | null {
   if (!speechSupported()) return null;
   const voices = window.speechSynthesis.getVoices();
   if (!voices.length) return null;
+  // 1) Voz exacta elegida por el usuario en Ajustes (cualquiera de las del Mac).
+  if (exactName) {
+    const hit = voices.find((v) => v.name === exactName) || voices.find((v) => v.name.includes(exactName));
+    if (hit) return hit;
+  }
   const base = bcp47.split("-")[0];
   let cands = voices.filter((v) => v.lang === bcp47 || v.lang?.startsWith(base));
   if (!cands.length) cands = voices.slice();
@@ -404,7 +430,7 @@ export function useSpeech() {
       window.speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(clean);
       u.lang = ttsLang(lang);
-      const v = pickVoice(u.lang, preferredGender());
+      const v = pickVoice(u.lang, preferredGender(), preferredSystemVoiceName());
       if (v) u.voice = v;
       u.rate = 1.02;
       u.pitch = 1.0;
