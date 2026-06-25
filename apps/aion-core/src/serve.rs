@@ -8859,8 +8859,15 @@ async fn factory_reset() -> Json<serde_json::Value> {
 
 // ── A2A: comunicación entre agentes ──────────────────────────────────────────
 
+/// ¿Está el canal WebSocket A2A vivo ahora mismo? Lo setea el cliente WS al conectar/desconectar.
+static A2A_WS_CONNECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 async fn a2a_get() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "config": crate::a2a::load(), "identity": crate::identity::get() }))
+    Json(serde_json::json!({
+        "config": crate::a2a::load(),
+        "identity": crate::identity::get(),
+        "ws_connected": A2A_WS_CONNECTED.load(std::sync::atomic::Ordering::Relaxed),
+    }))
 }
 
 async fn a2a_set(Json(cfg): Json<crate::a2a::Config>) -> Json<serde_json::Value> {
@@ -8870,26 +8877,44 @@ async fn a2a_set(Json(cfg): Json<crate::a2a::Config>) -> Json<serde_json::Value>
 
 #[derive(Deserialize)]
 struct A2aConnectBody {
+    /// Código de un-pegado (base64 de `{hub, token}`). Si viene, tiene prioridad.
+    #[serde(default)]
     code: String,
+    /// O la URL del hub (`wss://…`) + el token sueltos, tal como CEO·Intelligence los muestra.
+    #[serde(default)]
+    hub: String,
+    #[serde(default)]
+    token: String,
 }
 
-/// Activa el A2A desde un **código de conexión** del peer (base64 de `{hub, token}`): lo decodifica,
-/// guarda hub + token y enciende A2A. El cliente WebSocket se conecta en el próximo ciclo (~5 s).
-/// Es el flujo de un-pegado: el usuario copia el código de CEO·Intelligence y lo pega aquí.
+/// Activa el A2A desde el peer. Acepta DOS formas equivalentes a lo que muestra CEO·Intelligence:
+/// (a) el **código de conexión** de un-pegado (base64 `{hub, token}`), o (b) la **URL (hub) + token**
+/// sueltos (modelo «estilo API»). Guarda hub+token, enciende A2A y el cliente WebSocket se conecta
+/// en el próximo ciclo (~5 s).
 async fn a2a_connect(Json(b): Json<A2aConnectBody>) -> Json<serde_json::Value> {
-    match crate::a2a::decode_connect_code(&b.code) {
-        Some((hub, token)) => {
-            let mut cfg = crate::a2a::load();
-            cfg.enabled = true;
-            cfg.hub = hub;
-            cfg.token = token;
-            crate::a2a::save(&cfg);
-            Json(serde_json::json!({ "ok": true, "hub": cfg.hub }))
+    let (hub, token) = if !b.code.trim().is_empty() {
+        match crate::a2a::decode_connect_code(&b.code) {
+            Some(ht) => ht,
+            None => {
+                return Json(
+                    serde_json::json!({ "ok": false, "error": "código de conexión inválido (cópialo completo)" }),
+                );
+            }
         }
-        None => Json(
-            serde_json::json!({ "ok": false, "error": "código de conexión inválido (revisa que lo copiaste completo)" }),
-        ),
+    } else {
+        (b.hub.trim().to_string(), b.token.trim().to_string())
+    };
+    if hub.is_empty() || token.is_empty() {
+        return Json(
+            serde_json::json!({ "ok": false, "error": "faltan la URL y el token (o el código)" }),
+        );
     }
+    let mut cfg = crate::a2a::load();
+    cfg.enabled = true;
+    cfg.hub = hub;
+    cfg.token = token;
+    crate::a2a::save(&cfg);
+    Json(serde_json::json!({ "ok": true, "hub": cfg.hub }))
 }
 
 #[derive(Deserialize)]
@@ -8996,6 +9021,7 @@ async fn a2a_ws_connect_once(hub: &str, token: &str) -> Result<(), String> {
     });
 
     tracing::info!(%hub, "A2A WS: conectado al hub del peer");
+    A2A_WS_CONNECTED.store(true, std::sync::atomic::Ordering::Relaxed);
     while let Some(msg) = futures_util::StreamExt::next(&mut read).await {
         let msg = msg.map_err(|e| e.to_string())?;
         let text = match msg {
@@ -9048,6 +9074,7 @@ async fn a2a_ws_connect_once(hub: &str, token: &str) -> Result<(), String> {
             });
         }
     }
+    A2A_WS_CONNECTED.store(false, std::sync::atomic::Ordering::Relaxed);
     pinger.abort();
     writer.abort();
     Ok(())

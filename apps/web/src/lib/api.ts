@@ -201,20 +201,20 @@ export async function agentWipe(): Promise<{ ok: boolean; removed?: number }> {
 }
 export type A2aPeer = { name: string; url: string };
 export type A2aConfig = { enabled: boolean; token: string; hub?: string; peers: A2aPeer[] };
-export async function a2aGet(): Promise<{ config: A2aConfig; identity: AionIdentity | null }> {
+export async function a2aGet(): Promise<{ config: A2aConfig; identity: AionIdentity | null; ws_connected?: boolean }> {
   try {
     return await fetch(`${BRIDGE_URL}/api/a2a`).then((x) => x.json());
   } catch {
-    return { config: { enabled: false, token: "", hub: "", peers: [] }, identity: null };
+    return { config: { enabled: false, token: "", hub: "", peers: [] }, identity: null, ws_connected: false };
   }
 }
 export const a2aSet = (config: A2aConfig) => jpost<{ ok: boolean }>("/api/a2a", config);
 export const a2aSend = (url: string, message: string) =>
   jpost<{ ok?: boolean; reply?: string; name?: string; error?: string }>("/api/a2a/send", { url, message });
-// Activa el A2A pegando el «código de conexión» del peer (CEO·Intelligence): el backend lo decodifica
-// (hub WebSocket + token), enciende A2A y abre el canal saliente. Movilidad sin exponer nada.
-export const a2aConnect = (code: string) =>
-  jpost<{ ok: boolean; hub?: string; error?: string }>("/api/a2a/connect", { code });
+// Activa el A2A con lo que da CEO·Intelligence: o la URL (hub WebSocket) + el token sueltos, o el
+// «código de conexión» de un-pegado. El backend enciende A2A y abre el canal saliente (sin exponer nada).
+export const a2aConnect = (args: { code?: string; hub?: string; token?: string }) =>
+  jpost<{ ok: boolean; hub?: string; error?: string }>("/api/a2a/connect", args);
 
 // ── Claude Code (memoria compartida vía MCP) ─────────────────────────────────
 export type ClaudeCodeStatus = {
