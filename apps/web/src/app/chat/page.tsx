@@ -5,6 +5,7 @@ import { AppShell, Icon, Markdown, MessageActions, VoiceBar, VoiceMode, type Voi
 import { useT } from "@/lib/i18n";
 import { useSpeech, useDictation, useVoiceConversation, stripMarkdownForSpeech, warmVoice } from "@/lib/voice";
 import { LightboxProvider, useLightbox } from "@/lib/lightbox";
+import { DocStudioModal } from "@/components/documents/DocStudio";
 
 // Foto adjunta por Ariel, mostrada en su burbuja del chat. Clic = ampliar (lightbox).
 function ChatPhoto({ src, name }: { src: string; name: string }) {
@@ -137,6 +138,8 @@ export default function ChatPage() {
   const [askDraft, setAskDraft] = useState("");
   // Adjunto de imagen pendiente (se envía con el siguiente mensaje, vía visión).
   const [pendingImage, setPendingImage] = useState<{ name: string; b64: string; dataUrl: string } | null>(null);
+  // Estudio de documentos (galería de estilos + generar), accesible desde el chat.
+  const [docOpen, setDocOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   // ¿Ariel ya habló en esta sesión? Si saludó él primero, el saludo automático
@@ -851,6 +854,16 @@ export default function ChatPage() {
         >
           <Icon name="paperclip" size={18} />
         </button>
+        <button
+          type="button"
+          onClick={() => setDocOpen(true)}
+          className="shrink-0 rounded-full p-2 transition-colors"
+          style={{ color: "var(--text-3)", background: "var(--surface-2)" }}
+          title="Crear documento con estilo (elige o extrae un estilo)"
+          aria-label="Crear documento con estilo"
+        >
+          <Icon name="file" size={18} />
+        </button>
         {mode === "chat" && (
           <button
             type="button"
@@ -909,6 +922,7 @@ export default function ChatPage() {
         onToggleMic={() => setVoiceMuted((m) => !m)}
         onClose={closeVoiceMode}
       />
+      <DocStudioModal open={docOpen} onClose={() => setDocOpen(false)} />
     </AppShell>
     </LightboxProvider>
   );

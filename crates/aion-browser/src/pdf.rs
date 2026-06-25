@@ -113,6 +113,26 @@ async fn render_inner(browser: &Browser, url: &str, opts: &PdfOptions) -> Result
     // Espera a que el documento termine de cargar (fuentes, imágenes embebidas, layout).
     let _ = page.wait_for_navigation().await;
 
+    // AUTO-REVISIÓN de diseño (DETERMINISTA, sin VLM; investigación 2026 «revisar antes de
+    // entregar»): mide el desborde horizontal del documento renderizado y, si lo hay, lo encoge a
+    // medida (`zoom`) para que NUNCA se corte contenido en el borde de la página. Barato y seguro;
+    // la capa con modelo de visión va por encima en el futuro. Cota inferior 0.82 (legibilidad).
+    let _ = page
+        .evaluate(
+            r#"(() => {
+              try {
+                const de = document.documentElement;
+                const over = de.scrollWidth - de.clientWidth;
+                if (over > 2 && de.scrollWidth > 0) {
+                  const scale = Math.max(0.82, de.clientWidth / de.scrollWidth);
+                  de.style.zoom = String(scale);
+                }
+              } catch (e) {}
+              return true;
+            })()"#,
+        )
+        .await;
+
     let mut params = PrintToPdfParams::builder()
         .print_background(opts.print_background)
         .prefer_css_page_size(opts.prefer_css_page_size)

@@ -67,6 +67,10 @@ pub struct OffertaContent {
     #[serde(default)]
     pub doc_kicker: String, // "OFFERTA SERVIZI 2026"
     #[serde(default)]
+    pub doc_number: String, // referencia secuencial "PREV-2026-001" (la pone el caller)
+    #[serde(default)]
+    pub doc_date: String, // fecha legible "24 giugno 2026" (la pone el caller)
+    #[serde(default)]
     pub doc_subtitle: String, // "Crescita digitale per la tua azienda"
     #[serde(default)]
     pub attn_label: String, // "Alla cortese attenzione di:"
@@ -103,6 +107,9 @@ pub struct OffertaContent {
     pub offer_total_label: String,
     #[serde(default)]
     pub offer_total_value: String,
+    /// Anclaje de precio (price anchoring): valor "de listino"/más caro, tachado junto al total.
+    #[serde(default)]
+    pub offer_total_anchor: String,
     #[serde(default)]
     pub offer_note: String,
     #[serde(default)]
@@ -229,15 +236,56 @@ pub fn build_offerta(f: &OffertaFacts) -> OffertaContent {
         (vec![], String::new())
     };
     let has_cmp = !f.comparison.is_empty();
+    // PRICE ANCHORING: si hay comparativa y un canone, el valor MÁS CARO (la 1ª barra, por
+    // convención expensive→cheap) se muestra TACHADO junto a tu total → tu precio se percibe
+    // como una ganga frente al ancla. Anclaje derivado de datos que ya diste (cero input extra).
+    let offer_total_anchor = if has_cmp && !f.recurring_value.trim().is_empty() {
+        f.comparison
+            .first()
+            .map(|b| b.value.clone())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    // SCAFFOLDING PERSUASIVO: si no diste intro/beneficios, la skill los rellena con copy de
+    // venta probado (apertura + risk reversal + ROI + propiedad) — así hasta una oferta mínima
+    // («cliente + 2 servizi») sale como un documento completo y convincente, no esquelético.
+    let intro = or(
+        &f.intro,
+        "Di seguito la nostra proposta per far lavorare davvero la tua presenza online: \
+         **più visibilità, più contatti e risultati misurabili**, gestiti da noi con un canone \
+         chiaro e senza sorprese.",
+    );
+    let benefits = if f.benefits.is_empty() {
+        vec![
+            Benefit {
+                lead: "Si ripaga da sola.".into(),
+                body: "basta un cliente in più al mese perché l'investimento sia già rientrato."
+                    .into(),
+            },
+            Benefit {
+                lead: "Zero vincoli.".into(),
+                body: "nessun contratto: continui solo se sei soddisfatto, interrompi quando vuoi senza penali.".into(),
+            },
+            Benefit {
+                lead: "Tutto tuo, tutto chiaro.".into(),
+                body: "sito, dominio e dati restano di tua proprietà; report trasparenti, nero su bianco.".into(),
+            },
+        ]
+    } else {
+        f.benefits.clone()
+    };
     OffertaContent {
         doc_kicker: or(&f.kicker, "OFFERTA SERVIZI"),
+        doc_number: String::new(),
+        doc_date: String::new(),
         doc_subtitle: or(&f.subtitle, "Crescita digitale per la tua azienda"),
         attn_label: "Alla cortese attenzione di:".into(),
         attn_to: or(&f.client, "Spett.le ______________________"),
         hero_kicker: f.hero_kicker.clone(),
         hero_title: f.hero_title.clone(),
         hero_body: f.hero_pitch.clone(),
-        intro: f.intro.clone(),
+        intro,
         cards_title: if f.highlights.is_empty() {
             String::new()
         } else {
@@ -254,6 +302,7 @@ pub fn build_offerta(f: &OffertaFacts) -> OffertaContent {
         offer_rows: f.services.clone(),
         offer_total_label: f.recurring_label.clone(),
         offer_total_value: f.recurring_value.clone(),
+        offer_total_anchor,
         offer_note: "Importi IVA esclusa. **Nessun contratto vincolante: puoi interrompere quando vuoi, senza penali.**".into(),
         banner: if f.deductible {
             "COSTO INTERAMENTE DEDUCIBILE   •   IVA INTERAMENTE DETRAIBILE".into()
@@ -274,7 +323,7 @@ pub fn build_offerta(f: &OffertaFacts) -> OffertaContent {
         callout_pills,
         callout_body,
         benefits_title: "Perché è un'offerta che conviene accettare".into(),
-        benefits: f.benefits.clone(),
+        benefits,
         conditions_title: "Condizioni essenziali".into(),
         conditions,
         acceptance: "Per accettazione dell'offerta, datare e firmare nello spazio sottostante:"
@@ -333,6 +382,19 @@ fn offerta_to_markdown(o: &OffertaContent) -> String {
     m.push_str(&format!("# {}\n\n", title.replace('\n', " ")));
     if !o.doc_subtitle.is_empty() {
         m.push_str(&format!("*{}*\n\n", o.doc_subtitle));
+    }
+    if !o.doc_number.is_empty() || !o.doc_date.is_empty() {
+        let sep = if !o.doc_number.is_empty() && !o.doc_date.is_empty() {
+            " · "
+        } else {
+            ""
+        };
+        let num = if o.doc_number.is_empty() {
+            String::new()
+        } else {
+            format!("Rif. {}", o.doc_number)
+        };
+        m.push_str(&format!("{num}{sep}{}\n\n", o.doc_date));
     }
     if !o.attn_to.is_empty() {
         m.push_str(&format!("{} {}\n\n", o.attn_label, o.attn_to));

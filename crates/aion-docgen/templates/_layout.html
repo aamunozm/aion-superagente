@@ -17,7 +17,7 @@
   /* Página A4 con márgenes generosos; el footer corre en el margen inferior. */
   @page {
     size: A4;
-    margin: 18mm 16mm 22mm 16mm;
+    margin: 22mm 22mm 24mm 22mm;
   }
 
   * { box-sizing: border-box; }
@@ -87,16 +87,37 @@
   .content h1, .content h2, .content h3 {
     color: var(--ink);
     letter-spacing: -0.01em;
-    line-height: 1.25;
-    margin: 1.4em 0 0.5em;
+    line-height: 1.2;
+    margin: 1.5em 0 0.5em;
+    break-after: avoid;        /* el título no se separa de su contenido */
+    page-break-after: avoid;
   }
   .content h1 { font-size: 15pt; }
+  /* Barra de acento a la izquierda (más moderno y consistente con la oferta). */
   .content h2 {
-    font-size: 12.5pt;
-    border-bottom: 1px solid var(--hair);
-    padding-bottom: 4px;
+    font-size: 13pt;
+    padding-left: 11px;
+    border-left: 4px solid var(--accent);
   }
   .content h3 { font-size: 11pt; }
+
+  /* ── KPI hero: medidor SVG (score) + nota, al inicio de un informe/propuesta ── */
+  .content .kpi-hero {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    background: var(--soft);
+    border: 1px solid var(--hair);
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin: 4px 0 18px;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .content .kpi-hero .gauge { flex: 0 0 auto; }
+  .content .kpi-hero .kpi-note { font-size: 10pt; line-height: 1.5; color: var(--text); }
+  .content svg.hbars { width: 100%; margin: 0.6em 0 1em; break-inside: avoid; }
+  .content svg { max-width: 100%; }
   .content p { margin: 0 0 0.7em; }
   .content ul, .content ol { margin: 0 0 0.7em; padding-left: 1.3em; }
   .content li { margin: 0.15em 0; }
@@ -126,9 +147,11 @@
   }
   .content pre code { background: none; padding: 0; }
 
-  /* Tablas con cabecera de marca (clave para preventivos/informes). */
+  /* Tablas con cabecera de marca (clave para preventivos/informes). word-wrap evita que un
+     contenido largo desborde la página o corte el texto; el ancho 100% mantiene el margen. */
   .content table {
     width: 100%;
+    max-width: 100%;
     border-collapse: collapse;
     margin: 1em 0;
     font-size: 9.5pt;
@@ -139,12 +162,20 @@
     text-align: left;
     padding: 8px 10px;
     font-weight: 600;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
   }
   .content tbody td {
     padding: 7px 10px;
     border-bottom: 1px solid var(--hair);
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+    vertical-align: top;
   }
   .content tbody tr:nth-child(even) { background: var(--soft); }
+  /* Última columna (importe) alineada a la derecha en tablas de 2+ columnas. */
+  .content tbody td:last-child:not(:first-child),
+  .content thead th:last-child:not(:first-child) { text-align: right; white-space: nowrap; }
 
   /* ── Footer corriente (se repite en cada página vía position:fixed) ── */
   .page-footer {
@@ -157,6 +188,55 @@
     justify-content: space-between;
     border-top: 1px solid var(--hair);
     padding-top: 5px;
+  }
+
+  /* ── Cierre profesional del preventivo (próximos pasos · validez · firmas · GDPR) ── */
+  .content .doc-closing { margin-top: 1.6em; break-inside: avoid; }
+  .content .callout-next {
+    background: var(--ink);
+    color: #fff;
+    border-radius: 12px;
+    padding: 14px 18px;
+    margin: 0 0 1.1em;
+    break-inside: avoid;
+  }
+  .content .callout-next .callout-title {
+    display: block;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 4px;
+    letter-spacing: 0.01em;
+  }
+  .content .callout-next ol { margin: 0; padding-left: 1.2em; }
+  .content .callout-next li { margin: 0.1em 0; color: #fff; }
+  .content .validity { font-size: 9.5pt; color: var(--muted); margin: 0 0 1.1em; }
+  .content .sign-grid {
+    display: flex;
+    gap: 28px;
+    margin: 0.4em 0 1.2em;
+    break-inside: avoid;
+  }
+  .content .sign-box { flex: 1; display: flex; flex-direction: column; }
+  .content .sign-box .sign-role {
+    font-size: 9.5pt; font-weight: 700; color: var(--ink); margin-bottom: 2px;
+  }
+  .content .sign-box .sign-name { font-size: 10pt; min-height: 14px; color: var(--text); }
+  .content .sign-box .sign-line {
+    margin-top: 22px;
+    border-top: 1px solid var(--ink);
+    padding-top: 3px;
+    font-size: 8pt;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .content .privacy-note {
+    font-size: 7.8pt;
+    line-height: 1.45;
+    color: #8a9099;
+    border-top: 1px solid var(--hair);
+    padding-top: 7px;
+    margin: 0.6em 0 0;
   }
 
   {% block extra_style %}{% endblock %}

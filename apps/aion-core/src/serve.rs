@@ -868,6 +868,11 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/workflows", get(workflows_list).post(workflows_set))
         .route("/api/workflows/remove", post(workflows_remove))
         .route("/api/workflows/run", post(workflows_run))
+        // Flujos por GRAFO (DAG) — motor nativo del editor visual (Fase F).
+        .route("/api/flows", get(flows_list).post(flows_set))
+        .route("/api/flows/remove", post(flows_remove))
+        .route("/api/flows/run", post(flows_run))
+        .route("/api/flows/migrate", post(flows_migrate))
         // Gobernanza de comunicaciones: con quién y por qué canal puede hablar AION.
         .route("/api/comms", get(comms_get).post(comms_set))
         .route("/api/governance/setup", post(governance_setup))
@@ -895,6 +900,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/agent/import", post(agent_import))
         .route("/api/agent/wipe", post(agent_wipe))
         .route("/api/identity", get(identity_get))
+        .route("/api/identity/name", post(identity_name_set))
         .route("/api/a2a", get(a2a_get).post(a2a_set))
         .route("/api/a2a/message", post(a2a_message))
         .route("/api/a2a/send", post(a2a_send))
@@ -937,7 +943,11 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/project/source/add", post(project_source_add))
         .route("/api/project/source/upload", post(project_source_upload))
         .route("/api/project/source/toggle", post(project_source_toggle))
+        .route("/api/project/source/note", post(project_source_note))
         .route("/api/project/source/remove", post(project_source_remove))
+        .route("/api/project/folder/link", post(project_folder_link))
+        .route("/api/project/folder/sync", post(project_folder_sync))
+        .route("/api/project/folder/unlink", post(project_folder_unlink))
         .route("/api/project/discover", post(project_discover))
         .route(
             "/api/project/studio/generate",
@@ -953,6 +963,20 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/project/chat/history", post(project_chat_history))
         .route("/api/project/chat/append", post(project_chat_append))
         .route("/api/project/chat/clear", post(project_chat_clear))
+        // Tablero Kanban por etapas del proyecto (columnas, tarjetas, WIP, log, tempística).
+        .route("/api/project/board/get", post(board_get))
+        .route("/api/project/board/seed", post(board_seed))
+        .route("/api/project/board/status/add", post(board_status_add))
+        .route("/api/project/board/card/create", post(board_card_create))
+        .route("/api/project/board/card/update", post(board_card_update))
+        .route("/api/project/board/card/move", post(board_card_move))
+        .route("/api/project/board/card/comment", post(board_card_comment))
+        .route(
+            "/api/project/board/card/checklist",
+            post(board_card_checklist),
+        )
+        .route("/api/project/board/card/link", post(board_card_link))
+        .route("/api/project/board/card/delete", post(board_card_delete))
         .route("/api/brand", get(brand_get).post(brand_set))
         // Estilos de documento (galería tipo Canva): listar/guardar/borrar/extraer + oferta.
         .route(
@@ -961,6 +985,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/doc-styles/remove", post(doc_styles_remove))
         .route("/api/doc-styles/extract", post(doc_styles_extract))
+        .route(
+            "/api/doc-styles/default",
+            get(doc_styles_default_get).post(doc_styles_default_set),
+        )
         .route("/api/documents/offerta", post(documents_offerta))
         // MCP: Claude Code consulta la memoria de AION bajo demanda (Bearer propio).
         .route(
@@ -1323,61 +1351,103 @@ async fn models_pull(
     tokio::spawn(async move {
         let base =
             std::env::var("AION_OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".into());
-        let resp = reqwest::Client::new()
-            .post(format!("{base}/api/pull"))
-            .json(&serde_json::json!({ "model": model, "stream": true }))
-            .send()
-            .await;
-        let resp = match resp {
-            Ok(r) => r,
-            Err(e) => {
+        let client = reqwest::Client::new();
+        // REINTENTOS: una descarga grande puede cortarse por red. `ollama pull` REANUDA lo ya
+        // bajado, así que reintentamos hasta 3 veces (con espera) antes de rendirnos. Solo
+        // emitimos "done" cuando Ollama confirma "success"; si no, "error" claro (sin falsos OK).
+        const MAX_ATTEMPTS: u32 = 3;
+        let mut last_err = String::new();
+        let mut ok = false;
+        for attempt in 1..=MAX_ATTEMPTS {
+            if attempt > 1 {
                 let _ = tx
-                    .send(Event::default().data(
-                        serde_json::json!({ "kind": "error", "text": e.to_string() }).to_string(),
-                    ))
+                    .send(
+                        Event::default().data(
+                            serde_json::json!({ "kind": "progress",
+                            "status": format!("reintentando descarga ({attempt}/{MAX_ATTEMPTS})…"),
+                            "percent": 0 })
+                            .to_string(),
+                        ),
+                    )
                     .await;
-                return;
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
-        };
-        let mut stream = resp.bytes_stream();
-        // Búfer de BYTES: decodificar cada chunk por separado partiría un carácter multibyte
-        // que cayera en el borde del chunk. Partimos por el byte '\n' (nunca dentro de un
-        // multibyte) y decodificamos solo líneas COMPLETAS (siempre UTF-8 válido).
-        let mut buf: Vec<u8> = Vec::new();
-        while let Some(item) = stream.next().await {
-            let Ok(bytes) = item else { break };
-            buf.extend_from_slice(&bytes);
-            while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
-                let line = String::from_utf8_lossy(&buf[..nl]).trim().to_string();
-                buf.drain(..=nl);
-                if line.is_empty() {
+            let resp = client
+                .post(format!("{base}/api/pull"))
+                .json(&serde_json::json!({ "model": model, "stream": true }))
+                .send()
+                .await;
+            let resp = match resp {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = e.to_string();
                     continue;
                 }
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                    let status = v["status"].as_str().unwrap_or("");
-                    let completed = v["completed"].as_f64().unwrap_or(0.0);
-                    let total = v["total"].as_f64().unwrap_or(0.0);
-                    let percent = if total > 0.0 {
-                        (completed / total * 100.0).round()
-                    } else {
-                        0.0
-                    };
-                    let _ = tx
-                        .send(
-                            Event::default().data(
-                                serde_json::json!({
-                                    "kind": "progress", "status": status, "percent": percent
-                                })
-                                .to_string(),
-                            ),
-                        )
-                        .await;
+            };
+            if !resp.status().is_success() {
+                last_err = format!("Ollama devolvió {}", resp.status());
+                // Modelo inexistente/mal nombre → no tiene sentido reintentar.
+                if matches!(resp.status().as_u16(), 400 | 404) {
+                    break;
+                }
+                continue;
+            }
+            let mut stream = resp.bytes_stream();
+            // Búfer de BYTES: partir por '\n' (nunca dentro de un multibyte) y decodificar solo
+            // líneas COMPLETAS (siempre UTF-8 válido).
+            let mut buf: Vec<u8> = Vec::new();
+            while let Some(item) = stream.next().await {
+                let bytes = match item {
+                    Ok(b) => b,
+                    Err(e) => {
+                        last_err = e.to_string();
+                        break; // stream cortado → fuera del while, se reintenta
+                    }
+                };
+                buf.extend_from_slice(&bytes);
+                while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+                    let line = String::from_utf8_lossy(&buf[..nl]).trim().to_string();
+                    buf.drain(..=nl);
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                        let status = v["status"].as_str().unwrap_or("");
+                        if let Some(err) = v["error"].as_str() {
+                            last_err = err.to_string();
+                        }
+                        if status == "success" {
+                            ok = true;
+                        }
+                        let completed = v["completed"].as_f64().unwrap_or(0.0);
+                        let total = v["total"].as_f64().unwrap_or(0.0);
+                        let percent = if total > 0.0 {
+                            (completed / total * 100.0).round()
+                        } else if ok {
+                            100.0
+                        } else {
+                            0.0
+                        };
+                        let _ = tx
+                            .send(Event::default().data(
+                                serde_json::json!({ "kind": "progress", "status": status, "percent": percent })
+                                    .to_string(),
+                            ))
+                            .await;
+                    }
                 }
             }
+            if ok {
+                break;
+            }
         }
-        let _ = tx
-            .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
-            .await;
+        let evt = if ok {
+            serde_json::json!({ "kind": "done" })
+        } else {
+            serde_json::json!({ "kind": "error",
+                "text": format!("no se pudo descargar el modelo tras {MAX_ATTEMPTS} intentos: {last_err}") })
+        };
+        let _ = tx.send(Event::default().data(evt.to_string())).await;
     });
     Sse::new(ReceiverStream::new(rx).map(Ok))
 }
@@ -1785,6 +1855,82 @@ async fn workflows_run(Json(b): Json<WorkflowIdBody>) -> Json<serde_json::Value>
         serde_json::to_value(run)
             .unwrap_or_else(|_| serde_json::json!({ "error": "serialización" })),
     )
+}
+
+// ── Flujos por GRAFO (DAG) — Fase F: motor nativo del editor visual ──────────────
+
+/// Registro de herramientas para los flujos por grafo: el set SEGURO del motor lineal MÁS las
+/// que producen ENTREGABLES locales (auditoría SEO, documentos, notas). Sigue sin incluir acciones
+/// irreversibles externas (envíos, control del ratón): esas pasan por el HITL del agente.
+fn flow_registry() -> ToolRegistry {
+    let mut tools = workflow_registry();
+    tools.register(Arc::new(crate::agent_tools::SeoAuditTool::new()));
+    tools.register(Arc::new(crate::agent_tools::GenerateDocumentTool::new()));
+    tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
+    tools
+}
+
+async fn flows_list() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "flows": crate::flow::load() }))
+}
+
+/// Crea o actualiza un flujo de grafo (upsert por id) y persiste.
+async fn flows_set(Json(f): Json<crate::flow::Flow>) -> Json<serde_json::Value> {
+    let list = crate::flow::upsert(crate::flow::load(), f);
+    match crate::flow::save(&list) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "count": list.len() })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct FlowIdBody {
+    id: String,
+}
+
+async fn flows_remove(Json(b): Json<FlowIdBody>) -> Json<serde_json::Value> {
+    let list = crate::flow::remove(crate::flow::load(), &b.id);
+    match crate::flow::save(&list) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// Ejecuta un flujo de grafo por id (lanzado por Ariel desde la UI → `allow_sensitive=true`).
+/// Actualiza `last_run_ms` y devuelve el resultado por nodo.
+async fn flows_run(Json(b): Json<FlowIdBody>) -> Json<serde_json::Value> {
+    let mut list = crate::flow::load();
+    let Some(flow) = list.iter().find(|f| f.id == b.id).cloned() else {
+        return Json(serde_json::json!({ "error": "flujo no encontrado" }));
+    };
+    let tools = flow_registry();
+    let run = crate::flow::run(&flow, &tools, true).await;
+    if let Some(slot) = list.iter_mut().find(|f| f.id == b.id) {
+        slot.last_run_ms = Some(crate::workflow::now_ms());
+        let _ = crate::flow::save(&list);
+    }
+    Json(
+        serde_json::to_value(run)
+            .unwrap_or_else(|_| serde_json::json!({ "error": "serialización" })),
+    )
+}
+
+/// Migra los flujos LINEALES existentes (`workflows.json`) al modelo de GRAFO (`flows.json`),
+/// sin duplicar los ya migrados. Así no se pierde nada al pasar al editor visual.
+async fn flows_migrate() -> Json<serde_json::Value> {
+    let mut list = crate::flow::load();
+    let have: std::collections::HashSet<String> = list.iter().map(|f| f.id.clone()).collect();
+    let mut added = 0;
+    for wf in crate::workflow::load() {
+        if !have.contains(&wf.id) {
+            list.push(crate::flow::from_workflow(&wf));
+            added += 1;
+        }
+    }
+    match crate::flow::save(&list) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "added": added, "count": list.len() })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
 }
 
 #[derive(Deserialize)]
@@ -2474,8 +2620,61 @@ struct AgentBody {
     project_id: Option<String>,
 }
 
+/// Tareas de proyecto EN CURSO (pid → resumen). Permite mostrar «trabajando…» al volver al
+/// proyecto desde otro menú, porque la tarea sigue viva en el daemon aunque cierres la página.
+static PROJECT_RUNNING: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::OnceLock::new();
+fn project_running() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    PROJECT_RUNNING.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+/// Marca el inicio de una tarea de proyecto (la pinta como «trabajando…»).
+fn project_task_start(body: &AgentBody) {
+    if let Some(pid) = body.project_id.as_deref() {
+        project_running()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(pid.to_string(), body.task.chars().take(120).collect());
+    }
+}
+/// CIERRE de una tarea de proyecto: persiste la respuesta del agente en el chat del proyecto
+/// (server-side → sobrevive a que cierres la página), limpia el estado «trabajando» y avisa en la
+/// Bandeja. Idempotente por respuesta: si ya se persistió ese texto al final, no duplica.
+fn project_task_done(body: &AgentBody, answer: &str) {
+    let Some(pid) = body.project_id.as_deref() else {
+        return;
+    };
+    let was_running = project_running()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(pid)
+        .is_some();
+    let ans = answer.trim();
+    if ans.is_empty() {
+        return;
+    }
+    // Evita duplicar si el último mensaje persistido ya es esta respuesta (la UI viva pudo añadirlo).
+    let last_is_same = crate::projects::chat_history(pid)
+        .last()
+        .map(|m| m.role == "assistant" && m.text.trim() == ans)
+        .unwrap_or(false);
+    if !last_is_same {
+        crate::projects::add_chat_msg(pid, "assistant", ans);
+    }
+    // Aviso en la Bandeja solo si era una tarea realmente en curso (no recarga trivial).
+    if was_running {
+        if let Ok(ibx) = crate::inbox::Inbox::open(crate::inbox_path()) {
+            let name = crate::projects::get(pid)
+                .map(|p| p.name)
+                .unwrap_or_default();
+            let resumen: String = ans.chars().take(140).collect();
+            let _ = ibx.push("idea", &format!("Terminé una tarea en «{name}»: {resumen}"));
+        }
+    }
+}
+
 /// Extrae la primera URL http(s) de un texto (para el fast-path de lectura web).
-fn extract_url(s: &str) -> Option<String> {
+pub(crate) fn extract_url(s: &str) -> Option<String> {
     let i = s.find("http://").or_else(|| s.find("https://"))?;
     let rest = &s[i..];
     let end = rest
@@ -2548,7 +2747,9 @@ async fn agent(
     // contexto del agente (grounding), para que razone fundamentado en el proyecto.
     let mut body = body;
     if let Some(pid) = body.project_id.clone() {
-        let g = crate::projects::grounding(&pid);
+        // RAG por proyecto: recupera los fragmentos de fuentes más relevantes A LA PREGUNTA
+        // (recuperación semántica, no el prefijo del documento), aislado por proyecto.
+        let g = crate::project_rag::grounding_for_query(&pid, &body.task).await;
         if !g.trim().is_empty() {
             body.context = Some(match body.context.take() {
                 Some(c) if !c.trim().is_empty() => format!("{g}\n\n{c}"),
@@ -2640,6 +2841,122 @@ async fn agent(
     }
 
     tokio::spawn(async move {
+        // CONTINUACIÓN EN SEGUNDO PLANO: marca la tarea del proyecto como «en curso». El daemon
+        // sigue trabajando aunque cierres la página; el resultado se persiste al terminar.
+        project_task_start(&body);
+
+        // 🧠 FAST-PATH «PROPOSTA ANALITICA» (consultor, nivel PREV-2026-030): analiza el sitio del
+        // cliente (SEO real), razona su situación y REDACTA una propuesta a medida con la marca
+        // dinámica de la empresa. Es un análisis LARGO → idóneo para la continuación en 2º plano.
+        if crate::proposta::is_proposta(&body.task) && body.project_id.is_some() {
+            crate::inner_state::set_focus("agente", "redactando una propuesta analítica");
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "thought", "text": "Analizo el sitio del cliente, razono su situación y redacto una propuesta a medida. Es un análisis a fondo; lo termino aunque cierres la página." }).to_string(),
+                ))
+                .await;
+            let ctx = body.context.clone().unwrap_or_default();
+            let ans = match crate::proposta::compose(
+                &*engine,
+                body.project_id.as_deref(),
+                &body.task,
+                &ctx,
+            )
+            .await
+            {
+                Ok((path, cliente, missing)) => {
+                    crate::awareness::record_outcome(true);
+                    let who = if cliente.trim().is_empty() {
+                        "el cliente".to_string()
+                    } else {
+                        cliente
+                    };
+                    let mut a = format!(
+                        "Propuesta analítica para {who} lista — la guardé en tu Escritorio:\n{path}\n\nIncluye firmas de ambas partes, fecha, validez y cláusula de privacidad (GDPR)."
+                    );
+                    if !missing.is_empty() {
+                        a.push_str("\n\nPara que el preventivo quede redondo, indícame también:");
+                        for m in &missing {
+                            a.push_str(&format!("\n• {m}"));
+                        }
+                        a.push_str("\n\nCon eso lo regenero al instante.");
+                    }
+                    a
+                }
+                Err(e) => format!("Empecé la propuesta analítica pero no pude terminarla: {e}"),
+            };
+            project_task_done(&body, &ans);
+            agent_perceive_and_remember(body.task.clone(), ans.clone());
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "answer", "text": ans, "steps": 1 }).to_string(),
+                ))
+                .await;
+            let _ = tx
+                .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                .await;
+            return;
+        }
+
+        // 📄 FAST-PATH DETERMINISTA «oferta → documento»: «hazme la oferta en un pdf» tras hablarla.
+        // No depende de que el modelo emita una acción ReAct (que a veces falla → negativa honesta):
+        // extrae los hechos del contexto y RENDERIZA de verdad. Si no hay oferta extraíble, sigue.
+        if is_offerta_to_doc(&body.task) {
+            crate::inner_state::set_focus("agente", "preparando una oferta en documento");
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "thought", "text": "Preparo la oferta como documento a partir de lo que hablamos." }).to_string(),
+                ))
+                .await;
+            if let Some(answer) = try_offerta_to_doc(&*engine, &body).await {
+                crate::awareness::record_outcome(true);
+                agent_perceive_and_remember(body.task.clone(), answer.clone());
+                project_task_done(&body, &answer);
+                let _ = tx
+                    .send(
+                        Event::default().data(
+                            serde_json::json!({ "kind": "answer", "text": answer, "steps": 1 })
+                                .to_string(),
+                        ),
+                    )
+                    .await;
+                let _ = tx
+                    .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                    .await;
+                return;
+            }
+            // Sin oferta con servicios en el contexto → cae al flujo normal (ReAct/charla).
+        }
+
+        // 🔎 FAST-PATH SEO: «auditoría SEO de X» (o, en un proyecto, de su web). Lee la página de
+        // verdad (HTML crudo + render headless), la puntúa y entrega un PDF. Determinista.
+        if is_seo_audit(&body.task) {
+            crate::inner_state::set_focus("agente", "auditoría SEO");
+            let _ = tx
+                .send(Event::default().data(
+                    serde_json::json!({ "kind": "thought", "text": "Hago la auditoría SEO: leo la página (incluido el render del JavaScript) y la puntúo." }).to_string(),
+                ))
+                .await;
+            if let Some(answer) = try_seo_audit(&body).await {
+                crate::awareness::record_outcome(!answer.contains("no pude completarla"));
+                agent_perceive_and_remember(body.task.clone(), answer.clone());
+                project_task_done(&body, &answer);
+                let _ = tx
+                    .send(
+                        Event::default().data(
+                            serde_json::json!({ "kind": "answer", "text": answer, "steps": 1 })
+                                .to_string(),
+                        ),
+                    )
+                    .await;
+                let _ = tx
+                    .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
+                    .await;
+                return;
+            }
+            // Sin URL que auditar → sigue el flujo normal.
+        }
+
         // ROUTER SEMÁNTICO (#4): para TODO mensaje que no fue charla trivial, decidimos por
         // SIGNIFICADO con embeddings (no por palabras). Solo si el margen es estrecho —de
         // verdad ambiguo— pedimos al clasificador LLM que lea el contexto completo.
@@ -2716,6 +3033,7 @@ async fn agent(
             // Biblioteca/Grafo), para poder hablar del tema, profundizar y construir encima.
             // En segundo plano: no retrasa el envío del informe al chat.
             crate::research_memory::remember_research(body.task.clone(), report.clone(), true);
+            project_task_done(&body, &report);
             let _ = tx
                 .send(Event::default().data(
                     serde_json::json!({ "kind": "answer", "text": report, "steps": 1 }).to_string(),
@@ -2782,6 +3100,7 @@ async fn agent(
                     &format!("leí {url} y le respondí a Ariel"),
                 ));
                 crate::awareness::record_outcome(ok);
+                project_task_done(&body, &text_out);
                 let _ = tx
                     .send(
                         Event::default().data(
@@ -2894,6 +3213,12 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::GenerateDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::GenerateOffertaTool::new()));
+        tools.register(Arc::new(crate::agent_tools::SeoAuditTool::new()));
+        // 📋 Tablero Kanban del proyecto: el agente lo opera (crear/mover/comentar/enlazar
+        // entregables) para AVANZAR el trabajo. Inyecta el proyecto en foco (None fuera de uno).
+        tools.register(Arc::new(crate::agent_tools::BoardTool::new(
+            body.project_id.clone(),
+        )));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
         // 📘 SkillBook (Hermes): memoria PROCEDIMENTAL — cómo hacer cosas que ya funcionaron.
@@ -3143,6 +3468,7 @@ async fn agent(
                     &body.task,
                     "se agotó el tiempo (herramienta o bucle colgado)",
                 );
+                project_task_done(&body, "Esto me llevó más tiempo del que tenía y no lo terminé a tiempo. Lo dejé apuntado y lo retomo por mi cuenta. Si prefieres, reformúlamelo más concreto.");
                 let _ = tx
                     .send(Event::default().data(
                         serde_json::json!({
@@ -3277,6 +3603,11 @@ async fn agent(
                 serde_json::json!({ "kind": "error", "text": e.to_string() })
             }
         };
+        // CONTINUACIÓN BG: persiste la respuesta en el chat del proyecto (sobrevive a cerrar la
+        // página) + avisa en la Bandeja. Cubre el camino conversacional y el del bucle ReAct.
+        if let Some(t) = final_event.get("text").and_then(|t| t.as_str()) {
+            project_task_done(&body, t);
+        }
         let _ = tx
             .send(Event::default().data(final_event.to_string()))
             .await;
@@ -3370,6 +3701,12 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::MakeDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::GenerateDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::GenerateOffertaTool::new()));
+        tools.register(Arc::new(crate::agent_tools::SeoAuditTool::new()));
+        // 📋 Tablero Kanban del proyecto: el agente lo opera (crear/mover/comentar/enlazar
+        // entregables) para AVANZAR el trabajo. Inyecta el proyecto en foco (None fuera de uno).
+        tools.register(Arc::new(crate::agent_tools::BoardTool::new(
+            body.project_id.clone(),
+        )));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
         // 💬 COMUNICACIONES en modo autónomo: SOLO lectura (agenda y contactos) para que el
@@ -6265,6 +6602,13 @@ async fn project_get(Json(b): Json<ProjId>) -> Json<serde_json::Value> {
             "project": p,
             "sources": crate::projects::sources(&b.id),
             "outputs": crate::projects::outputs(&b.id),
+            "folders": crate::projects::folders(&b.id),
+            // Tarea en curso (continuación en segundo plano): la UI pinta «trabajando…» al volver.
+            "running": project_running()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&b.id)
+                .cloned(),
         })),
         None => Json(serde_json::json!({ "ok": false, "error": "proyecto no encontrado" })),
     }
@@ -6300,6 +6644,8 @@ async fn project_source_add(Json(b): Json<SrcAdd>) -> Json<serde_json::Value> {
         }
     }
     let s = crate::projects::add_source(&b.project_id, &title, &b.kind, &content);
+    // Re-indexa el RAG del proyecto en segundo plano (no bloquea la respuesta).
+    crate::project_rag::reindex_bg(&b.project_id);
     Json(serde_json::json!({ "ok": true, "source": s }))
 }
 
@@ -6343,6 +6689,7 @@ async fn project_source_upload(Json(b): Json<SrcUpload>) -> Json<serde_json::Val
     // Recorta para no inflar el grounding; el documento completo queda referenciado.
     let content: String = text.chars().take(40000).collect();
     let s = crate::projects::add_source(&b.project_id, &safe, "archivo", &content);
+    crate::project_rag::reindex_bg(&b.project_id);
     Json(serde_json::json!({ "ok": true, "source": s }))
 }
 
@@ -6358,12 +6705,147 @@ async fn project_source_toggle(Json(b): Json<SrcToggle>) -> Json<serde_json::Val
 }
 
 #[derive(Deserialize)]
+struct SrcNote {
+    project_id: String,
+    id: String,
+    #[serde(default)]
+    note: String,
+}
+/// Fija el COMENTARIO de Ariel sobre una fuente (instrucción prioritaria para el agente).
+async fn project_source_note(Json(b): Json<SrcNote>) -> Json<serde_json::Value> {
+    crate::projects::set_source_note(&b.project_id, &b.id, &b.note);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
 struct SrcRemove {
     project_id: String,
     id: String,
 }
 async fn project_source_remove(Json(b): Json<SrcRemove>) -> Json<serde_json::Value> {
     crate::projects::remove_source(&b.project_id, &b.id);
+    crate::project_rag::reindex_bg(&b.project_id);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// Extensiones de documento que la carpeta enlazada ingiere (texto extraíble).
+const FOLDER_EXTS: &[&str] = &["pdf", "txt", "md", "markdown", "docx", "rtf", "csv"];
+
+/// Recorre una carpeta (recursivo, acotado) y devuelve los archivos soportados (rutas absolutas).
+/// Límite duro de archivos para no desbordar en carpetas enormes; ignora ocultos y symlinks.
+fn walk_folder(root: &std::path::Path, max: usize) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if out.len() >= max {
+            break;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue; // ocultos / .DS_Store
+            }
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(p);
+            } else if ft.is_file() {
+                let ext = p
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if FOLDER_EXTS.contains(&ext.as_str()) {
+                    out.push(p);
+                    if out.len() >= max {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Sincroniza una carpeta del disco DENTRO del proyecto (espejo): añade/actualiza las fuentes de
+/// sus documentos y ELIMINA las de archivos que ya no están. Devuelve (añadidas, actualizadas, quitadas).
+async fn sync_folder_into_project(pid: &str, folder: &str) -> (usize, usize, usize) {
+    let root = std::path::Path::new(folder);
+    let files = walk_folder(root, 300);
+    let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let (mut added, mut updated) = (0usize, 0usize);
+    for f in &files {
+        let abs = f.to_string_lossy().to_string();
+        let text = match crate::library::extract_text(f) {
+            Ok(t) if !t.trim().is_empty() => t,
+            _ => continue, // sin texto extraíble (imagen, binario) → se ignora
+        };
+        let content: String = text.chars().take(40000).collect();
+        let title = f
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| abs.clone());
+        keep.insert(abs.clone());
+        if crate::projects::upsert_file_source(pid, &title, &content, &abs) {
+            added += 1;
+        } else {
+            updated += 1;
+        }
+    }
+    let removed = crate::projects::prune_folder(pid, folder, &keep);
+    (added, updated, removed)
+}
+
+#[derive(Deserialize)]
+struct FolderLink {
+    project_id: String,
+    path: String,
+}
+/// Enlaza una carpeta del Mac al proyecto y la lee por primera vez (espejo).
+async fn project_folder_link(Json(b): Json<FolderLink>) -> Json<serde_json::Value> {
+    let path = b.path.trim();
+    if !std::path::Path::new(path).is_dir() {
+        return Json(
+            serde_json::json!({ "ok": false, "error": "esa ruta no es una carpeta válida en este Mac" }),
+        );
+    }
+    crate::projects::link_folder(&b.project_id, path);
+    let (added, updated, removed) = sync_folder_into_project(&b.project_id, path).await;
+    crate::project_rag::reindex_bg(&b.project_id);
+    Json(serde_json::json!({ "ok": true, "added": added, "updated": updated, "removed": removed }))
+}
+
+#[derive(Deserialize)]
+struct FolderSync {
+    project_id: String,
+}
+/// Re-sincroniza TODAS las carpetas enlazadas del proyecto (espejo del disco).
+async fn project_folder_sync(Json(b): Json<FolderSync>) -> Json<serde_json::Value> {
+    let (mut a, mut u, mut r) = (0usize, 0usize, 0usize);
+    for folder in crate::projects::folders(&b.project_id) {
+        if std::path::Path::new(&folder).is_dir() {
+            let (x, y, z) = sync_folder_into_project(&b.project_id, &folder).await;
+            a += x;
+            u += y;
+            r += z;
+        }
+    }
+    crate::project_rag::reindex_bg(&b.project_id);
+    Json(serde_json::json!({ "ok": true, "added": a, "updated": u, "removed": r }))
+}
+
+#[derive(Deserialize)]
+struct FolderUnlink {
+    project_id: String,
+    path: String,
+}
+/// Desenlaza una carpeta y quita sus documentos de la memoria del proyecto.
+async fn project_folder_unlink(Json(b): Json<FolderUnlink>) -> Json<serde_json::Value> {
+    crate::projects::unlink_folder(&b.project_id, &b.path);
+    crate::project_rag::reindex_bg(&b.project_id);
     Json(serde_json::json!({ "ok": true }))
 }
 
@@ -6641,6 +7123,208 @@ async fn project_chat_clear(Json(b): Json<ProjChatRef>) -> Json<serde_json::Valu
     Json(serde_json::json!({ "ok": true }))
 }
 
+// ── Tablero Kanban del proyecto ───────────────────────────────────────────────
+// El actor por defecto de las acciones de la UI es "ariel" (humano); el agente usa "aion".
+
+/// Snapshot completo del tablero para la UI: columnas (ordenadas), tarjetas, estado WIP por
+/// columna, progreso global y últimos eventos del log. Una sola llamada lo pinta todo.
+fn board_snapshot(pid: &str) -> serde_json::Value {
+    let board = crate::board::ensure(pid);
+    let (done, total, pct) = crate::board::progress(pid);
+    serde_json::json!({
+        "statuses": crate::board::list_statuses(pid),
+        "cards": board.cards,
+        "wip": crate::board::wip_state(pid),
+        "progress": { "done": done, "total": total, "pct": pct },
+        "activity": crate::board::activity(pid, 40),
+    })
+}
+
+#[derive(Deserialize)]
+struct BoardRef {
+    project_id: String,
+}
+async fn board_get(Json(b): Json<BoardRef>) -> Json<serde_json::Value> {
+    let mut snap = board_snapshot(&b.project_id);
+    snap["ok"] = serde_json::json!(true);
+    Json(snap)
+}
+
+#[derive(Deserialize)]
+struct BoardSeed {
+    project_id: String,
+    /// "generico" | "web-seo" | "contenido".
+    #[serde(default)]
+    template: String,
+    /// Si `true`, además de las columnas siembra las tarjetas del playbook (tempística + checklist).
+    #[serde(default)]
+    playbook: bool,
+}
+/// Siembra el tablero con una plantilla de etapas y, opcionalmente, el plan recomendado.
+async fn board_seed(Json(b): Json<BoardSeed>) -> Json<serde_json::Value> {
+    let tmpl = if b.template.trim().is_empty() {
+        "generico"
+    } else {
+        b.template.trim()
+    };
+    let seeded = if b.playbook {
+        crate::board::seed_playbook(&b.project_id, tmpl, "ariel")
+    } else {
+        // Fija las columnas de la plantilla (reemplaza el genérico auto-sembrado al abrir el tablero)
+        // siempre que no haya tarjetas; si ya hay trabajo, no toca las columnas.
+        crate::board::set_template(&b.project_id, tmpl);
+        0
+    };
+    let mut snap = board_snapshot(&b.project_id);
+    snap["ok"] = serde_json::json!(true);
+    snap["seeded_cards"] = serde_json::json!(seeded);
+    Json(snap)
+}
+
+#[derive(Deserialize)]
+struct StatusAdd {
+    project_id: String,
+    name: String,
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    wip: Option<u32>,
+}
+async fn board_status_add(Json(b): Json<StatusAdd>) -> Json<serde_json::Value> {
+    let st = crate::board::add_status(&b.project_id, &b.name, &b.category, b.wip);
+    Json(serde_json::json!({ "ok": true, "status": st }))
+}
+
+#[derive(Deserialize)]
+struct CardCreate {
+    project_id: String,
+    title: String,
+    /// id de columna, nombre o categoría (si no resuelve, cae en la primera columna).
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    desc: String,
+    #[serde(default = "actor_human")]
+    actor: String,
+}
+fn actor_human() -> String {
+    "ariel".into()
+}
+async fn board_card_create(Json(b): Json<CardCreate>) -> Json<serde_json::Value> {
+    match crate::board::card_create(&b.project_id, &b.actor, &b.title, &b.status, &b.desc) {
+        Ok(c) => Json(serde_json::json!({ "ok": true, "card": c })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CardUpdate {
+    project_id: String,
+    id: String,
+    #[serde(default = "actor_human")]
+    actor: String,
+    #[serde(flatten)]
+    patch: crate::board::CardPatch,
+}
+async fn board_card_update(Json(b): Json<CardUpdate>) -> Json<serde_json::Value> {
+    match crate::board::card_update(&b.project_id, &b.actor, &b.id, b.patch) {
+        Ok(c) => Json(serde_json::json!({ "ok": true, "card": c })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CardMove {
+    project_id: String,
+    id: String,
+    status: String,
+    #[serde(default)]
+    before: Option<String>,
+    #[serde(default = "actor_human")]
+    actor: String,
+}
+async fn board_card_move(Json(b): Json<CardMove>) -> Json<serde_json::Value> {
+    match crate::board::card_move(
+        &b.project_id,
+        &b.actor,
+        &b.id,
+        &b.status,
+        b.before.as_deref(),
+    ) {
+        Ok(c) => Json(serde_json::json!({ "ok": true, "card": c })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CardComment {
+    project_id: String,
+    id: String,
+    text: String,
+    #[serde(default = "actor_human")]
+    actor: String,
+}
+async fn board_card_comment(Json(b): Json<CardComment>) -> Json<serde_json::Value> {
+    match crate::board::card_comment(&b.project_id, &b.actor, &b.id, &b.text) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CardChecklist {
+    project_id: String,
+    id: String,
+    items: Vec<crate::board::ChecklistItem>,
+    #[serde(default = "actor_human")]
+    actor: String,
+}
+async fn board_card_checklist(Json(b): Json<CardChecklist>) -> Json<serde_json::Value> {
+    match crate::board::card_set_checklist(&b.project_id, &b.actor, &b.id, b.items) {
+        Ok(c) => Json(serde_json::json!({ "ok": true, "card": c })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CardLink {
+    project_id: String,
+    id: String,
+    kind: String,
+    reference: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default = "actor_human")]
+    actor: String,
+}
+async fn board_card_link(Json(b): Json<CardLink>) -> Json<serde_json::Value> {
+    match crate::board::card_link_deliverable(
+        &b.project_id,
+        &b.actor,
+        &b.id,
+        &b.kind,
+        &b.reference,
+        &b.title,
+    ) {
+        Ok(c) => Json(serde_json::json!({ "ok": true, "card": c })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CardDelete {
+    project_id: String,
+    id: String,
+    #[serde(default = "actor_human")]
+    actor: String,
+}
+async fn board_card_delete(Json(b): Json<CardDelete>) -> Json<serde_json::Value> {
+    match crate::board::card_delete(&b.project_id, &b.actor, &b.id) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
 /// Perfil de marca actual (logo/colores/idioma/numeración) usado por los documentos.
 async fn brand_get() -> Json<serde_json::Value> {
     let brand = aion_docgen::BrandProfile::load(crate::agent_tools::brand_profile_path());
@@ -6716,6 +7400,58 @@ struct StyleRemove {
 async fn doc_styles_remove(Json(b): Json<StyleRemove>) -> Json<serde_json::Value> {
     let p = doc_styles_dir().join(format!("{}.json", style_slug(&b.name)));
     let _ = std::fs::remove_file(p);
+    // Si era el predeterminado, lo limpiamos (vuelve al estilo por defecto).
+    if get_default_style_name().as_deref() == Some(b.name.trim()) {
+        let _ = std::fs::remove_file(default_style_path());
+    }
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// Puntero al estilo PREDETERMINADO global (el que se usa "siempre" cuando no se especifica
+/// uno): un archivo con el NOMBRE del estilo. Sin extensión .json → `doc_styles_list` lo ignora.
+fn default_style_path() -> std::path::PathBuf {
+    doc_styles_dir().join("_default.txt")
+}
+fn get_default_style_name() -> Option<String> {
+    std::fs::read_to_string(default_style_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+/// Resuelve el estilo predeterminado: busca por nombre en los presets y luego en los guardados;
+/// si no hay predeterminado o no se encuentra, cae al estilo por defecto («Slate · oro»). Lo usan
+/// el agente (`generate_offerta`) y los endpoints cuando el usuario no elige un estilo concreto.
+pub(crate) fn resolve_default_style() -> aion_docgen::DocStyle {
+    let Some(name) = get_default_style_name() else {
+        return aion_docgen::DocStyle::default();
+    };
+    if let Some(s) = aion_docgen::style::by_name(&name) {
+        return s;
+    }
+    let p = doc_styles_dir().join(format!("{}.json", style_slug(&name)));
+    if p.exists() {
+        return aion_docgen::DocStyle::load(p);
+    }
+    aion_docgen::DocStyle::default()
+}
+async fn doc_styles_default_get() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "ok": true, "name": get_default_style_name() }))
+}
+#[derive(Deserialize)]
+struct StyleDefault {
+    name: String,
+}
+/// Fija el estilo predeterminado por NOMBRE; nombre vacío lo limpia (vuelve al por defecto).
+async fn doc_styles_default_set(Json(b): Json<StyleDefault>) -> Json<serde_json::Value> {
+    let name = b.name.trim();
+    if name.is_empty() {
+        let _ = std::fs::remove_file(default_style_path());
+    } else {
+        let tmp = default_style_path().with_extension("txt.tmp");
+        if std::fs::write(&tmp, name).is_ok() {
+            let _ = std::fs::rename(&tmp, default_style_path());
+        }
+    }
     Json(serde_json::json!({ "ok": true }))
 }
 
@@ -6809,8 +7545,12 @@ async fn documents_offerta(Json(b): Json<OffertaGen>) -> axum::response::Respons
                 .as_deref()
                 .and_then(aion_docgen::style::by_name)
         })
-        .unwrap_or_default();
-    let content = aion_docgen::build_offerta(&b.facts);
+        // Sin estilo explícito → el PREDETERMINADO del usuario («utilizar siempre»).
+        .unwrap_or_else(resolve_default_style);
+    let mut content = aion_docgen::build_offerta(&b.facts);
+    // Numeración + fecha del preventivo. La oferta es italiana (scaffolding IT) → fecha en italiano.
+    content.doc_number = crate::agent_tools::next_preventivo_number();
+    content.doc_date = crate::agent_tools::human_date("it");
     let title = if b.facts.client.trim().is_empty() {
         "offerta".to_string()
     } else {
@@ -6875,6 +7615,374 @@ async fn documents_offerta(Json(b): Json<OffertaGen>) -> axum::response::Respons
     }
 }
 
+/// ¿La tarea pide convertir en DOCUMENTO (PDF/Word) una OFERTA ya hablada? (verbo de crear +
+/// sustantivo de oferta + formato/documento). Caso típico: «hazme la oferta en un pdf» tras
+/// haberla discutido en el chat. Es el disparador del FAST-PATH determinista de abajo.
+fn is_offerta_to_doc(task: &str) -> bool {
+    let t = task.to_lowercase();
+    let verb = [
+        "haz",
+        "hace",
+        "hazme",
+        "genera",
+        "gener",
+        "crea",
+        "créa",
+        "prepara",
+        "pasa",
+        "pása",
+        "pasame",
+        "pásame",
+        "convierte",
+        "conviert",
+        "dame",
+        "quiero",
+        "ponme",
+        "arma",
+        "monta",
+        "exporta",
+        "fammi",
+        "fai",
+        "genera",
+    ]
+    .iter()
+    .any(|v| t.contains(v));
+    let offer = [
+        "oferta",
+        "offerta",
+        "preventivo",
+        "propuesta",
+        "proposta",
+        "presupuesto",
+    ]
+    .iter()
+    .any(|v| t.contains(v));
+    let doc = t.contains("pdf")
+        || t.contains("word")
+        || t.contains("docx")
+        || t.contains("documento")
+        || t.contains("archivo")
+        || t.contains("file");
+    verb && offer && doc
+}
+
+/// Primer objeto JSON balanceado dentro de un texto (tolera ```json y prosa alrededor).
+fn first_json_object(s: &str) -> Option<String> {
+    let start = s.find('{')?;
+    let mut depth = 0i32;
+    for (i, c) in s[start..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(s[start..start + i + c.len_utf8()].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// **FAST-PATH determinista «oferta → documento».** Cuando Ariel pide convertir en PDF/Word una
+/// oferta ya hablada, NO lo dejamos al dado del bucle ReAct (el modelo local a veces no emite la
+/// acción y cae a la negativa honesta). Extraemos los HECHOS del contexto (conversación + tarea)
+/// con UNA llamada enfocada (JSON, temp 0) y renderizamos de verdad con la skill `offerta`.
+/// Devuelve el mensaje con la RUTA real, o `None` si no hay una oferta con servicios → sigue ReAct.
+async fn try_offerta_to_doc(engine: &dyn LlmEngine, body: &AgentBody) -> Option<String> {
+    // MATERIAL DEL PROYECTO (lo que faltaba): instrucciones de Ariel (notas) + contenido COMPLETO
+    // de las fuentes ACTIVAS. Así el agente usa los DATOS y la PLANTILLA reales de las fuentes y
+    // OBEDECE las instrucciones, en vez de inventar la oferta desde la conversación.
+    let mut project_block = String::new();
+    if let Some(pid) = body.project_id.as_deref() {
+        let notes = crate::projects::source_notes_block(pid);
+        if !notes.trim().is_empty() {
+            project_block.push_str(&notes);
+        }
+        for s in crate::projects::sources(pid)
+            .into_iter()
+            .filter(|s| s.active)
+        {
+            if s.content.trim().is_empty() {
+                continue;
+            }
+            let body_txt: String = s.content.chars().take(3000).collect();
+            project_block.push_str(&format!(
+                "\n[FUENTE «{}» ({})]:\n{}\n",
+                s.title, s.kind, body_txt
+            ));
+        }
+    }
+    let convo = body.context.as_deref().unwrap_or("");
+    // El PROYECTO va primero (no se trunca): sus datos y plantilla mandan sobre la charla.
+    let material = format!(
+        "{project_block}\n\n=== CONVERSACIÓN RECIENTE ===\n{convo}\n\n=== PETICIÓN ===\n{}",
+        body.task
+    );
+    let material: String = material.chars().take(12000).collect();
+    let prompt = format!(
+        "Preparas una OFERTA comercial. Extrae la oferta del MATERIAL y devuélvela como JSON VÁLIDO \
+         y NADA más (sin texto antes/después, sin ```), forma EXACTA:\n\
+         {{\"cliente\":\"\",\"titolo\":\"\",\"pitch\":\"\",\"servizi\":[{{\"titolo\":\"\",\"prezzo\":\"\",\"nota\":\"\"}}],\
+\"canone\":\"\",\"comparativa\":[{{\"etichetta\":\"\",\"valore\":\"\"}}],\"deducibile\":true}}\n\
+         REGLAS (en este orden de prioridad):\n\
+         1. Las INSTRUCCIONES DE ARIEL (notas de las fuentes) son ÓRDENES: cúmplelas. Si una nota \
+         dice usar los datos de NUESTRA empresa o tomar una oferta/plantilla, HAZLO.\n\
+         2. Usa los SERVICIOS, PRECIOS y COMPARATIVA de las FUENTES (la oferta/plantilla del proyecto \
+         es la base); replica su estructura.\n\
+         3. El CLIENTE es el que indiquen las notas/fuentes (p. ej. la fuente marcada «nuestro \
+         cliente»), SALVO que la conversación pida explícitamente otro cliente distinto.\n\
+         4. Usa SOLO datos PRESENTES; NO inventes servicios ni precios. Si no hay una oferta con al \
+         menos un servicio con su precio, devuelve exactamente {{}}.\n\
+         \nMATERIAL:\n«««\n{material}\n»»»"
+    );
+    let gen = tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        engine.generate(GenerateRequest {
+            messages: vec![Message::user(prompt)],
+            think: false,
+            temperature: Some(0.0),
+            max_tokens: Some(800),
+        }),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let v: serde_json::Value = serde_json::from_str(&first_json_object(&gen.content)?).ok()?;
+    let servizi = v
+        .get("servizi")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let services: Vec<aion_docgen::OfferRow> = servizi
+        .iter()
+        .filter_map(|s| {
+            let title = s
+                .get("titolo")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim();
+            let price = s
+                .get("prezzo")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim();
+            if title.is_empty() || price.is_empty() {
+                return None;
+            }
+            Some(aion_docgen::OfferRow {
+                title: title.to_string(),
+                desc: String::new(),
+                price: price.to_string(),
+                price_note: s
+                    .get("nota")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+            })
+        })
+        .collect();
+    // Sin servicios reales = no hay oferta que renderizar → que siga el flujo normal (ReAct).
+    if services.is_empty() {
+        return None;
+    }
+    let cmp_in = v
+        .get("comparativa")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let n = cmp_in.len();
+    let comparison: Vec<aion_docgen::CompareBar> = cmp_in
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let label = c
+                .get("etichetta")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim();
+            if label.is_empty() {
+                return None;
+            }
+            let tone = if n >= 2 && i + 1 == n {
+                "green"
+            } else if i == 0 {
+                "red"
+            } else {
+                "gold"
+            };
+            // Más caro (i=0) → barra llena; el tuyo (último) → corta. Anclaje visual.
+            let pct = if n > 1 {
+                (100 - (i * 60 / (n - 1))) as u8
+            } else {
+                60
+            };
+            Some(aion_docgen::CompareBar {
+                label: label.to_string(),
+                value: c
+                    .get("valore")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+                pct,
+                tone: tone.to_string(),
+            })
+        })
+        .collect();
+    let client = v
+        .get("cliente")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let canone = v
+        .get("canone")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let facts = aion_docgen::OffertaFacts {
+        client: client.clone(),
+        hero_title: v
+            .get("titolo")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        hero_pitch: v
+            .get("pitch")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        recurring_label: if canone.is_empty() {
+            String::new()
+        } else {
+            "Canone".to_string()
+        },
+        recurring_value: canone,
+        services,
+        comparison,
+        deductible: v
+            .get("deducibile")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(true),
+        ..Default::default()
+    };
+    let brand = aion_docgen::BrandProfile::load(crate::agent_tools::brand_profile_path());
+    let style = resolve_default_style();
+    let mut content = aion_docgen::build_offerta(&facts);
+    content.doc_number = crate::agent_tools::next_preventivo_number();
+    content.doc_date = crate::agent_tools::human_date("it");
+    let want_docx = {
+        let t = body.task.to_lowercase();
+        t.contains("word") || t.contains("docx")
+    };
+    let (bytes, ext) = if want_docx {
+        (
+            aion_docgen::render_offerta_docx(&brand, &content).ok()?,
+            "docx",
+        )
+    } else {
+        (
+            aion_docgen::render_offerta_pdf(
+                &brand,
+                &style,
+                &content,
+                &aion_docgen::PdfOptions::default(),
+            )
+            .await
+            .ok()?,
+            "pdf",
+        )
+    };
+    let home = std::env::var("HOME").ok()?;
+    let who: String = client
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let who = who.trim().trim_matches('_').trim();
+    let name = if who.is_empty() {
+        "Offerta".to_string()
+    } else {
+        format!("Offerta {}", who.chars().take(50).collect::<String>())
+    };
+    let path = std::path::Path::new(&home)
+        .join("Desktop")
+        .join(format!("{name}.{ext}"));
+    std::fs::write(&path, &bytes).ok()?;
+    crate::agent_tools::open_file(&path, false);
+    Some(format!(
+        "Listo: preparé la oferta ({}) y la guardé en tu Escritorio:\n{}",
+        ext.to_uppercase(),
+        path.display()
+    ))
+}
+
+/// ¿La tarea pide una AUDITORÍA SEO? (mención de SEO/posicionamiento + verbo de auditar/analizar).
+fn is_seo_audit(task: &str) -> bool {
+    let t = task.to_lowercase();
+    let seo = t.contains("seo") || t.contains("posicionamiento");
+    let audit = t.contains("audit")
+        || t.contains("analiz")
+        || t.contains("analís")
+        || t.contains("revis")
+        || t.contains("evalúa")
+        || t.contains("evalua")
+        || t.contains("informe")
+        || t.contains("diagnos")
+        || t.contains("chequea")
+        || t.contains("mejora");
+    seo && audit
+}
+
+/// Resuelve la URL a auditar: la de la tarea, o —si viene de un proyecto— la primera fuente WEB
+/// activa del proyecto. `None` si no hay ninguna.
+fn resolve_seo_url(body: &AgentBody) -> Option<String> {
+    if let Some(u) = extract_url(&body.task) {
+        return Some(u);
+    }
+    let pid = body.project_id.as_ref()?;
+    crate::projects::sources(pid)
+        .into_iter()
+        .find(|s| s.active && s.kind == "web")
+        .map(|s| {
+            let cand = if s.content.trim().starts_with("http") {
+                s.content.trim().to_string()
+            } else {
+                s.title.trim().to_string()
+            };
+            if cand.starts_with("http") {
+                cand
+            } else {
+                format!("https://{cand}")
+            }
+        })
+}
+
+/// FAST-PATH determinista de AUDITORÍA SEO: lee la URL (HTML crudo + render headless), la puntúa
+/// y entrega un PDF con la marca. Devuelve el mensaje con la ruta o `None` (→ flujo normal).
+async fn try_seo_audit(body: &AgentBody) -> Option<String> {
+    let url = resolve_seo_url(body)?;
+    match crate::seo_audit::audit_to_desktop(&url).await {
+        Ok((path, score, final_url)) => Some(format!(
+            "Auditoría SEO de {final_url} lista — **puntuación {score}/100**. La guardé en tu Escritorio:\n{path}"
+        )),
+        Err(e) => Some(format!(
+            "Intenté la auditoría SEO de {url} pero no pude completarla: {e}"
+        )),
+    }
+}
+
 /// Genera un documento branded (PDF/Word/HTML) desde Markdown y lo devuelve como descarga.
 async fn documents_generate(Json(b): Json<DocGenReq>) -> axum::response::Response {
     if b.markdown.trim().is_empty() {
@@ -6885,10 +7993,15 @@ async fn documents_generate(Json(b): Json<DocGenReq>) -> axum::response::Respons
     if let Some(l) = b.lang.as_deref().filter(|s| !s.is_empty()) {
         brand.lang = l.to_string();
     }
-    // Estilo de la galería: aplica su paleta al documento simple (ink/accent de la marca).
+    // Estilo de la galería: aplica su paleta al documento simple (ink/accent de la marca). Sin
+    // estilo explícito, si el usuario fijó un PREDETERMINADO, se usa («utilizar siempre»).
     if let Some(st) = &b.style {
         brand.ink = st.ink.clone();
         brand.accent = st.accent.clone();
+    } else if get_default_style_name().is_some() {
+        let d = resolve_default_style();
+        brand.ink = d.ink;
+        brand.accent = d.accent;
     }
     let date = b
         .date
@@ -7594,6 +8707,29 @@ async fn agent_import(Json(b): Json<AgentImport>) -> Json<serde_json::Value> {
 /// Identidad única de este AION (id irrepetible + nombre + nacimiento).
 async fn identity_get() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "identity": crate::identity::get() }))
+}
+
+#[derive(Deserialize)]
+struct NameBody {
+    #[serde(default)]
+    name: String,
+}
+/// Fija el NOMBRE que el usuario eligió en el onboarding. Marca `self_named` para que el ritual
+/// automático de auto-nombrado no lo sobrescriba. Nombre vacío → no hace nada (AION elige solo).
+async fn identity_name_set(Json(b): Json<NameBody>) -> Json<serde_json::Value> {
+    let clean: String = b
+        .name
+        .trim()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
+        .take(24)
+        .collect();
+    let clean = clean.trim();
+    if clean.len() < 2 {
+        return Json(serde_json::json!({ "ok": false, "error": "nombre demasiado corto" }));
+    }
+    crate::identity::set_name(clean);
+    Json(serde_json::json!({ "ok": true, "name": clean }))
 }
 
 // ── A2A: comunicación entre agentes ──────────────────────────────────────────

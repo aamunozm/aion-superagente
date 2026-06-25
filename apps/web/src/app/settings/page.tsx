@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
+import { APP_VERSION } from "@/lib/version";
 import Icon from "@/components/Icon";
 import { LANGS, useT } from "@/lib/i18n";
-import { playTtsBlob } from "@/lib/voice";
+import { playTtsBlob, systemVoices, pickSystemVoice } from "@/lib/voice";
 import {
   ttsSpeak,
   ttsVoices,
@@ -140,6 +141,9 @@ function VoiceCard() {
   const { lang } = useT();
   const [engine, setEngine] = useState<"auto" | "system">("auto");
   const [voice, setVoice] = useState(DEFAULT_VOICE_ID);
+  // Voces del SISTEMA (macOS): el usuario puede elegir CUALQUIERA. "" = automática (por género).
+  const [macVoices, setMacVoices] = useState<{ name: string; lang: string; localService: boolean }[]>([]);
+  const [sysVoice, setSysVoice] = useState("");
   const [speed, setSpeed] = useState(1);
   const [exaggeration, setExaggeration] = useState(0.6);
   const [testing, setTesting] = useState(false);
@@ -176,10 +180,26 @@ function VoiceCard() {
     if (typeof localStorage === "undefined") return;
     if (localStorage.getItem("aion.voice") === "system") setEngine("system");
     setVoice(localStorage.getItem("aion.voice.name") || DEFAULT_VOICE_ID);
+    setSysVoice(localStorage.getItem("aion.voice.system") || "");
     setSpeed(parseFloat(localStorage.getItem("aion.voice.speed") || "1") || 1);
     setExaggeration(parseFloat(localStorage.getItem("aion.voice.exaggeration") || "0.6") || 0.6);
     refreshCloned();
   }, []);
+  // Carga las voces del Mac (getVoices() llega async → escucha 'voiceschanged').
+  useEffect(() => {
+    const load = () => setMacVoices(systemVoices());
+    load();
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.addEventListener("voiceschanged", load);
+      return () => window.speechSynthesis.removeEventListener("voiceschanged", load);
+    }
+  }, []);
+  // Elige una voz concreta del Mac ("" = automática por género).
+  const chooseSysVoice = (name: string) => {
+    setSysVoice(name);
+    if (name) save("aion.voice.system", name);
+    else { try { localStorage.removeItem("aion.voice.system"); } catch { /* */ } }
+  };
 
   const save = (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* */ } };
   // El motor de una voz: clonada → Qwen3 (natural + tiempo real); si no, el del catálogo.
@@ -227,6 +247,8 @@ function VoiceCard() {
         const u = new SpeechSynthesisUtterance("Hola Ariel, soy AION. Así sueno.");
         u.lang = lang === "it" ? "it-IT" : lang === "en" ? "en-US" : "es-ES";
         u.rate = speed;
+        const v = pickSystemVoice(u.lang); // respeta la voz de macOS elegida (o el género)
+        if (v) u.voice = v;
         window.speechSynthesis.cancel();
         window.speechSynthesis.speak(u);
       } else {
@@ -287,31 +309,60 @@ function VoiceCard() {
       </div>
 
       {/* Voz concreta + velocidad (solo aplican a la voz propia) */}
-      <div className="grid sm:grid-cols-2 gap-3" style={{ opacity: engine === "system" ? 0.5 : 1 }}>
+      <div className="grid sm:grid-cols-2 gap-3">
         <div>
           <label className="text-xs block mb-1" style={{ color: "var(--text-3)" }}>Voz</label>
-          <select
-            className="input"
-            value={voice}
-            disabled={engine === "system"}
-            onChange={(e) => chooseVoice(e.target.value)}
-            style={{ background: "var(--surface-1)", color: "var(--text-1)" }}
-          >
-            {CLONE_GROUPS.map((grp) => {
-              const items = cloned.filter((c) => classifyClone(c).group === grp);
-              if (!items.length) return null;
-              return (
-                <optgroup key={grp} label={grp}>
-                  {items.map((c) => (
-                    <option key={`c-${c}`} value={c}>{classifyClone(c).label}</option>
-                  ))}
-                </optgroup>
-              );
-            })}
-            <optgroup label="Catálogo — español nativo (género fiable ✓) y multiidioma">
-              {VOICES.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
-            </optgroup>
-          </select>
+          {engine === "system" ? (
+            // Cualquier voz instalada en el Mac. "" = automática por el género del onboarding.
+            <select
+              className="input"
+              value={sysVoice}
+              onChange={(e) => chooseSysVoice(e.target.value)}
+              style={{ background: "var(--surface-1)", color: "var(--text-1)" }}
+            >
+              <option value="">Automática (según femenina/masculina del onboarding)</option>
+              {(() => {
+                const es = macVoices.filter((v) => v.lang?.toLowerCase().startsWith("es"));
+                const otras = macVoices.filter((v) => !v.lang?.toLowerCase().startsWith("es"));
+                return (
+                  <>
+                    {es.length > 0 && (
+                      <optgroup label="Español">
+                        {es.map((v) => <option key={v.name} value={v.name}>{v.name} · {v.lang}</option>)}
+                      </optgroup>
+                    )}
+                    {otras.length > 0 && (
+                      <optgroup label="Otros idiomas">
+                        {otras.map((v) => <option key={v.name} value={v.name}>{v.name} · {v.lang}</option>)}
+                      </optgroup>
+                    )}
+                  </>
+                );
+              })()}
+            </select>
+          ) : (
+            <select
+              className="input"
+              value={voice}
+              onChange={(e) => chooseVoice(e.target.value)}
+              style={{ background: "var(--surface-1)", color: "var(--text-1)" }}
+            >
+              {CLONE_GROUPS.map((grp) => {
+                const items = cloned.filter((c) => classifyClone(c).group === grp);
+                if (!items.length) return null;
+                return (
+                  <optgroup key={grp} label={grp}>
+                    {items.map((c) => (
+                      <option key={`c-${c}`} value={c}>{classifyClone(c).label}</option>
+                    ))}
+                  </optgroup>
+                );
+              })}
+              <optgroup label="Catálogo — español nativo (género fiable ✓) y multiidioma">
+                {VOICES.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
+              </optgroup>
+            </select>
+          )}
         </div>
         <div>
           <label className="text-xs block mb-1" style={{ color: "var(--text-3)" }}>
@@ -1409,6 +1460,9 @@ export default function SettingsPage() {
           )}
         </div>
       </div>
+      <p className="text-center text-[11px] py-5" style={{ color: "var(--text-3)" }}>
+        AION <strong style={{ color: "var(--text-2)" }}>v{APP_VERSION}</strong> · super-agente local · 100% on-device
+      </p>
     </AppShell>
   );
 }

@@ -16,6 +16,7 @@
 //! ```
 
 pub mod brand;
+pub mod charts;
 mod docx;
 mod markdown;
 pub mod offerta;

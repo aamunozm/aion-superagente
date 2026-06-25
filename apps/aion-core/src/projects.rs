@@ -13,6 +13,13 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Lock COMPARTIDO para los tests que mutan la env GLOBAL `AION_PROJECTS_DIR` (este módulo y
+/// [`crate::board`]): cada módulo con su propio lock NO se serializa contra el otro, así que en
+/// paralelo competían por la variable y se contaminaban. Con un único lock de crate, los tests de
+/// proyectos y tablero se ejecutan en exclusión mutua.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: String,
@@ -35,6 +42,16 @@ pub struct Source {
     pub kind: String,
     #[serde(default)]
     pub content: String,
+    /// COMENTARIO de Ariel sobre esta fuente: una instrucción a tener SIEMPRE en cuenta al usarla
+    /// (p. ej. «el precio vigente es 250€, ignora el del PDF»). Se inyecta con prioridad en el
+    /// grounding del agente, aparte del contenido recuperado.
+    #[serde(default)]
+    pub note: String,
+    /// Ruta de ORIGEN en disco si la fuente proviene de una **carpeta enlazada** (espejo). Vacío
+    /// si es manual. Permite sincronizar: al re-leer la carpeta, las fuentes cuyo archivo ya no
+    /// existe se eliminan.
+    #[serde(default)]
+    pub path: String,
     /// Si está ACTIVA, se usa para anclar (grounding) el chat/agente del proyecto.
     #[serde(default = "yes")]
     pub active: bool,
@@ -76,6 +93,11 @@ fn sources_path(pid: &str) -> PathBuf {
 }
 fn studio_path(pid: &str) -> PathBuf {
     base().join(pid).join("studio.json")
+}
+/// Carpeta de datos de un proyecto (respeta `AION_PROJECTS_DIR`). La usa el índice RAG por
+/// proyecto ([`crate::project_rag`]) para guardar su archivo aislado junto al resto del proyecto.
+pub fn project_dir(pid: &str) -> PathBuf {
+    base().join(pid)
 }
 
 fn read_vec<T: DeserializeOwned>(path: &PathBuf) -> Vec<T> {
@@ -163,6 +185,8 @@ pub fn add_source(pid: &str, title: &str, kind: &str, content: &str) -> Source {
         title: title.trim().to_string(),
         kind: kind.trim().to_string(),
         content: content.trim().to_string(),
+        note: String::new(),
+        path: String::new(),
         active: true,
         created: now(),
     };
@@ -171,6 +195,91 @@ pub fn add_source(pid: &str, title: &str, kind: &str, content: &str) -> Source {
     write_vec(&sources_path(pid), &all);
     touch(pid);
     s
+}
+
+// ── Carpetas enlazadas (espejo del disco) ───────────────────────────────────────
+
+fn folders_path(pid: &str) -> PathBuf {
+    base().join(pid).join("folders.json")
+}
+/// Carpetas del disco enlazadas a este proyecto (rutas absolutas).
+pub fn folders(pid: &str) -> Vec<String> {
+    read_vec(&folders_path(pid))
+}
+/// Enlaza una carpeta (idempotente).
+pub fn link_folder(pid: &str, path: &str) {
+    let mut all = folders(pid);
+    let p = path.trim().to_string();
+    if !p.is_empty() && !all.iter().any(|x| x == &p) {
+        all.push(p);
+        write_vec(&folders_path(pid), &all);
+        touch(pid);
+    }
+}
+/// Desenlaza una carpeta y elimina TODAS sus fuentes (las que vinieron de ahí).
+pub fn unlink_folder(pid: &str, path: &str) {
+    let p = path.trim();
+    let all: Vec<String> = folders(pid).into_iter().filter(|x| x != p).collect();
+    write_vec(&folders_path(pid), &all);
+    let kept: Vec<Source> = sources(pid)
+        .into_iter()
+        .filter(|s| !is_under(&s.path, p))
+        .collect();
+    write_vec(&sources_path(pid), &kept);
+    touch(pid);
+}
+
+fn is_under(file: &str, folder: &str) -> bool {
+    !file.is_empty()
+        && (file == folder || file.starts_with(&format!("{}/", folder.trim_end_matches('/'))))
+}
+
+/// Inserta o ACTUALIZA una fuente de archivo identificada por su `path` de origen (espejo de
+/// carpeta). Devuelve `true` si era nueva. Conserva el comentario (`note`) y el estado `active`.
+pub fn upsert_file_source(pid: &str, title: &str, content: &str, path: &str) -> bool {
+    let mut all = sources(pid);
+    if let Some(s) = all
+        .iter_mut()
+        .find(|s| !s.path.is_empty() && s.path == path)
+    {
+        s.title = title.trim().to_string();
+        s.content = content.trim().to_string();
+        write_vec(&sources_path(pid), &all);
+        touch(pid);
+        false
+    } else {
+        let s = Source {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: title.trim().to_string(),
+            kind: "archivo".into(),
+            content: content.trim().to_string(),
+            note: String::new(),
+            path: path.trim().to_string(),
+            active: true,
+            created: now(),
+        };
+        all.insert(0, s);
+        write_vec(&sources_path(pid), &all);
+        touch(pid);
+        true
+    }
+}
+
+/// Elimina las fuentes que provienen de `folder` cuyo archivo YA NO está en `keep` (se borró del
+/// disco). Devuelve cuántas quitó. Es lo que hace que «sacar un documento → desaparece de la memoria».
+pub fn prune_folder(pid: &str, folder: &str, keep: &std::collections::HashSet<String>) -> usize {
+    let before = sources(pid);
+    let n0 = before.len();
+    let kept: Vec<Source> = before
+        .into_iter()
+        .filter(|s| !is_under(&s.path, folder) || keep.contains(&s.path))
+        .collect();
+    let removed = n0 - kept.len();
+    if removed > 0 {
+        write_vec(&sources_path(pid), &kept);
+        touch(pid);
+    }
+    removed
 }
 
 pub fn toggle_source(pid: &str, sid: &str, active: bool) {
@@ -184,6 +293,35 @@ pub fn toggle_source(pid: &str, sid: &str, active: bool) {
 pub fn remove_source(pid: &str, sid: &str) {
     let all: Vec<Source> = sources(pid).into_iter().filter(|s| s.id != sid).collect();
     write_vec(&sources_path(pid), &all);
+}
+
+/// Fija (o limpia, con cadena vacía) el COMENTARIO de Ariel sobre una fuente.
+pub fn set_source_note(pid: &str, sid: &str, note: &str) {
+    let mut all = sources(pid);
+    if let Some(s) = all.iter_mut().find(|s| s.id == sid) {
+        s.note = note.trim().to_string();
+        write_vec(&sources_path(pid), &all);
+        touch(pid);
+    }
+}
+
+/// Bloque de INSTRUCCIONES de Ariel: los comentarios de las fuentes ACTIVAS que los tengan. Se
+/// antepone al grounding con prioridad explícita (no se diluye entre el contenido recuperado).
+pub fn source_notes_block(pid: &str) -> String {
+    let notes: Vec<Source> = sources(pid)
+        .into_iter()
+        .filter(|s| s.active && !s.note.trim().is_empty())
+        .collect();
+    if notes.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "\nINSTRUCCIONES DE ARIEL (PRIORIDAD MÁXIMA — respétalas al usar las fuentes):\n",
+    );
+    for n in notes {
+        s.push_str(&format!("- Sobre «{}»: {}\n", n.title, n.note.trim()));
+    }
+    s
 }
 
 // ── Studio (salidas) ──────────────────────────────────────────────────────────
@@ -284,6 +422,19 @@ pub fn clear_chat(pid: &str) {
 /// Contexto de anclaje (grounding) del proyecto para el chat/agente: el objetivo
 /// más el texto de las fuentes ACTIVAS (recortado). Así el agente responde con
 /// foco en el material del proyecto, no en general.
+/// Cabecera del grounding: solo identidad del proyecto (nombre + objetivo), sin fuentes. La
+/// reutiliza el RAG por proyecto para anteponerla a los fragmentos recuperados.
+pub fn header(pid: &str) -> String {
+    let Some(p) = get(pid) else {
+        return String::new();
+    };
+    let mut s = format!("PROYECTO EN FOCO: «{}».", p.name);
+    if !p.desc.is_empty() {
+        s.push_str(&format!(" Objetivo: {}.", p.desc));
+    }
+    s
+}
+
 pub fn grounding(pid: &str) -> String {
     let Some(p) = get(pid) else {
         return String::new();
@@ -292,6 +443,8 @@ pub fn grounding(pid: &str) -> String {
     if !p.desc.is_empty() {
         s.push_str(&format!(" Objetivo: {}.", p.desc));
     }
+    // Comentarios de Ariel sobre las fuentes (prioridad), antes del contenido.
+    s.push_str(&source_notes_block(pid));
     let active: Vec<Source> = sources(pid).into_iter().filter(|s| s.active).collect();
     if !active.is_empty() {
         s.push_str(
@@ -310,11 +463,9 @@ pub fn grounding(pid: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // El store se aísla con una env var GLOBAL; serializamos los tests para que no
-    // compitan por ella (los tests de Rust corren en paralelo por defecto).
-    static LOCK: Mutex<()> = Mutex::new(());
+    // Serializa con el lock COMPARTIDO de crate (`TEST_ENV_LOCK`) para no competir con los tests de
+    // `board`, que aíslan con la misma env var global.
+    use super::TEST_ENV_LOCK as LOCK;
 
     /// Aísla el store en un directorio temporal único para no tocar datos reales.
     fn isolate() -> String {

@@ -11,6 +11,7 @@ mod apikeys;
 mod arcface;
 mod awareness;
 mod biography;
+mod board;
 mod capabilities;
 mod claude_code;
 mod claude_mcp;
@@ -25,6 +26,7 @@ mod empathy;
 mod episodic;
 mod evals;
 mod faces;
+mod flow;
 mod governance;
 mod graph;
 mod identity;
@@ -49,9 +51,11 @@ mod pending;
 mod permits;
 mod personality;
 mod plan;
+mod project_rag;
 mod projects;
 mod prompt_store;
 mod prompts;
+mod proposta;
 mod provider;
 mod redact;
 mod reflection;
@@ -59,6 +63,7 @@ mod research_memory;
 mod self_model;
 mod senses;
 mod sensors;
+mod seo_audit;
 mod serve;
 mod skill_store;
 mod skill_tool;
@@ -4056,24 +4061,42 @@ fn run_models_ensure() {
         "descargando modelos (primer arranque)"
     );
 
+    // REINTENTOS: una descarga grande puede cortarse por red; `ollama pull`/`create` REANUDAN lo ya
+    // bajado, así que reintentamos hasta 3 veces antes de avisar de error (descarga robusta).
     if need_embed {
-        let ok = no_window(Command::new(&bin))
-            .args(["pull", embed])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let mut ok = false;
+        for attempt in 1..=3 {
+            ok = no_window(Command::new(&bin))
+                .args(["pull", embed])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                break;
+            }
+            tracing::warn!(attempt, "reintentando descarga de embeddings");
+            std::thread::sleep(Duration::from_secs(3));
+        }
         if !ok {
             notify_user("AION", "Error descargando el modelo de embeddings.");
         }
     }
 
     if need_chat {
-        let mut cmd = no_window(Command::new(&bin));
-        cmd.args(["create", CHAT]);
-        if !modelfile.is_empty() {
-            cmd.args(["-f", &modelfile]);
+        let mut ok = false;
+        for attempt in 1..=3 {
+            let mut cmd = no_window(Command::new(&bin));
+            cmd.args(["create", CHAT]);
+            if !modelfile.is_empty() {
+                cmd.args(["-f", &modelfile]);
+            }
+            ok = cmd.status().map(|s| s.success()).unwrap_or(false);
+            if ok {
+                break;
+            }
+            tracing::warn!(attempt, "reintentando creación de {CHAT}");
+            std::thread::sleep(Duration::from_secs(5));
         }
-        let ok = cmd.status().map(|s| s.success()).unwrap_or(false);
         if ok {
             notify_user("AION", "¡Listo! AION ya está preparado para conversar.");
             tracing::info!("modelo {CHAT} listo");

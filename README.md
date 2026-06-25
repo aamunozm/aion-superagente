@@ -79,6 +79,16 @@ flowchart LR
 
 **Grafo de conocimiento (GAAMA-KG)** — ingesta **lazy de coste cero en LLM**: extracción determinista de conceptos (RAKE trilingüe es/en/it), deduplicación por embedding BGE-M3, aristas por co-ocurrencia e inferencia, comunidades por *label propagation*. El LLM solo trabaja en idle ("sueño") para tipificar relaciones y resumir comunidades. Retrieval dual-level (~160 ms) que cita el camino de conceptos por el que llegó a cada pasaje. Ingesta incremental por sha256: re-subir un documento no recomputa nada.
 
+## Proyectos: tablero por etapas, documentos expertos y flujos visuales
+
+Cada **proyecto** es un espacio de trabajo (estilo NotebookLM) con **Fuentes**, **Chat con foco** (RAG por proyecto sobre BGE-M3, aislado) y **Studio** — y, encima, las piezas para *llevar el trabajo hasta la entrega*:
+
+**Tablero Kanban por etapas.** Un tablero por proyecto con el modelo de Linear: la **categoría de estado** estable (backlog · por hacer · en curso · revisión · hecho · cancelado) va separada del **nombre de columna** renombrable, con **límite WIP** por columna (se colorea al superarse), **% de avance** y un **log de actividad append-only con actor** (humano vs `aion`) — transparencia total cuando el agente opera el tablero. Las tarjetas llevan prioridad, estimación, fecha, responsable, checklist y **entregables enlazados** (el preventivo o la auditoría que produce el Studio queda atado a su etapa). Arrastra entre columnas o **siembra un plan**: la plantilla *web + SEO de agencia* trae **7 etapas y 8 tareas con tempística y checklist de buenas prácticas** (incluida la de *Propuesta* con «firmas de ambas partes» y «GDPR»). El **agente opera el tablero** con una herramienta `board` (crear/mover/comentar/checklist/enlazar entregables) y registra cada escritura como actor `aion`.
+
+**Documentos expertos, 100 % local.** Pipeline determinista `Markdown → HTML branded (design tokens) → PDF` con un **Chromium headless propio** (cero sidecars ni API keys), con salida también en **DOCX editable**. Galería de estilos tipo Canva, **gráficos SVG on-brand** (vector nítido y seleccionable en PDF) y auto-revisión determinista del desborde. La skill **«Proposta analitica»** *analiza* el sitio del cliente (SEO real), razona su situación y redacta una propuesta a medida con **marca dinámica** (la empresa que emite; si falta, AION con pie de «agente de IA»). El cierre del preventivo es **determinista y completo**: próximos pasos destacados, validez, **firma de ambas partes con fecha** e **informativa de privacidad (Reg. UE 2016/679 — GDPR)**; y si faltan datos (cliente, precios, datos de empresa), AION **los pide en vez de inventarlos**.
+
+**Flujos visuales (editor de grafo nativo).** Motor de flujos por **DAG**: nodos *trigger / acción / condición*, aristas etiquetadas (`ok`/`err`, `true`/`false`), **gobernanza fail-closed** (una acción sensible en modo autónomo se detiene pidiendo tu aprobación) y migración 1:1 desde los flujos lineales previos. El **editor visual** se construye sobre **[React Flow](https://reactflow.dev/) (MIT)** — tras verificar que embeber **n8n** no encaja (su *Sustainable Use License* exige un acuerdo OEM y su self-host arrastra Node + PostgreSQL + Redis, en contra del *local-first*): el resultado es nativo, on-brand y sin infraestructura extra, con un puente opcional a un n8n externo vía webhook.
+
 ## Arquitectura
 
 Monolito modular en Rust — un solo binario `aion-core` con 13 crates por dominio. La nube (control-plane) solo ve auth, licencias y blobs cifrados.
@@ -116,6 +126,9 @@ infra/       docker-compose · migraciones · observabilidad
 
 - **Agente ReAct con herramientas** — hasta 8 pasos, verificación de *groundedness*, confirmación humana en acciones sensibles y canal "preguntar al usuario". **Equipo multiagente** (crew) con especialistas.
 - **Biblioteca RAG global** — sube PDF/TXT/MD en cualquier idioma; responde citando la fuente.
+- **Proyectos con tablero Kanban** — espacio por proyecto (Fuentes · Chat con foco · Studio · **tablero por etapas** con WIP, tempística, % de avance y entregables enlazados); el agente lo opera con la herramienta `board`.
+- **Documentos branded** — preventivos/ofertas/informes en **PDF y Word** con design tokens y gráficos SVG; cierre de preventivo con **firmas de ambas partes + fecha + GDPR** determinista e intuición de lo que falta.
+- **Flujos visuales** — editor de grafo (**React Flow**, MIT) con nodos *trigger/acción/condición*, ramas y gobernanza; motor **DAG** nativo (sin n8n embebido).
 - **Visión multimodal** — analiza imágenes y tu pantalla; control del PC integrado al agente.
 - **Voz natural en tiempo real** — modo voz manos-libres, **100% local**: cerebro de voz rápido (Qwen3-4B vía MLX) + síntesis con voces nativas en español (Piper: *Diego/Mateo* hombre, *Lucía/Daniela* mujer) y clonación expresiva (Qwen3-TTS). TTFT **~0.3 s** en caliente, audio por *streaming* sin cortes, prosodia emocional y normalización de números/símbolos.
 - **Browser agéntico** — navega la web, con salida opcional por Tor/VPN (`AION_PROXY`).
@@ -153,7 +166,7 @@ pnpm install && pnpm --dir apps/web dev   # http://localhost:3000
 
 Abre `http://localhost:3000`, crea tu cuenta local y saluda: AION elegirá su nombre al nacer. La guía completa de uso y subcomandos está en **[USAGE.md](USAGE.md)**.
 
-**App de escritorio (Tauri).** Para una app instalable en vez del modo dev: `cargo tauri build` genera el `.app` (macOS Apple Silicon) o el instalador `.exe` (Windows, vía el workflow `release-desktop`). El stack de voz no viaja en el bundle; se provisiona en la máquina destino con [`scripts/provision-voice-mac.sh`](scripts/provision-voice-mac.sh) — pasos en [`scripts/INSTALAR-OTRO-MAC.md`](scripts/INSTALAR-OTRO-MAC.md).
+**App de escritorio (Tauri).** Para una app instalable en vez del modo dev: `bash apps/desktop/build-universal.sh` genera un `.app` **universal (arm64 + Intel)** y de ahí se empaqueta el instalador **DMG** (arrastrar a Aplicaciones); en Windows el instalador `.exe` sale del workflow `release-desktop`. La firma usa la identidad local estable «AION Local Signing» (conserva permisos TCC entre actualizaciones); sin un *Developer ID* de Apple no hay notarización, así que en otro Mac se abre la primera vez con **clic derecho → Abrir** (o `xattr -dr com.apple.quarantine /Applications/AION.app`). El stack de voz no viaja en el bundle; se provisiona en la máquina destino con [`scripts/provision-voice-mac.sh`](scripts/provision-voice-mac.sh) — pasos en [`scripts/INSTALAR-OTRO-MAC.md`](scripts/INSTALAR-OTRO-MAC.md).
 
 ## Estado del proyecto
 
@@ -165,7 +178,8 @@ Abre `http://localhost:3000`, crea tu cuenta local y saluda: AION elegirá su no
 | **F6** | Sync E2E (CRDT cifrado) ✅ · Móvil (Capacitor) ⏳ | ✅ / ⏳ |
 | **Mente** | GWT con re-entrada · índice Φ · estado interno · conciencia temporal/presencia · grafo de conocimiento · UI Mente | ✅ |
 | **Voz** | Modo voz local en tiempo real: STT + cerebro Qwen3-4B (MLX) + TTS Piper/Qwen3 · ~0.3 s TTFT · *streaming* gapless · voces de hombre/mujer en español | ✅ |
-| **Distribución** | App de escritorio (Tauri): `.app` para macOS Apple Silicon · instalador `.exe` para Windows (vía CI) · provisión de voz con script | ✅ |
+| **Proyectos** | Tablero Kanban por etapas (WIP · tempística · % avance · entregables) · documentos expertos (PDF/DOCX, gráficos SVG, firmas + GDPR, intuición de lo que falta) · flujos visuales (editor de grafo React Flow + motor DAG) | ✅ |
+| **Distribución** | App de escritorio (Tauri) **universal (Apple Silicon + Intel)** · instalador **DMG** · `.exe` para Windows (vía CI) · provisión de voz con script | ✅ |
 
 **13/13 crates implementados.** Multiplataforma: macOS Apple Silicon es el objetivo completo (la voz local usa MLX, exclusivo de Apple Silicon); Windows ejecuta el chat de texto. Pendiente que requiere cuentas externas: Stripe real, Postgres gestionado, **notarización .app** (Apple Developer), build móvil. Avanzado opcional: mistral.rs embebido, speculative decoding, Tor embebido.
 

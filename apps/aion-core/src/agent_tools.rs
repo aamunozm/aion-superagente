@@ -1302,7 +1302,7 @@ impl Tool for MakeDocumentTool {
 }
 
 /// Abre un archivo en el Mac (TextEdit para texto plano, app por defecto para el resto).
-fn open_file(path: &std::path::Path, text_in_textedit: bool) {
+pub(crate) fn open_file(path: &std::path::Path, text_in_textedit: bool) {
     #[cfg(target_os = "macos")]
     {
         let mut cmd = std::process::Command::new("open");
@@ -1331,6 +1331,35 @@ pub(crate) fn brand_profile_path() -> std::path::PathBuf {
 }
 
 /// Fecha legible para el idioma de salida (es/it con mes en palabras; resto ISO).
+/// **Número de preventivo secuencial y persistente** (`PREV-AAAA-NNN`). La secuencia reinicia
+/// cada año natural. El contador vive en `~/.aion/preventivo_seq.json`; el daemon es el escritor
+/// único, así que un read-modify-write con escritura atómica (tmp→rename) basta —cada oferta
+/// generada recibe un número único y trazable, como un preventivo profesional real.
+pub(crate) fn next_preventivo_number() -> String {
+    use chrono::Datelike;
+    let year = chrono::Local::now().year();
+    let path = crate::app_data_dir().join("preventivo_seq.json");
+    let mut seq: u32 = 0;
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+            // Solo continúa la secuencia si es del MISMO año; si cambió el año, reinicia.
+            if v.get("year").and_then(|y| y.as_i64()) == Some(year as i64) {
+                seq = v.get("seq").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+            }
+        }
+    }
+    seq += 1;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let json = serde_json::json!({ "year": year, "seq": seq }).to_string();
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, &json).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+    format!("PREV-{year}-{seq:03}")
+}
+
 pub(crate) fn human_date(lang: &str) -> String {
     use chrono::Datelike;
     let now = chrono::Local::now();
@@ -1613,8 +1642,18 @@ impl Tool for GenerateOffertaTool {
             }
         }
         let brand = aion_docgen::BrandProfile::load(brand_profile_path());
-        let style = aion_docgen::style::by_name(&style_name).unwrap_or_default();
-        let content = aion_docgen::build_offerta(&f);
+        // Sin estilo en la entrada → el PREDETERMINADO del usuario; con nombre que no existe,
+        // también caemos al predeterminado (no a un default ciego).
+        let style = if style_name.trim().is_empty() {
+            crate::serve::resolve_default_style()
+        } else {
+            aion_docgen::style::by_name(&style_name)
+                .unwrap_or_else(crate::serve::resolve_default_style)
+        };
+        let mut content = aion_docgen::build_offerta(&f);
+        // Numeración + fecha del preventivo (metadatos profesionales, trazables). Oferta IT → fecha IT.
+        content.doc_number = next_preventivo_number();
+        content.doc_date = human_date("it");
         let bytes = aion_docgen::render_offerta_pdf(
             &brand,
             &style,
@@ -1650,6 +1689,44 @@ impl Tool for GenerateOffertaTool {
             "oferta creada y abierta en el Escritorio (estilo {}): {}",
             style.name,
             path.display()
+        ))
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Creation
+    }
+}
+
+/// **Skill experta: auditoría SEO.** Lee una URL (HTML + render headless), la puntúa y entrega PDF.
+pub struct SeoAuditTool;
+impl SeoAuditTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for SeoAuditTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[async_trait]
+impl Tool for SeoAuditTool {
+    fn name(&self) -> &str {
+        "seo_audit"
+    }
+    fn description(&self) -> &str {
+        "Auditoría SEO técnica on-page de una URL: descarga el HTML y RENDERIZA el JavaScript \
+         (sitios SPA/WordPress), y puntúa title, meta description, encabezados, móvil/viewport, \
+         datos estructurados, contenido, etc. Genera un PDF con la puntuación y acciones. Entrada: \
+         la URL del sitio (p. ej. «https://ejemplo.com»). Requiere Chrome."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let url = input.trim();
+        if url.is_empty() {
+            return Err("indica la URL del sitio a auditar".into());
+        }
+        let (path, score, final_url) = crate::seo_audit::audit_to_desktop(url).await?;
+        Ok(format!(
+            "Auditoría SEO de {final_url} ({score}/100) guardada en el Escritorio: {path}"
         ))
     }
     fn category(&self) -> ToolCategory {
@@ -1791,6 +1868,153 @@ impl Tool for MakeNoteTool {
         {
             let _ = (title, body);
             Err("la app Notas solo está disponible en macOS; usa make_document".into())
+        }
+    }
+}
+
+// ── Tablero Kanban del proyecto (el agente como gestor de proyecto) ──────────
+
+/// Herramienta única para operar el **tablero Kanban del proyecto en foco**. El agente la usa
+/// para AVANZAR el trabajo: ver el estado, crear/mover tarjetas, comentar, marcar checklist y
+/// **enlazar los entregables que produce** (preventivo, auditoría, documento) a su tarjeta. Cada
+/// escritura queda en el log con actor `aion` (transparencia humano-vs-agente). Solo funciona
+/// dentro de un proyecto (lo lleva inyectado); fuera de uno, avisa.
+pub struct BoardTool {
+    project_id: Option<String>,
+}
+impl BoardTool {
+    pub fn new(project_id: Option<String>) -> Self {
+        Self { project_id }
+    }
+}
+
+#[async_trait]
+impl Tool for BoardTool {
+    fn name(&self) -> &str {
+        "board"
+    }
+    fn description(&self) -> &str {
+        "Gestiona el TABLERO Kanban del proyecto (etapas, tarjetas, avance). Entrada = JSON con \
+         «op». Empieza SIEMPRE por {\"op\":\"list\"} para ver columnas y obtener los id de las \
+         tarjetas. Operaciones: \
+         {\"op\":\"list\"} · \
+         {\"op\":\"create\",\"title\":\"...\",\"status\":\"todo\",\"desc\":\"...\"} (status puede ser \
+         backlog|todo|doing|review|done o el nombre de la columna) · \
+         {\"op\":\"move\",\"id\":\"<card>\",\"status\":\"done\"} · \
+         {\"op\":\"comment\",\"id\":\"<card>\",\"text\":\"...\"} · \
+         {\"op\":\"checklist\",\"id\":\"<card>\",\"items\":[{\"text\":\"...\",\"done\":true}]} · \
+         {\"op\":\"link\",\"id\":\"<card>\",\"kind\":\"preventivo|documento|seo|url\",\"reference\":\"PREV-2026-031\",\"title\":\"...\"} para atar un entregable a la tarjeta · \
+         {\"op\":\"seed\",\"template\":\"web-seo\",\"playbook\":true} para sembrar etapas + plan recomendado con tempística."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let pid = self
+            .project_id
+            .clone()
+            .filter(|p| !p.trim().is_empty())
+            .ok_or("el tablero solo existe dentro de un proyecto; abre un proyecto primero")?;
+        let v: serde_json::Value = serde_json::from_str(input.trim())
+            .map_err(|e| format!("entrada no es JSON válido ({e}). Ej: {{\"op\":\"list\"}}"))?;
+        let op = v.get("op").and_then(|x| x.as_str()).unwrap_or("list");
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        match op {
+            "list" => {
+                let cols = crate::board::list_statuses(&pid);
+                let wip = crate::board::wip_state(&pid);
+                let board = crate::board::load(&pid);
+                let name_of = |sid: &str| {
+                    cols.iter()
+                        .find(|c| c.id == sid)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_default()
+                };
+                let columns: Vec<_> = cols
+                    .iter()
+                    .map(|c| {
+                        let w = wip.iter().find(|w| w.status_id == c.id);
+                        serde_json::json!({
+                            "id": c.id, "name": c.name, "category": c.category,
+                            "wip": c.wip, "count": w.map(|w| w.count), "over": w.map(|w| w.over),
+                        })
+                    })
+                    .collect();
+                let cards: Vec<_> = board
+                    .cards
+                    .iter()
+                    .map(|c| {
+                        let done = c.checklist.iter().filter(|i| i.done).count();
+                        serde_json::json!({
+                            "id": c.id, "title": c.title, "status": name_of(&c.status_id),
+                            "priority": c.priority, "estimate_days": c.estimate_days,
+                            "checklist": format!("{}/{}", done, c.checklist.len()),
+                            "deliverables": c.deliverables.len(),
+                            "assignee": c.assignee,
+                        })
+                    })
+                    .collect();
+                let (d, t, pct) = crate::board::progress(&pid);
+                Ok(serde_json::json!({
+                    "columns": columns, "cards": cards,
+                    "progress": format!("{d}/{t} ({pct}%)"),
+                })
+                .to_string())
+            }
+            "create" => {
+                let title = s("title");
+                let status = if s("status").is_empty() {
+                    "todo".to_string()
+                } else {
+                    s("status")
+                };
+                let c = crate::board::card_create(&pid, "aion", &title, &status, &s("desc"))?;
+                Ok(format!("tarjeta creada (id {}): «{}»", c.id, c.title))
+            }
+            "move" => {
+                let c = crate::board::card_move(&pid, "aion", &s("id"), &s("status"), None)?;
+                Ok(format!("tarjeta «{}» movida", c.title))
+            }
+            "comment" => {
+                crate::board::card_comment(&pid, "aion", &s("id"), &s("text"))?;
+                Ok("comentario añadido".into())
+            }
+            "checklist" => {
+                let items: Vec<crate::board::ChecklistItem> = v
+                    .get("items")
+                    .and_then(|x| serde_json::from_value(x.clone()).ok())
+                    .unwrap_or_default();
+                let c = crate::board::card_set_checklist(&pid, "aion", &s("id"), items)?;
+                Ok(format!("checklist actualizada en «{}»", c.title))
+            }
+            "link" => {
+                let c = crate::board::card_link_deliverable(
+                    &pid,
+                    "aion",
+                    &s("id"),
+                    &s("kind"),
+                    &s("reference"),
+                    &s("title"),
+                )?;
+                Ok(format!("entregable enlazado a «{}»", c.title))
+            }
+            "seed" => {
+                let tmpl = if s("template").is_empty() {
+                    "generico".to_string()
+                } else {
+                    s("template")
+                };
+                let pb = v.get("playbook").and_then(|x| x.as_bool()).unwrap_or(false);
+                let n = if pb {
+                    crate::board::seed_playbook(&pid, &tmpl, "aion")
+                } else {
+                    crate::board::ensure_template(&pid, &tmpl);
+                    0
+                };
+                Ok(format!(
+                    "tablero sembrado (plantilla «{tmpl}», {n} tarjetas del plan)"
+                ))
+            }
+            other => Err(format!(
+                "op «{other}» desconocida. Usa list|create|move|comment|checklist|link|seed"
+            )),
         }
     }
 }

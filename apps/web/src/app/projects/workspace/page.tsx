@@ -5,12 +5,18 @@ import { useRouter } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
 import Markdown from "@/components/Markdown";
+import { DocStudioModal } from "@/components/documents/DocStudio";
+import { BoardModal } from "@/components/board/Board";
 import {
   projectGet,
   projectSourceAdd,
   projectSourceUpload,
   projectSourceToggle,
   projectSourceRemove,
+  projectSourceNote,
+  projectFolderLink,
+  projectFolderSync,
+  projectFolderUnlink,
   projectDiscover,
   projectStudioGenerate,
   projectStudioAudio,
@@ -51,10 +57,23 @@ export default function ProjectWorkspace() {
   const [sources, setSources] = useState<ProjectSource[]>([]);
   const [outputs, setOutputs] = useState<ProjectOutput[]>([]);
   const [notFound, setNotFound] = useState(false);
+  // Estudio de documentos y estilos (galería tipo Canva), dentro del proyecto.
+  const [docOpen, setDocOpen] = useState(false);
+  // Tablero Kanban por etapas del proyecto.
+  const [boardOpen, setBoardOpen] = useState(false);
+  // Edición del COMENTARIO de una fuente (instrucción para el agente).
+  const [noteEditId, setNoteEditId] = useState<string | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
 
   // Fuentes
   const [adding, setAdding] = useState(false);
   const [srcKind, setSrcKind] = useState("nota");
+  // Tarea del proyecto EN CURSO en segundo plano (sigue aunque salgas; «trabajando…» al volver).
+  const [running, setRunning] = useState<string | null>(null);
+  // Carpeta enlazada (espejo del disco).
+  const [folders, setFolders] = useState<string[]>([]);
+  const [folderPath, setFolderPath] = useState("");
+  const [folderBusy, setFolderBusy] = useState(false);
   const [srcTitle, setSrcTitle] = useState("");
   const [srcContent, setSrcContent] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -93,6 +112,8 @@ export default function ProjectWorkspace() {
     setProject(r.project);
     setSources(r.sources ?? []);
     setOutputs(r.outputs ?? []);
+    setFolders(r.folders ?? []);
+    setRunning(r.running ?? null);
     // Restaura la conversación PERSISTIDA del proyecto (ya no se pierde al salir y volver).
     projectChatHistory(id)
       .then((h) =>
@@ -111,6 +132,22 @@ export default function ProjectWorkspace() {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // CONTINUACIÓN EN SEGUNDO PLANO: si al volver hay una tarea en curso (y no la estamos viendo en
+  // vivo), sondeamos hasta que el backend la termine y recargamos el historial (trae el resultado).
+  useEffect(() => {
+    if (!running || streaming || !id) return;
+    const iv = setInterval(async () => {
+      const r = await projectGet(id).catch(() => null);
+      if (r && !r.running) {
+        clearInterval(iv);
+        setRunning(null);
+        const h = await projectChatHistory(id).catch(() => []);
+        setMessages(h.map((m) => ({ role: m.role === "user" ? "user" : "assistant", text: m.text }) as Msg));
+      }
+    }, 4000);
+    return () => clearInterval(iv);
+  }, [running, streaming, id]);
+
   async function addSource() {
     const title = srcTitle.trim();
     if (!title) return;
@@ -121,6 +158,32 @@ export default function ProjectWorkspace() {
       setSrcContent("");
       setAdding(false);
     }
+  }
+  async function linkFolder() {
+    const path = folderPath.trim();
+    if (!path) return;
+    setFolderBusy(true);
+    const r = await projectFolderLink(id, path).catch(() => null);
+    setFolderBusy(false);
+    if (r?.ok) {
+      setFolderPath("");
+      setAdding(false);
+      await load();
+    } else {
+      alert(r?.error ?? "No pude leer esa carpeta.");
+    }
+  }
+  async function syncFolders() {
+    setFolderBusy(true);
+    await projectFolderSync(id).catch(() => {});
+    setFolderBusy(false);
+    await load();
+  }
+  async function unlinkFolder(path: string) {
+    setFolderBusy(true);
+    await projectFolderUnlink(id, path).catch(() => {});
+    setFolderBusy(false);
+    await load();
   }
   async function uploadFile(file: File) {
     setUploading(true);
@@ -170,6 +233,16 @@ export default function ProjectWorkspace() {
     setSources((arr) => arr.filter((x) => x.id !== sid));
     await projectSourceRemove(id, sid);
   }
+  function startNote(s: ProjectSource) {
+    setNoteEditId(s.id);
+    setNoteDraft(s.note ?? "");
+  }
+  async function saveNote(sid: string) {
+    const note = noteDraft.trim();
+    setSources((arr) => arr.map((x) => (x.id === sid ? { ...x, note } : x)));
+    setNoteEditId(null);
+    await projectSourceNote(id, sid, note).catch(() => {});
+  }
 
   async function send() {
     const q = input.trim();
@@ -186,6 +259,14 @@ export default function ProjectWorkspace() {
         return copy;
       });
     let finalText = "";
+    // CONTEXTO RECIENTE: los últimos turnos viajan con la tarea. Sin esto, «hazme la oferta en
+    // PDF» llega HUÉRFANO (sin saber a qué oferta se refiere) y el agente —con razón— dice que no
+    // tiene la información. Acotado para no inflar el prompt del modelo local.
+    const convo = messages
+      .slice(-6)
+      .map((m) => `${m.role === "user" ? "Usuario" : "AION"}: ${m.text.slice(0, 280)}`)
+      .filter(Boolean)
+      .join("\n");
     // AGENTE con grounding del proyecto: razona, USA herramientas reales (crea PDF/Word, busca…),
     // y NO puede fingir (el honesty_guard corre sobre acciones reales).
     await agentStream(
@@ -207,13 +288,15 @@ export default function ProjectWorkspace() {
           setLast(`⚠️ ${ev.text}`);
         }
       },
-      undefined,
+      convo || undefined,
       undefined,
       id,
     );
     setStreaming(false);
     setStatus("");
-    if (finalText) projectChatAppend(id, "assistant", finalText).catch(() => {});
+    // La respuesta la persiste el BACKEND (sobrevive a que cierres la página). No la guardamos
+    // aquí para no duplicar. `finalText` se mantiene solo para el aviso de error local.
+    void finalText;
   }
 
   async function decide(approved: boolean) {
@@ -320,8 +403,8 @@ export default function ProjectWorkspace() {
 
           {adding && (
             <div className="p-3 flex flex-col gap-2" style={{ borderBottom: "1px solid var(--border)", background: "var(--surface-1)" }}>
-              <div className="flex gap-1">
-                {["nota", "texto", "web", "archivo"].map((k) => (
+              <div className="flex gap-1 flex-wrap">
+                {["nota", "texto", "web", "archivo", "carpeta"].map((k) => (
                   <button
                     key={k}
                     onClick={() => setSrcKind(k)}
@@ -336,7 +419,25 @@ export default function ProjectWorkspace() {
                 ))}
               </div>
 
-              {srcKind === "archivo" ? (
+              {srcKind === "carpeta" ? (
+                <>
+                  <input
+                    className="input text-sm font-mono"
+                    placeholder="/Users/tu-usuario/Documents/Proyecto…"
+                    value={folderPath}
+                    onChange={(e) => setFolderPath(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && linkFolder()}
+                  />
+                  <button className="btn text-sm" disabled={folderBusy || !folderPath.trim()} onClick={linkFolder}>
+                    {folderBusy ? "Leyendo la carpeta…" : "Enlazar y leer la carpeta"}
+                  </button>
+                  <p className="text-[10px] leading-snug" style={{ color: "var(--text-3)" }}>
+                    Pega la ruta de una carpeta de tu Mac. AION lee todos sus documentos (PDF, Word, TXT, MD…) a la
+                    memoria del proyecto. Es un <strong>espejo</strong>: si sacas un archivo de la carpeta, al
+                    <em> sincronizar</em> desaparece de la memoria.
+                  </p>
+                </>
+              ) : srcKind === "archivo" ? (
                 <>
                   <input
                     ref={fileRef}
@@ -386,9 +487,41 @@ export default function ProjectWorkspace() {
           )}
 
           <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
-            {sources.length === 0 && (
+            {folders.length > 0 && (
+              <div className="rounded-lg p-2 mb-1" style={{ background: "var(--surface)", border: "1px dashed var(--accent)" }}>
+                <div className="flex items-center gap-2 mb-1">
+                  <Icon name="folder" size={13} />
+                  <span className="text-[11px] font-semibold uppercase tracking-wide flex-1" style={{ color: "var(--text-2)" }}>
+                    Carpetas enlazadas
+                  </span>
+                  <button
+                    onClick={syncFolders}
+                    disabled={folderBusy}
+                    className="text-[11px] px-2 py-0.5 rounded-md"
+                    style={{ background: "var(--accent)", color: "#04201f" }}
+                    title="Volver a leer el disco (refleja archivos añadidos o quitados)"
+                  >
+                    {folderBusy ? "…" : "↻ Sincronizar"}
+                  </button>
+                </div>
+                {folders.map((f) => (
+                  <div key={f} className="flex items-center gap-1.5 group/f">
+                    <span className="text-[10px] font-mono truncate flex-1" style={{ color: "var(--text-3)" }} title={f}>{f}</span>
+                    <button
+                      onClick={() => unlinkFolder(f)}
+                      className="text-[10px] opacity-0 group-hover/f:opacity-60 hover:!opacity-100"
+                      style={{ color: "var(--danger)" }}
+                      title="Desenlazar (quita sus documentos de la memoria)"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {sources.length === 0 && folders.length === 0 && (
               <p className="text-xs text-center mt-6" style={{ color: "var(--text-3)" }}>
-                Añade documentos, notas o webs. El chat se basará en las activas.
+                Añade documentos, notas, webs o una carpeta. El chat se basará en las activas.
               </p>
             )}
             {sources.map((s) => (
@@ -397,36 +530,85 @@ export default function ProjectWorkspace() {
                 ref={(el) => {
                   srcRefs.current[s.id] = el;
                 }}
-                className="rounded-lg p-2.5 flex items-start gap-2 group transition-all"
+                className="rounded-lg p-2.5 group transition-all"
                 style={{
                   background: highlightSrc === s.id ? "var(--accent-subtle)" : "var(--surface-1)",
                   border: highlightSrc === s.id ? "1px solid var(--accent)" : "1px solid var(--border)",
                   opacity: s.active ? 1 : 0.5,
                 }}
               >
-                <button
-                  onClick={() => toggleSource(s)}
-                  className="mt-0.5 w-4 h-4 rounded shrink-0 flex items-center justify-center text-[10px]"
-                  style={{
-                    background: s.active ? "var(--accent)" : "transparent",
-                    border: s.active ? "none" : "1px solid var(--border)",
-                    color: "#04201f",
-                  }}
-                  title={s.active ? "Activa (en uso)" : "Inactiva"}
-                >
-                  {s.active ? "✓" : ""}
-                </button>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm truncate" style={{ color: "var(--text-1)" }}>{s.title}</p>
-                  <p className="text-[10px] uppercase tracking-wide" style={{ color: "var(--text-3)" }}>{s.kind}</p>
+                <div className="flex items-start gap-2">
+                  <button
+                    onClick={() => toggleSource(s)}
+                    className="mt-0.5 w-4 h-4 rounded shrink-0 flex items-center justify-center text-[10px]"
+                    style={{
+                      background: s.active ? "var(--accent)" : "transparent",
+                      border: s.active ? "none" : "1px solid var(--border)",
+                      color: "#04201f",
+                    }}
+                    title={s.active ? "Activa (en uso)" : "Inactiva"}
+                  >
+                    {s.active ? "✓" : ""}
+                  </button>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm truncate" style={{ color: "var(--text-1)" }}>{s.title}</p>
+                    <p className="text-[10px] uppercase tracking-wide" style={{ color: "var(--text-3)" }}>{s.kind}</p>
+                  </div>
+                  <button
+                    onClick={() => startNote(s)}
+                    className="text-xs shrink-0 hover:!opacity-100 transition-opacity"
+                    style={{ color: s.note ? "var(--accent)" : "var(--text-3)", opacity: s.note ? 0.9 : 0.45 }}
+                    title={s.note ? "Editar comentario para el agente" : "Comentar (instrucción para el agente)"}
+                  >
+                    💬
+                  </button>
+                  <button
+                    onClick={() => removeSource(s.id)}
+                    className="text-xs opacity-0 group-hover:opacity-60 hover:!opacity-100"
+                    style={{ color: "var(--text-3)" }}
+                    title="Quitar fuente"
+                  >
+                    ✕
+                  </button>
                 </div>
-                <button
-                  onClick={() => removeSource(s.id)}
-                  className="text-xs opacity-0 group-hover:opacity-60 hover:!opacity-100"
-                  style={{ color: "var(--text-3)" }}
-                >
-                  ✕
-                </button>
+
+                {/* Comentario existente (clic para editar) */}
+                {s.note && noteEditId !== s.id && (
+                  <p
+                    onClick={() => startNote(s)}
+                    className="text-[11px] mt-1.5 leading-snug cursor-text rounded px-1.5 py-1"
+                    style={{ color: "var(--text-2)", background: "var(--accent-subtle)" }}
+                    title="Editar comentario"
+                  >
+                    💬 {s.note}
+                  </p>
+                )}
+
+                {/* Editor de comentario */}
+                {noteEditId === s.id && (
+                  <div className="mt-2 flex flex-col gap-1.5">
+                    <textarea
+                      autoFocus
+                      rows={2}
+                      className="input text-xs"
+                      placeholder="Instrucción para el agente sobre esta fuente… p. ej. «usa este formato para las nuevas ofertas» o «el precio vigente es 250€, ignora el del PDF»"
+                      value={noteDraft}
+                      onChange={(e) => setNoteDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) saveNote(s.id);
+                        if (e.key === "Escape") setNoteEditId(null);
+                      }}
+                    />
+                    <div className="flex gap-2">
+                      <button className="btn text-xs" onClick={() => saveNote(s.id)}>
+                        Guardar comentario
+                      </button>
+                      <button className="btn btn-ghost text-xs" onClick={() => setNoteEditId(null)}>
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -481,6 +663,13 @@ export default function ProjectWorkspace() {
                 </div>
               </div>
             ))}
+            {running && !streaming && (
+              <div className="self-start rounded-2xl px-4 py-2.5 text-sm inline-flex items-center gap-2"
+                style={{ background: "var(--accent-subtle)", color: "var(--gold-deep)" }}>
+                <Icon name="refresh" size={14} />
+                Trabajando en segundo plano… te aviso en la Bandeja cuando termine.
+              </div>
+            )}
             <div ref={endRef} />
           </div>
           {confirm && (
@@ -512,6 +701,26 @@ export default function ProjectWorkspace() {
             className="px-6 py-4 flex gap-2 items-center shrink-0"
             style={{ borderTop: "1px solid var(--border)" }}
           >
+            <button
+              type="button"
+              onClick={() => setBoardOpen(true)}
+              className="shrink-0 rounded-full p-2 transition-colors"
+              style={{ color: "var(--text-3)", background: "var(--surface-2)" }}
+              title="Tablero por etapas (Kanban) para avanzar el proyecto"
+              aria-label="Abrir tablero del proyecto"
+            >
+              <Icon name="target" size={18} />
+            </button>
+            <button
+              type="button"
+              onClick={() => setDocOpen(true)}
+              className="shrink-0 rounded-full p-2 transition-colors"
+              style={{ color: "var(--text-3)", background: "var(--surface-2)" }}
+              title="Crear documento con estilo (oferta, informe…) en PDF o Word"
+              aria-label="Crear documento con estilo"
+            >
+              <Icon name="file" size={18} />
+            </button>
             <input
               className="input flex-1"
               placeholder="Pregunta sobre el proyecto…"
@@ -533,6 +742,15 @@ export default function ProjectWorkspace() {
             </span>
           </div>
           <div className="p-3 grid grid-cols-1 gap-2" style={{ borderBottom: "1px solid var(--border)" }}>
+            <button
+              onClick={() => setDocOpen(true)}
+              className="flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm text-left transition-colors font-medium"
+              style={{ background: "var(--accent-subtle)", border: "1px solid var(--accent)", color: "var(--gold-deep)" }}
+              title="Elegir/extraer estilos y generar ofertas o documentos con esa apariencia"
+            >
+              <Icon name="file" size={16} />
+              <span>Documentos y estilos</span>
+            </button>
             {STUDIO.map((it) => (
               <button
                 key={it.kind}
@@ -630,6 +848,14 @@ export default function ProjectWorkspace() {
           </div>
         </div>
       )}
+
+      <DocStudioModal open={docOpen} onClose={() => setDocOpen(false)} />
+      <BoardModal
+        projectId={id}
+        projectName={project?.name ?? "Proyecto"}
+        open={boardOpen}
+        onClose={() => setBoardOpen(false)}
+      />
     </AppShell>
   );
 }

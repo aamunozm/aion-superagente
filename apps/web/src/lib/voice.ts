@@ -89,19 +89,79 @@ export function dictationSupported(): boolean {
   );
 }
 
-// Elige la mejor voz instalada para el idioma (prioriza locales de macOS).
-function pickVoice(bcp47: string): SpeechSynthesisVoice | null {
+// Género de las voces de macOS conocidas (para elegir femenina/masculina sin bundle).
+const VOICE_GENDER: Record<string, "f" | "m"> = {
+  // mujer (español): de calidad por defecto (Mónica/Paulina) + novedad
+  monica: "f", "mónica": "f", paulina: "f", marisol: "f", angelica: "f", "angélica": "f",
+  esperanza: "f", soledad: "f", carmen: "f", flo: "f", grandma: "f", sandy: "f", shelley: "f",
+  // hombre (español): los buenos (Jorge/Diego…) se bajan a 1 clic; los demás son de novedad
+  jorge: "m", diego: "m", juan: "m", carlos: "m", enrique: "m",
+  eddy: "m", grandpa: "m", rocko: "m", reed: "m",
+};
+// Nombres de ALTA calidad (los preferimos sobre las voces "de novedad").
+const VOICE_GOOD = ["mónica", "monica", "paulina", "marisol", "jorge", "diego", "juan", "carlos", "enrique"];
+function voiceGender(v: SpeechSynthesisVoice): "f" | "m" | null {
+  const n = v.name.toLowerCase();
+  for (const k of Object.keys(VOICE_GENDER)) if (n.includes(k)) return VOICE_GENDER[k];
+  return null;
+}
+/** Género preferido guardado en el onboarding (femenina/masculina). */
+function preferredGender(): "f" | "m" | null {
+  if (typeof localStorage === "undefined") return null;
+  const g = localStorage.getItem("aion.voice.gender");
+  return g === "f" || g === "m" ? g : null;
+}
+/** Voz del SISTEMA elegida explícitamente en Ajustes (nombre exacto de una voz de macOS). */
+function preferredSystemVoiceName(): string {
+  if (typeof localStorage === "undefined") return "";
+  return localStorage.getItem("aion.voice.system") || "";
+}
+/** La voz del sistema que se usaría para `bcp47`, respetando lo elegido en Ajustes/onboarding
+ *  (voz exacta > género > mejor disponible). Para la previsualización «Probar voz». */
+export function pickSystemVoice(bcp47: string): SpeechSynthesisVoice | null {
+  return pickVoice(bcp47, preferredGender(), preferredSystemVoiceName());
+}
+/** Todas las voces del sistema (macOS) instaladas, para listarlas en Ajustes. */
+export function systemVoices(): { name: string; lang: string; localService: boolean }[] {
+  if (!speechSupported()) return [];
+  return window.speechSynthesis
+    .getVoices()
+    .map((v) => ({ name: v.name, lang: v.lang, localService: v.localService }));
+}
+
+// Elige la voz del sistema: la EXACTA elegida en Ajustes si la hay; si no, por GÉNERO; prefiriendo
+// siempre las de mayor calidad (Premium/Enhanced/Siri) y locales. Suena "Siri-grade" sin empotrar nada.
+function pickVoice(
+  bcp47: string,
+  gender?: "f" | "m" | null,
+  exactName?: string,
+): SpeechSynthesisVoice | null {
   if (!speechSupported()) return null;
   const voices = window.speechSynthesis.getVoices();
   if (!voices.length) return null;
+  // 1) Voz exacta elegida por el usuario en Ajustes (cualquiera de las del Mac).
+  if (exactName) {
+    const hit = voices.find((v) => v.name === exactName) || voices.find((v) => v.name.includes(exactName));
+    if (hit) return hit;
+  }
   const base = bcp47.split("-")[0];
-  return (
-    voices.find((v) => v.lang === bcp47 && v.localService) ||
-    voices.find((v) => v.lang === bcp47) ||
-    voices.find((v) => v.lang?.startsWith(base) && v.localService) ||
-    voices.find((v) => v.lang?.startsWith(base)) ||
-    null
-  );
+  let cands = voices.filter((v) => v.lang === bcp47 || v.lang?.startsWith(base));
+  if (!cands.length) cands = voices.slice();
+  // Filtra por género solo si hay alguna voz que lo cumpla (si no, no descartamos todas).
+  if (gender) {
+    const byG = cands.filter((v) => voiceGender(v) === gender);
+    if (byG.length) cands = byG;
+  }
+  const score = (v: SpeechSynthesisVoice) => {
+    const n = v.name.toLowerCase();
+    return (
+      (/premium|enhanced|siri/i.test(n) ? 4 : 0) + // calidad neural descargada → lo mejor
+      (VOICE_GOOD.some((g) => n.includes(g)) ? 2 : 0) + // voz "buena" conocida (no novedad)
+      (v.localService ? 1 : 0)
+    );
+  };
+  cands.sort((a, b) => score(b) - score(a));
+  return cands[0] ?? null;
 }
 
 // ── Reproducción de la voz propia (audio del núcleo) ─────────────────────────
@@ -370,7 +430,7 @@ export function useSpeech() {
       window.speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(clean);
       u.lang = ttsLang(lang);
-      const v = pickVoice(u.lang);
+      const v = pickVoice(u.lang, preferredGender(), preferredSystemVoiceName());
       if (v) u.voice = v;
       u.rate = 1.02;
       u.pitch = 1.0;

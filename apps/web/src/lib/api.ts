@@ -516,7 +516,7 @@ export async function warmBrain(): Promise<void> {
 // ── Proyectos (workspace estilo NotebookLM) ─────────────────────────────────
 
 export type Project = { id: string; name: string; desc: string; icon: string; created: string; updated: string };
-export type ProjectSource = { id: string; title: string; kind: string; content: string; active: boolean; created: string };
+export type ProjectSource = { id: string; title: string; kind: string; content: string; note?: string; active: boolean; created: string };
 export type ProjectOutput = { id: string; kind: string; title: string; content: string; created: string; audio?: string };
 
 async function jpost<T>(path: string, body: unknown): Promise<T> {
@@ -538,7 +538,7 @@ export const projectRemove = (id: string) => jpost<{ ok: boolean }>("/api/projec
 export const projectUpdate = (id: string, name: string, desc: string) =>
   jpost<{ ok: boolean; project?: Project; error?: string }>("/api/project/update", { id, name, desc });
 export const projectGet = (id: string) =>
-  jpost<{ ok: boolean; project?: Project; sources?: ProjectSource[]; outputs?: ProjectOutput[]; error?: string }>(
+  jpost<{ ok: boolean; project?: Project; sources?: ProjectSource[]; outputs?: ProjectOutput[]; folders?: string[]; running?: string | null; error?: string }>(
     "/api/project/get",
     { id },
   );
@@ -559,6 +559,24 @@ export const projectSourceToggle = (project_id: string, id: string, active: bool
   jpost<{ ok: boolean }>("/api/project/source/toggle", { project_id, id, active });
 export const projectSourceRemove = (project_id: string, id: string) =>
   jpost<{ ok: boolean }>("/api/project/source/remove", { project_id, id });
+/** Comentario de Ariel sobre una fuente: instrucción que el agente tiene SIEMPRE en cuenta. */
+export const projectSourceNote = (project_id: string, id: string, note: string) =>
+  jpost<{ ok: boolean }>("/api/project/source/note", { project_id, id, note });
+/** Carpeta del Mac enlazada al proyecto (espejo): lee todos sus documentos a la memoria. */
+export const projectFolderLink = (project_id: string, path: string) =>
+  jpost<{ ok: boolean; added?: number; updated?: number; removed?: number; error?: string }>(
+    "/api/project/folder/link",
+    { project_id, path },
+  );
+/** Re-sincroniza las carpetas enlazadas (saco un archivo del disco → desaparece de la memoria). */
+export const projectFolderSync = (project_id: string) =>
+  jpost<{ ok: boolean; added?: number; updated?: number; removed?: number }>(
+    "/api/project/folder/sync",
+    { project_id },
+  );
+/** Desenlaza una carpeta y quita sus documentos de la memoria del proyecto. */
+export const projectFolderUnlink = (project_id: string, path: string) =>
+  jpost<{ ok: boolean }>("/api/project/folder/unlink", { project_id, path });
 export type DiscoverResult = { title: string; url: string; snippet: string };
 export const projectDiscover = (project_id: string, query: string) =>
   jpost<{ ok: boolean; results?: DiscoverResult[]; error?: string }>("/api/project/discover", {
@@ -582,6 +600,100 @@ export const projectStudioGenerate = (project_id: string, kind: string) =>
   });
 export const projectStudioRemove = (project_id: string, id: string) =>
   jpost<{ ok: boolean }>("/api/project/studio/remove", { project_id, id });
+
+// ── Tablero Kanban del proyecto ──────────────────────────────────────────────
+export type BoardCategory = "backlog" | "todo" | "doing" | "review" | "done" | "canceled";
+export type BoardStatus = {
+  id: string;
+  name: string;
+  category: BoardCategory;
+  pos: number;
+  wip?: number | null;
+  color: string;
+};
+export type BoardChecklistItem = { text: string; done: boolean };
+export type BoardDeliverable = { kind: string; reference: string; title: string };
+export type BoardCard = {
+  id: string;
+  title: string;
+  status_id: string;
+  pos: number;
+  desc: string;
+  priority: number;
+  estimate_days?: number | null;
+  due?: string | null;
+  assignee: string;
+  labels: string[];
+  checklist: BoardChecklistItem[];
+  deliverables: BoardDeliverable[];
+  blocked_by: string[];
+  created: string;
+  updated: string;
+};
+export type BoardWip = { status_id: string; name: string; count: number; wip?: number | null; over: boolean };
+export type BoardActivity = { id: string; at: string; actor: string; action: string; card: string; detail: string };
+export type BoardSnapshot = {
+  ok: boolean;
+  statuses: BoardStatus[];
+  cards: BoardCard[];
+  wip: BoardWip[];
+  progress: { done: number; total: number; pct: number };
+  activity: BoardActivity[];
+  seeded_cards?: number;
+};
+
+export const boardGet = (project_id: string) =>
+  jpost<BoardSnapshot>("/api/project/board/get", { project_id });
+export const boardSeed = (project_id: string, template: string, playbook: boolean) =>
+  jpost<BoardSnapshot>("/api/project/board/seed", { project_id, template, playbook });
+export const boardStatusAdd = (project_id: string, name: string, category: string, wip?: number) =>
+  jpost<{ ok: boolean; status?: BoardStatus; error?: string }>("/api/project/board/status/add", {
+    project_id,
+    name,
+    category,
+    wip,
+  });
+export const boardCardCreate = (project_id: string, title: string, status: string, desc = "") =>
+  jpost<{ ok: boolean; card?: BoardCard; error?: string }>("/api/project/board/card/create", {
+    project_id,
+    title,
+    status,
+    desc,
+  });
+export const boardCardUpdate = (
+  project_id: string,
+  id: string,
+  patch: Partial<{
+    title: string;
+    desc: string;
+    priority: number;
+    estimate_days: number;
+    due: string;
+    assignee: string;
+    labels: string[];
+  }>,
+) => jpost<{ ok: boolean; card?: BoardCard; error?: string }>("/api/project/board/card/update", { project_id, id, ...patch });
+export const boardCardMove = (project_id: string, id: string, status: string, before?: string) =>
+  jpost<{ ok: boolean; card?: BoardCard; error?: string }>("/api/project/board/card/move", {
+    project_id,
+    id,
+    status,
+    before,
+  });
+export const boardCardComment = (project_id: string, id: string, text: string) =>
+  jpost<{ ok: boolean; error?: string }>("/api/project/board/card/comment", { project_id, id, text });
+export const boardCardChecklist = (project_id: string, id: string, items: BoardChecklistItem[]) =>
+  jpost<{ ok: boolean; card?: BoardCard; error?: string }>("/api/project/board/card/checklist", { project_id, id, items });
+export const boardCardLink = (project_id: string, id: string, kind: string, reference: string, title: string) =>
+  jpost<{ ok: boolean; card?: BoardCard; error?: string }>("/api/project/board/card/link", {
+    project_id,
+    id,
+    kind,
+    reference,
+    title,
+  });
+export const boardCardDelete = (project_id: string, id: string) =>
+  jpost<{ ok: boolean; error?: string }>("/api/project/board/card/delete", { project_id, id });
 
 export type DocFormat = "pdf" | "docx" | "html";
 
@@ -647,6 +759,16 @@ export const docStyleSave = (style: DocStyleT) =>
   jpost<{ ok: boolean; error?: string }>("/api/doc-styles", { style });
 export const docStyleRemove = (name: string) =>
   jpost<{ ok: boolean }>("/api/doc-styles/remove", { name });
+/** Estilo predeterminado global ("utilizar siempre"): el agente y los endpoints lo usan
+ *  cuando no se especifica un estilo. `name` vacío lo limpia. */
+export async function docStyleGetDefault(): Promise<string | null> {
+  const r = await fetch(`${BRIDGE_URL}/api/doc-styles/default`)
+    .then((x) => x.json())
+    .catch(() => ({ name: null }));
+  return (r?.name ?? null) as string | null;
+}
+export const docStyleSetDefault = (name: string) =>
+  jpost<{ ok: boolean }>("/api/doc-styles/default", { name });
 export const docStyleExtract = (content_b64: string, kind: string, name: string) =>
   jpost<{ ok: boolean; style?: DocStyleT; palette?: string[]; fonts?: string[]; error?: string }>(
     "/api/doc-styles/extract",
@@ -1092,6 +1214,67 @@ export const workflowsRun = (id: string) =>
     body: JSON.stringify({ id }),
   });
 
+// ── Flujos por GRAFO (DAG) — editor visual (Fase F) ──────────────────────────
+export type FlowTriggerKind =
+  | { type: "manual" }
+  | { type: "interval"; minutes: number }
+  | { type: "event"; kind: string };
+export type FlowNodeKind =
+  | { kind: "trigger"; trigger: FlowTriggerKind }
+  | { kind: "action"; tool: string; input: string }
+  | { kind: "condition"; test: string };
+export type FlowNode = { id: string; title: string; x: number; y: number } & FlowNodeKind;
+export type FlowEdge = { id: string; from: string; to: string; when: string };
+export type Flow = {
+  id: string;
+  name: string;
+  description: string;
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  enabled: boolean;
+  last_run_ms?: number | null;
+};
+export type FlowNodeResult = {
+  node_id: string;
+  tool: string;
+  input: string;
+  output: string;
+  ok: boolean;
+  needs_approval: boolean;
+};
+export type FlowRun = {
+  flow_id: string;
+  steps: FlowNodeResult[];
+  ok: boolean;
+  stopped_for_approval: boolean;
+};
+
+export const flowsList = () => jsonCall<{ flows: Flow[] }>("/api/flows");
+export const flowsSet = (f: Flow) =>
+  jsonCall<{ ok?: boolean; count?: number; error?: string }>("/api/flows", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(f),
+  });
+export const flowsRemove = (id: string) =>
+  jsonCall<{ ok?: boolean; error?: string }>("/api/flows/remove", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+export const flowsRun = (id: string) =>
+  jsonCall<FlowRun & { error?: string }>("/api/flows/run", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+export const flowsMigrate = () =>
+  jsonCall<{ ok?: boolean; added?: number; count?: number; error?: string }>("/api/flows/migrate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+
 /// Descarga un modelo local con progreso (SSE).
 export type InstalledModel = { name: string; size_gb: number };
 
@@ -1125,6 +1308,14 @@ export async function modelsPull(
 /// Estado de preparación del motor/modelo (para mostrar "descargando…" en 1er arranque).
 export const status = () =>
   jsonCall<{ engine_up: boolean; model_ready: boolean; engine: string }>("/api/status");
+
+/// Fija el nombre que el usuario eligió para AION en el onboarding (vacío → AION elige solo).
+export const identityNameSet = (name: string) =>
+  jsonCall<{ ok: boolean; name?: string; error?: string }>("/api/identity/name", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
 
 export const inboxList = () =>
   jsonCall<{ unread: InboxMessage[]; unread_count: number; all: InboxMessage[] }>("/api/inbox");
