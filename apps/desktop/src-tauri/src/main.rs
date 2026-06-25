@@ -42,6 +42,24 @@ struct Sidecars {
     ollama: Mutex<Option<StdChild>>,
 }
 
+/// Carpeta de DATOS de AION (la MISMA que usa `aion-core::app_data_dir`). Todo lo que AION genera
+/// vive aquí, para que borrar esta carpeta (o la app) no deje rastro en el equipo.
+fn aion_data_dir() -> Option<std::path::PathBuf> {
+    if cfg!(windows) {
+        std::env::var("APPDATA")
+            .ok()
+            .map(|a| std::path::PathBuf::from(a).join("AION"))
+    } else if cfg!(target_os = "macos") {
+        std::env::var("HOME")
+            .ok()
+            .map(|h| std::path::PathBuf::from(h).join("Library/Application Support/AION"))
+    } else {
+        std::env::var("HOME")
+            .ok()
+            .map(|h| std::path::PathBuf::from(h).join(".local/share/AION"))
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -62,6 +80,13 @@ fn main() {
                 .resolve(ollama_rel, tauri::path::BaseDirectory::Resource)
             {
                 Ok(ollama_bin) => {
+                    // Los MODELOS se descargan DENTRO de la carpeta de datos de AION (no en
+                    // ~/.ollama), para que al borrar AION (o hacer «reinicio de fábrica») no quede
+                    // nada en el equipo. Autocontención total.
+                    let models_dir = aion_data_dir().map(|d| d.join("ollama-models"));
+                    if let Some(md) = &models_dir {
+                        let _ = std::fs::create_dir_all(md);
+                    }
                     let mut ollama_cmd = std::process::Command::new(&ollama_bin);
                     ollama_cmd
                         .arg("serve")
@@ -70,6 +95,9 @@ fn main() {
                         // KV en q8_0 (la mitad de memoria, un poco más rápido, calidad ~igual).
                         .env("OLLAMA_FLASH_ATTENTION", "1")
                         .env("OLLAMA_KV_CACHE_TYPE", "q8_0");
+                    if let Some(md) = &models_dir {
+                        ollama_cmd.env("OLLAMA_MODELS", md);
+                    }
                     // Unix: nuevo grupo de procesos (pgid = pid de ollama) para poder
                     // matar a ollama Y a sus runners llama-server de una sola vez.
                     #[cfg(unix)]
