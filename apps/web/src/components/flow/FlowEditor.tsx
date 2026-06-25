@@ -11,6 +11,7 @@ import {
   ReactFlowProvider,
   Background,
   Controls,
+  Panel,
   Handle,
   Position,
   applyNodeChanges,
@@ -324,20 +325,14 @@ function Canvas() {
 
       {/* Lienzo */}
       <section className="flex-1 flex flex-col min-w-0 min-h-0">
-        <div className="flex items-center gap-2 px-3 h-12 shrink-0" style={{ borderBottom: "1px solid var(--border)" }}>
+        <div className="flex items-center gap-2 px-3 h-12 shrink-0 min-w-0" style={{ borderBottom: "1px solid var(--border)" }}>
           <input
-            className="input text-sm font-semibold"
-            style={{ maxWidth: 240 }}
+            className="input text-sm font-semibold flex-1 min-w-0"
+            style={{ maxWidth: 220 }}
             value={flow.name}
             onChange={(e) => setFlow((f) => ({ ...f, name: e.target.value }))}
           />
-          <button className="btn btn-ghost text-xs" onClick={() => addNode("action")}>
-            <Icon name="plus" size={12} /> Acción
-          </button>
-          <button className="btn btn-ghost text-xs" onClick={() => addNode("condition")}>
-            <Icon name="plus" size={12} /> Condición
-          </button>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-2 shrink-0">
             {savedAt && <span className="text-[10px]" style={{ color: "var(--text-3)" }}>guardado {savedAt}</span>}
             <button className="btn btn-ghost text-xs" onClick={del} title="Borrar flujo">
               <Icon name="trash" size={12} />
@@ -367,6 +362,16 @@ function Canvas() {
           >
             <Background color="var(--border)" gap={18} />
             <Controls showInteractive={false} />
+            <Panel position="top-left">
+              <div className="flex gap-1.5 rounded-xl p-1.5" style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}>
+                <button className="btn btn-ghost text-xs" onClick={() => addNode("action")} title="Añadir nodo de acción">
+                  <Icon name="plus" size={12} /> Acción
+                </button>
+                <button className="btn btn-ghost text-xs" onClick={() => addNode("condition")} title="Añadir nodo de condición (bifurca)">
+                  <Icon name="plus" size={12} /> Condición
+                </button>
+              </div>
+            </Panel>
           </ReactFlow>
         </div>
 
@@ -387,7 +392,13 @@ function Canvas() {
       </section>
 
       {/* Inspector */}
-      <aside className="w-72 shrink-0 overflow-y-auto p-4 flex flex-col gap-3" style={{ borderLeft: "1px solid var(--border)" }}>
+      <aside className="w-72 shrink-0 flex flex-col min-h-0" style={{ borderLeft: "1px solid var(--border)" }}>
+        <div className="flex items-center px-4 h-12 shrink-0" style={{ borderBottom: "1px solid var(--border)" }}>
+          <span className="text-xs font-semibold uppercase tracking-[0.12em]" style={{ color: "var(--text-3)" }}>
+            Propiedades
+          </span>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3">
         {selectedNode ? (
           <>
             <p className="text-[11px] font-semibold uppercase tracking-[0.1em]" style={{ color: "var(--text-3)" }}>
@@ -486,6 +497,7 @@ function Canvas() {
             nodo al superior de otro para conectarlos.
           </p>
         )}
+        </div>
       </aside>
     </div>
   );
