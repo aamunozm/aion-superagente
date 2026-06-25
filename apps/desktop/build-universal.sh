@@ -50,8 +50,16 @@ else
   echo "==> AVISO: swiftc no disponible; face-probe NO se compila (la cara quedará inactiva)"
 fi
 
-echo "==> verificando runtime Ollama vendorizado (debe existir y ser universal)"
-[[ -x apps/desktop/src-tauri/ollama-runtime/ollama ]] || bash apps/desktop/scripts/vendor-ollama-runtime.sh
+echo "==> verificando runtime Ollama vendorizado (binario + RUNNER llama-server + dylibs)"
+# OJO (auditoría 2026-06-25): no basta con que exista `ollama` — Ollama 0.30.x NO sirve modelos
+# sin su runner `llama-server` (+ las dylib de ggml/llama). Si faltaba, el bundle empaquetaba un
+# runtime que daba 500 en TODA inferencia local (chat local Y embeddings/RAG). Exigimos el runner.
+OLLAMA_RT=apps/desktop/src-tauri/ollama-runtime
+if [[ ! -x "$OLLAMA_RT/ollama" || ! -x "$OLLAMA_RT/llama-server" ]]; then
+  echo "   runtime incompleto (falta ollama o llama-server) → re-vendorizando…"
+  bash apps/desktop/scripts/vendor-ollama-runtime.sh
+fi
+[[ -x "$OLLAMA_RT/llama-server" ]] || { echo "ERROR: falta el runner llama-server en $OLLAMA_RT" >&2; exit 1; }
 
 echo "==> construyendo .app UNIVERSAL"
 cd apps/desktop

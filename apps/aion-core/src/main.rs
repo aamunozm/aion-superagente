@@ -22,6 +22,7 @@ mod computer;
 mod consciousness;
 mod credentials;
 mod deep_research;
+mod doc_intent;
 mod empathy;
 mod episodic;
 mod evals;
@@ -228,10 +229,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_rag(&query).await?;
         }
         Some("serve") => {
-            let addr = args
+            let mut addr = args
                 .get(1)
                 .cloned()
                 .unwrap_or_else(|| "127.0.0.1:8765".to_string());
+            // A2A DIRECTO (LAN, sin terceros): si el usuario activó la comunicación entre agentes,
+            // AION debe escuchar también en la red local (0.0.0.0) para que un agente par pueda
+            // ENTREGAR mensajes a `/api/a2a/message`. Solo ese endpoint es público (auth por secreto
+            // compartido); el resto de la API sigue blindado por Bearer local + local_guard, que
+            // rechazan a cualquier otro de la LAN. Si A2A está apagado, seguimos solo en loopback.
+            // (Cambiar el ajuste requiere reiniciar AION para reabrir el socket.)
+            if addr.starts_with("127.0.0.1") && crate::a2a::load().enabled {
+                if let Some(port) = addr.rsplit(':').next() {
+                    addr = format!("0.0.0.0:{port}");
+                    tracing::info!(%addr, "A2A activo → escuchando también en la LAN para el inbound");
+                }
+            }
             serve::run(&addr).await?;
         }
         Some("agent") => {
