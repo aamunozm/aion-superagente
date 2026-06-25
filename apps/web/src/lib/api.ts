@@ -1214,6 +1214,67 @@ export const workflowsRun = (id: string) =>
     body: JSON.stringify({ id }),
   });
 
+// ── Flujos por GRAFO (DAG) — editor visual (Fase F) ──────────────────────────
+export type FlowTriggerKind =
+  | { type: "manual" }
+  | { type: "interval"; minutes: number }
+  | { type: "event"; kind: string };
+export type FlowNodeKind =
+  | { kind: "trigger"; trigger: FlowTriggerKind }
+  | { kind: "action"; tool: string; input: string }
+  | { kind: "condition"; test: string };
+export type FlowNode = { id: string; title: string; x: number; y: number } & FlowNodeKind;
+export type FlowEdge = { id: string; from: string; to: string; when: string };
+export type Flow = {
+  id: string;
+  name: string;
+  description: string;
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  enabled: boolean;
+  last_run_ms?: number | null;
+};
+export type FlowNodeResult = {
+  node_id: string;
+  tool: string;
+  input: string;
+  output: string;
+  ok: boolean;
+  needs_approval: boolean;
+};
+export type FlowRun = {
+  flow_id: string;
+  steps: FlowNodeResult[];
+  ok: boolean;
+  stopped_for_approval: boolean;
+};
+
+export const flowsList = () => jsonCall<{ flows: Flow[] }>("/api/flows");
+export const flowsSet = (f: Flow) =>
+  jsonCall<{ ok?: boolean; count?: number; error?: string }>("/api/flows", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(f),
+  });
+export const flowsRemove = (id: string) =>
+  jsonCall<{ ok?: boolean; error?: string }>("/api/flows/remove", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+export const flowsRun = (id: string) =>
+  jsonCall<FlowRun & { error?: string }>("/api/flows/run", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+export const flowsMigrate = () =>
+  jsonCall<{ ok?: boolean; added?: number; count?: number; error?: string }>("/api/flows/migrate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+
 /// Descarga un modelo local con progreso (SSE).
 export type InstalledModel = { name: string; size_gb: number };
 

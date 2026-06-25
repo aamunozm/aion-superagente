@@ -868,6 +868,11 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/workflows", get(workflows_list).post(workflows_set))
         .route("/api/workflows/remove", post(workflows_remove))
         .route("/api/workflows/run", post(workflows_run))
+        // Flujos por GRAFO (DAG) — motor nativo del editor visual (Fase F).
+        .route("/api/flows", get(flows_list).post(flows_set))
+        .route("/api/flows/remove", post(flows_remove))
+        .route("/api/flows/run", post(flows_run))
+        .route("/api/flows/migrate", post(flows_migrate))
         // Gobernanza de comunicaciones: con quién y por qué canal puede hablar AION.
         .route("/api/comms", get(comms_get).post(comms_set))
         .route("/api/governance/setup", post(governance_setup))
@@ -1807,6 +1812,82 @@ async fn workflows_run(Json(b): Json<WorkflowIdBody>) -> Json<serde_json::Value>
         serde_json::to_value(run)
             .unwrap_or_else(|_| serde_json::json!({ "error": "serialización" })),
     )
+}
+
+// ── Flujos por GRAFO (DAG) — Fase F: motor nativo del editor visual ──────────────
+
+/// Registro de herramientas para los flujos por grafo: el set SEGURO del motor lineal MÁS las
+/// que producen ENTREGABLES locales (auditoría SEO, documentos, notas). Sigue sin incluir acciones
+/// irreversibles externas (envíos, control del ratón): esas pasan por el HITL del agente.
+fn flow_registry() -> ToolRegistry {
+    let mut tools = workflow_registry();
+    tools.register(Arc::new(crate::agent_tools::SeoAuditTool::new()));
+    tools.register(Arc::new(crate::agent_tools::GenerateDocumentTool::new()));
+    tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
+    tools
+}
+
+async fn flows_list() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "flows": crate::flow::load() }))
+}
+
+/// Crea o actualiza un flujo de grafo (upsert por id) y persiste.
+async fn flows_set(Json(f): Json<crate::flow::Flow>) -> Json<serde_json::Value> {
+    let list = crate::flow::upsert(crate::flow::load(), f);
+    match crate::flow::save(&list) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "count": list.len() })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct FlowIdBody {
+    id: String,
+}
+
+async fn flows_remove(Json(b): Json<FlowIdBody>) -> Json<serde_json::Value> {
+    let list = crate::flow::remove(crate::flow::load(), &b.id);
+    match crate::flow::save(&list) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// Ejecuta un flujo de grafo por id (lanzado por Ariel desde la UI → `allow_sensitive=true`).
+/// Actualiza `last_run_ms` y devuelve el resultado por nodo.
+async fn flows_run(Json(b): Json<FlowIdBody>) -> Json<serde_json::Value> {
+    let mut list = crate::flow::load();
+    let Some(flow) = list.iter().find(|f| f.id == b.id).cloned() else {
+        return Json(serde_json::json!({ "error": "flujo no encontrado" }));
+    };
+    let tools = flow_registry();
+    let run = crate::flow::run(&flow, &tools, true).await;
+    if let Some(slot) = list.iter_mut().find(|f| f.id == b.id) {
+        slot.last_run_ms = Some(crate::workflow::now_ms());
+        let _ = crate::flow::save(&list);
+    }
+    Json(
+        serde_json::to_value(run)
+            .unwrap_or_else(|_| serde_json::json!({ "error": "serialización" })),
+    )
+}
+
+/// Migra los flujos LINEALES existentes (`workflows.json`) al modelo de GRAFO (`flows.json`),
+/// sin duplicar los ya migrados. Así no se pierde nada al pasar al editor visual.
+async fn flows_migrate() -> Json<serde_json::Value> {
+    let mut list = crate::flow::load();
+    let have: std::collections::HashSet<String> = list.iter().map(|f| f.id.clone()).collect();
+    let mut added = 0;
+    for wf in crate::workflow::load() {
+        if !have.contains(&wf.id) {
+            list.push(crate::flow::from_workflow(&wf));
+            added += 1;
+        }
+    }
+    match crate::flow::save(&list) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "added": added, "count": list.len() })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
 }
 
 #[derive(Deserialize)]
