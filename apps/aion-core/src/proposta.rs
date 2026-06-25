@@ -11,16 +11,24 @@ use aion_kernel::traits::{GenerateRequest, LlmEngine};
 use aion_kernel::types::Message;
 
 /// ¿La petición pide una PROPUESTA/PREVENTIVO ANALÍTICO (consultor), no una oferta rápida?
+///
+/// NOTA (auditoría 2026-06-25): el `noun` es a propósito ESTRECHO — solo sustantivos que nombran
+/// el ENTREGABLE comercial (preventivo/propuesta/consultor/presupuesto). Antes incluía «análisis»/
+/// «analítica» a secas y eso SECUESTRABA las peticiones de auditoría SEO («quiero un análisis SEO»
+/// → generaba una propuesta). El enrutado primario es ahora semántico ([`crate::doc_intent`]); este
+/// detector es la red de seguridad léxica, y debe distinguir propuesta de auditoría SEO.
 pub fn is_proposta(task: &str) -> bool {
     let t = task.to_lowercase();
     let noun = t.contains("preventivo")
         || t.contains("proposta")
         || t.contains("propuesta")
-        || t.contains("análisis")
-        || t.contains("analisis")
-        || t.contains("analitic")
-        || t.contains("analítica")
+        || t.contains("presupuesto")
         || t.contains("consultor");
+    // Una petición de AUDITORÍA SEO no es una propuesta, aunque diga «análisis»: no la captures.
+    let is_seo = t.contains("seo") || t.contains("posicionamiento");
+    if is_seo {
+        return false;
+    }
     let make = t.contains("haz")
         || t.contains("hace")
         || t.contains("genera")
@@ -412,8 +420,18 @@ mod tests {
     fn detecta_intencion_propuesta() {
         assert!(is_proposta("hazme un preventivo analítico para el cliente"));
         assert!(is_proposta("analiza el sitio y redacta una propuesta"));
+        assert!(is_proposta(
+            "prepara un presupuesto de consultor para el cliente"
+        ));
         assert!(!is_proposta("qué tal estás"));
         assert!(!is_proposta("hazme la oferta en pdf")); // eso es la oferta rápida
+                                                         // Auditoría SEO NO es una propuesta, aunque diga «análisis» (era el misruteo de la auditoría).
+        assert!(!is_proposta(
+            "quiero un análisis seo profesional, en qué posición está en google y qué puntaje tiene"
+        ));
+        assert!(!is_proposta(
+            "analiza el posicionamiento de la página del cliente"
+        ));
     }
 
     #[test]

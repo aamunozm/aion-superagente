@@ -289,6 +289,8 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     // 🪞 ROUTER SEMÁNTICO: pre-calienta los prototipos de intención (embeddings) para que el
     // primer mensaje no pague el coste de embeberlos.
     crate::intent::warm();
+    // 🧭 ENRUTADO DE SKILLS DE DOCUMENTO (SEO / propuesta / oferta): mismos prototipos cacheados.
+    crate::doc_intent::warm();
 
     // 🧬 RITUAL DE TEMPERAMENTO: si AION aún no se ha descrito a sí mismo, articula su propio
     // carácter (una vez, en 1ª persona, grounded en su genoma único) — para que su
@@ -849,6 +851,8 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .allow_headers(Any);
     let app = Router::new()
         .route("/api/health", get(health))
+        // Diagnóstico del enrutado de skills de documento (calibración en vivo de los umbrales).
+        .route("/api/intent/doc", get(intent_doc_diag))
         .route("/api/status", get(status))
         .route("/api/system/scan", get(system_scan))
         .route("/api/models/pull", post(models_pull))
@@ -1119,10 +1123,19 @@ async fn local_guard(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     // `/mcp` tiene su propio Bearer; queda fuera de la exigencia de Origin.
-    let is_mcp = req.uri().path() == "/mcp";
+    let path = req.uri().path();
+    let is_mcp = path == "/mcp";
+    // `/api/a2a/message` es el INBOUND entre agentes: lo entrega un par EXTERNO por la LAN, así que
+    // su Host será la IP del Mac (no «local») y no traerá Origin local. Queda FUERA del guard de
+    // host/origin — su única auth es el secreto compartido (timing-safe, en el handler). El resto
+    // de la API sigue exigiendo host+origin locales (blindaje anti-DNS-rebinding intacto).
+    let is_a2a_inbound = path == "/api/a2a/message";
     // Mutación = método no seguro (POST/PUT/PATCH/DELETE). GET/HEAD/OPTIONS son seguros.
     let is_mutation = !req.method().is_safe();
     let headers = req.headers();
+    if is_a2a_inbound {
+        return next.run(req).await;
+    }
     if let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) {
         if !is_local_host(host) {
             return (StatusCode::FORBIDDEN, "host no local").into_response();
@@ -1209,7 +1222,14 @@ async fn require_api_token(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let path = req.uri().path();
-    let needs = !req.method().is_safe() && path.starts_with("/api/") && path != "/api/auth/token";
+    // `/api/a2a/message` es el INBOUND entre agentes (A2A): un agente par externo lo entrega por
+    // la LAN y NO posee el Bearer local de AION; su autenticación propia es el SECRETO COMPARTIDO
+    // (timing-safe, dentro del handler). Igual que CEO·Intelligence, que abre su inbound sin JWT.
+    let is_a2a_inbound = path == "/api/a2a/message";
+    let needs = !req.method().is_safe()
+        && path.starts_with("/api/")
+        && path != "/api/auth/token"
+        && !is_a2a_inbound;
     if needs {
         let provided = req
             .headers()
@@ -2846,77 +2866,112 @@ async fn agent(
         // sigue trabajando aunque cierres la página; el resultado se persiste al terminar.
         project_task_start(&body);
 
-        // 🧠 FAST-PATH «PROPOSTA ANALITICA» (consultor, nivel PREV-2026-030): analiza el sitio del
-        // cliente (SEO real), razona su situación y REDACTA una propuesta a medida con la marca
-        // dinámica de la empresa. Es un análisis LARGO → idóneo para la continuación en 2º plano.
-        if crate::proposta::is_proposta(&body.task) && body.project_id.is_some() {
-            crate::inner_state::set_focus("agente", "redactando una propuesta analítica");
-            let _ = tx
-                .send(Event::default().data(
-                    serde_json::json!({ "kind": "thought", "text": "Analizo el sitio del cliente, razono su situación y redacto una propuesta a medida. Es un análisis a fondo; lo termino aunque cierres la página." }).to_string(),
-                ))
-                .await;
-            let ctx = body.context.clone().unwrap_or_default();
-            let ans = match crate::proposta::compose(
-                &*engine,
-                body.project_id.as_deref(),
-                &body.task,
-                &ctx,
-            )
-            .await
-            {
-                Ok((path, cliente, missing)) => {
-                    crate::awareness::record_outcome(true);
-                    let who = if cliente.trim().is_empty() {
-                        "el cliente".to_string()
-                    } else {
-                        cliente
-                    };
-                    let mut a = format!(
-                        "Propuesta analítica para {who} lista — la guardé en tu Escritorio:\n{path}\n\nIncluye firmas de ambas partes, fecha, validez y cláusula de privacidad (GDPR)."
-                    );
-                    if !missing.is_empty() {
-                        a.push_str("\n\nPara que el preventivo quede redondo, indícame también:");
-                        for m in &missing {
-                            a.push_str(&format!("\n• {m}"));
+        // 🧭 ENRUTADO DE SKILLS DE DOCUMENTO (meaning-first — auditoría 2026-06-25). Antes, tres
+        // «fast-paths» por keywords solapadas con MAL orden de precedencia hacían que «análisis
+        // SEO» se convirtiera en «propuesta». Ahora decide el SIGNIFICADO (`doc_intent::classify`,
+        // BGE-M3); si el sentido no es claro, una red de seguridad léxica (orden corregido: SEO →
+        // oferta → propuesta) decide. Y si una skill detecta la intención pero le faltan DATOS
+        // (URL / servicios), PIDE lo que falta en vez de rendirse con la negativa honesta genérica
+        // (que confundía: «no tengo herramienta» cuando sí la hay).
+        let doc_skill = match crate::doc_intent::classify(&body.task).await {
+            Some(s) => Some(s),
+            None => lexical_doc_skill(&body),
+        };
+        if let Some(skill) = doc_skill {
+            use crate::doc_intent::DocSkill;
+            // La propuesta analítica necesita un PROYECTO (analiza el sitio del cliente). Sin
+            // proyecto, no aplica → cae al flujo normal.
+            let applies = !matches!(skill, DocSkill::Proposta) || body.project_id.is_some();
+            if applies {
+                let (focus, thought) = match skill {
+                    DocSkill::Seo => (
+                        "auditoría SEO",
+                        "Hago la auditoría SEO: leo la página (incluido el render del JavaScript) y la puntúo.",
+                    ),
+                    DocSkill::Offerta => (
+                        "preparando una oferta en documento",
+                        "Preparo la oferta como documento a partir de lo que hablamos.",
+                    ),
+                    DocSkill::Proposta => (
+                        "redactando una propuesta analítica",
+                        "Analizo el sitio del cliente, razono su situación y redacto una propuesta a medida. Es un análisis a fondo; lo termino aunque cierres la página.",
+                    ),
+                };
+                crate::inner_state::set_focus("agente", focus);
+                let _ = tx
+                    .send(Event::default().data(
+                        serde_json::json!({ "kind": "thought", "text": thought }).to_string(),
+                    ))
+                    .await;
+
+                let ans = match skill {
+                    DocSkill::Seo => match try_seo_audit(&body).await {
+                        Some(a) => {
+                            crate::awareness::record_outcome(!a.contains("no pude completarla"));
+                            a
                         }
-                        a.push_str("\n\nCon eso lo regenero al instante.");
+                        // Fix B: detectó la intención SEO pero no hay URL → pedirla, no rendirse.
+                        None => "Para la auditoría SEO necesito la URL de la página a analizar. \
+                                 Dímela (o añádela como fuente web del proyecto) y la audito al \
+                                 instante: leo el HTML y el render, la puntúo y te entrego el informe."
+                            .to_string(),
+                    },
+                    DocSkill::Offerta => match try_offerta_to_doc(&*engine, &body).await {
+                        Some(a) => {
+                            crate::awareness::record_outcome(true);
+                            a
+                        }
+                        // Fix B: intención clara de oferta→documento, pero sin servicios/precios.
+                        None => "Quiero armar la oferta en PDF, pero no encuentro los servicios y \
+                                 precios en lo que hablamos ni en las fuentes activas del proyecto. \
+                                 Dímelos (servicio + importe) o indícame qué fuente usar, y la genero \
+                                 al instante."
+                            .to_string(),
+                    },
+                    DocSkill::Proposta => {
+                        let ctx = body.context.clone().unwrap_or_default();
+                        match crate::proposta::compose(
+                            &*engine,
+                            body.project_id.as_deref(),
+                            &body.task,
+                            &ctx,
+                        )
+                        .await
+                        {
+                            Ok((path, cliente, missing)) => {
+                                crate::awareness::record_outcome(true);
+                                let who = if cliente.trim().is_empty() {
+                                    "el cliente".to_string()
+                                } else {
+                                    cliente
+                                };
+                                let mut a = format!(
+                                    "Propuesta analítica para {who} lista — la guardé en tu Escritorio:\n{path}\n\nIncluye firmas de ambas partes, fecha, validez y cláusula de privacidad (GDPR)."
+                                );
+                                if !missing.is_empty() {
+                                    a.push_str(
+                                        "\n\nPara que el preventivo quede redondo, indícame también:",
+                                    );
+                                    for m in &missing {
+                                        a.push_str(&format!("\n• {m}"));
+                                    }
+                                    a.push_str("\n\nCon eso lo regenero al instante.");
+                                }
+                                a
+                            }
+                            Err(e) => {
+                                format!("Empecé la propuesta analítica pero no pude terminarla: {e}")
+                            }
+                        }
                     }
-                    a
-                }
-                Err(e) => format!("Empecé la propuesta analítica pero no pude terminarla: {e}"),
-            };
-            project_task_done(&body, &ans);
-            agent_perceive_and_remember(body.task.clone(), ans.clone());
-            let _ = tx
-                .send(Event::default().data(
-                    serde_json::json!({ "kind": "answer", "text": ans, "steps": 1 }).to_string(),
-                ))
-                .await;
-            let _ = tx
-                .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
-                .await;
-            return;
-        }
+                };
 
-        // 📄 FAST-PATH DETERMINISTA «oferta → documento»: «hazme la oferta en un pdf» tras hablarla.
-        // No depende de que el modelo emita una acción ReAct (que a veces falla → negativa honesta):
-        // extrae los hechos del contexto y RENDERIZA de verdad. Si no hay oferta extraíble, sigue.
-        if is_offerta_to_doc(&body.task) {
-            crate::inner_state::set_focus("agente", "preparando una oferta en documento");
-            let _ = tx
-                .send(Event::default().data(
-                    serde_json::json!({ "kind": "thought", "text": "Preparo la oferta como documento a partir de lo que hablamos." }).to_string(),
-                ))
-                .await;
-            if let Some(answer) = try_offerta_to_doc(&*engine, &body).await {
-                crate::awareness::record_outcome(true);
-                agent_perceive_and_remember(body.task.clone(), answer.clone());
-                project_task_done(&body, &answer);
+                agent_perceive_and_remember(body.task.clone(), ans.clone());
+                project_task_done(&body, &ans);
                 let _ = tx
                     .send(
                         Event::default().data(
-                            serde_json::json!({ "kind": "answer", "text": answer, "steps": 1 })
+                            serde_json::json!({ "kind": "answer", "text": ans, "steps": 1 })
                                 .to_string(),
                         ),
                     )
@@ -2926,36 +2981,6 @@ async fn agent(
                     .await;
                 return;
             }
-            // Sin oferta con servicios en el contexto → cae al flujo normal (ReAct/charla).
-        }
-
-        // 🔎 FAST-PATH SEO: «auditoría SEO de X» (o, en un proyecto, de su web). Lee la página de
-        // verdad (HTML crudo + render headless), la puntúa y entrega un PDF. Determinista.
-        if is_seo_audit(&body.task) {
-            crate::inner_state::set_focus("agente", "auditoría SEO");
-            let _ = tx
-                .send(Event::default().data(
-                    serde_json::json!({ "kind": "thought", "text": "Hago la auditoría SEO: leo la página (incluido el render del JavaScript) y la puntúo." }).to_string(),
-                ))
-                .await;
-            if let Some(answer) = try_seo_audit(&body).await {
-                crate::awareness::record_outcome(!answer.contains("no pude completarla"));
-                agent_perceive_and_remember(body.task.clone(), answer.clone());
-                project_task_done(&body, &answer);
-                let _ = tx
-                    .send(
-                        Event::default().data(
-                            serde_json::json!({ "kind": "answer", "text": answer, "steps": 1 })
-                                .to_string(),
-                        ),
-                    )
-                    .await;
-                let _ = tx
-                    .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
-                    .await;
-                return;
-            }
-            // Sin URL que auditar → sigue el flujo normal.
         }
 
         // ROUTER SEMÁNTICO (#4): para TODO mensaje que no fue charla trivial, decidimos por
@@ -7619,6 +7644,55 @@ async fn documents_offerta(Json(b): Json<OffertaGen>) -> axum::response::Respons
 /// ¿La tarea pide convertir en DOCUMENTO (PDF/Word) una OFERTA ya hablada? (verbo de crear +
 /// sustantivo de oferta + formato/documento). Caso típico: «hazme la oferta en un pdf» tras
 /// haberla discutido en el chat. Es el disparador del FAST-PATH determinista de abajo.
+#[derive(serde::Deserialize)]
+struct DocIntentQuery {
+    q: String,
+}
+
+/// **Diagnóstico del enrutado de skills de documento.** `GET /api/intent/doc?q=...` devuelve las
+/// similitudes semánticas por skill (SEO/propuesta/oferta/neutro), la decisión del clasificador y
+/// la de la red léxica. Sirve para calibrar los umbrales en vivo con frases reales.
+async fn intent_doc_diag(Query(q): Query<DocIntentQuery>) -> Json<serde_json::Value> {
+    let scores = crate::doc_intent::scores(&q.q).await;
+    let semantic = crate::doc_intent::classify(&q.q).await;
+    let lexical = lexical_doc_skill(&AgentBody {
+        task: q.q.clone(),
+        lang: None,
+        context: None,
+        project_id: Some("diag".to_string()),
+    });
+    let skill_name = |s: Option<crate::doc_intent::DocSkill>| {
+        s.map(|s| format!("{s:?}")).unwrap_or_else(|| "None".into())
+    };
+    Json(serde_json::json!({
+        "query": q.q,
+        "scores": scores,
+        "semantic": skill_name(semantic),
+        "lexical": skill_name(lexical),
+        "final": skill_name(semantic.or(lexical)),
+    }))
+}
+
+/// Red de seguridad LÉXICA del enrutado de skills de documento: cuando el clasificador semántico
+/// ([`crate::doc_intent`]) no decide (o no hay embeddings disponibles), los detectores deterministas
+/// deciden — AHORA EN EL ORDEN CORRECTO: SEO primero (lo más específico), luego oferta→documento,
+/// y por último propuesta analítica (la más amplia). Esto cierra el misruteo en que «análisis SEO»
+/// se convertía en una propuesta (auditoría 2026-06-25).
+fn lexical_doc_skill(body: &AgentBody) -> Option<crate::doc_intent::DocSkill> {
+    use crate::doc_intent::DocSkill;
+    let t = &body.task;
+    if is_seo_audit(t) {
+        return Some(DocSkill::Seo);
+    }
+    if is_offerta_to_doc(t) {
+        return Some(DocSkill::Offerta);
+    }
+    if crate::proposta::is_proposta(t) && body.project_id.is_some() {
+        return Some(DocSkill::Proposta);
+    }
+    None
+}
+
 fn is_offerta_to_doc(task: &str) -> bool {
     let t = task.to_lowercase();
     let verb = [
@@ -7932,17 +8006,42 @@ async fn try_offerta_to_doc(engine: &dyn LlmEngine, body: &AgentBody) -> Option<
 /// ¿La tarea pide una AUDITORÍA SEO? (mención de SEO/posicionamiento + verbo de auditar/analizar).
 fn is_seo_audit(task: &str) -> bool {
     let t = task.to_lowercase();
-    let seo = t.contains("seo") || t.contains("posicionamiento");
+    // Gatekeeper de DOMINIO SEO: la palabra «SEO», «posicionamiento», o «posición/ranking/búsqueda
+    // + Google» (pedir la posición en Google ES pedir SEO, aunque no se diga la sigla).
+    let seo = t.contains("seo")
+        || t.contains("posicionamiento")
+        || (t.contains("google")
+            && (t.contains("posicion")
+                || t.contains("posición")
+                || t.contains("ranking")
+                || t.contains("buscador")
+                || t.contains("busqueda")
+                || t.contains("búsqueda")));
+    if !seo {
+        return false;
+    }
+    // Señal de ANÁLISIS/diagnóstico/puntuación. Cubre variantes con y sin tilde («analisis»,
+    // «análisis», «analizar») — la causa de que «quiero un analisis seo» no se detectara — y los
+    // sustantivos típicos de una auditoría (posición, puntaje, score, ranking).
     let audit = t.contains("audit")
         || t.contains("analiz")
-        || t.contains("analís")
+        || t.contains("analis")
+        || t.contains("análi")
         || t.contains("revis")
-        || t.contains("evalúa")
         || t.contains("evalua")
+        || t.contains("evalúa")
         || t.contains("informe")
         || t.contains("diagnos")
         || t.contains("chequea")
-        || t.contains("mejora");
+        || t.contains("mejora")
+        || t.contains("verific")
+        || t.contains("posicion")
+        || t.contains("posición")
+        || t.contains("puntaje")
+        || t.contains("puntuacion")
+        || t.contains("puntuación")
+        || t.contains("score")
+        || t.contains("ranking");
     seo && audit
 }
 
@@ -8781,7 +8880,15 @@ async fn a2a_message(Json(b): Json<A2aInbound>) -> Json<serde_json::Value> {
     if !cfg.enabled {
         return Json(serde_json::json!({ "ok": false, "error": "A2A desactivado" }));
     }
-    if !cfg.token.is_empty() && b.token != cfg.token {
+    // Este endpoint es PÚBLICO (sin Bearer local): el secreto compartido es la ÚNICA barrera. Por
+    // eso EXIGIMOS secreto configurado (sin él no aceptamos a nadie) y comparamos en TIEMPO
+    // CONSTANTE (token_matches) — para no filtrar el secreto por el tiempo de respuesta.
+    if cfg.token.is_empty() {
+        return Json(
+            serde_json::json!({ "ok": false, "error": "A2A sin secreto: configúralo en Ajustes" }),
+        );
+    }
+    if !crate::claude_mcp::token_matches(&b.token, &cfg.token) {
         return Json(serde_json::json!({ "ok": false, "error": "token A2A inválido" }));
     }
     let me = crate::identity::get();
@@ -9482,6 +9589,82 @@ mod guard_tests {
         assert!(is_local_host("[::1]:8765"));
         assert!(!is_local_host("attacker.com"));
         assert!(!is_local_host("attacker.com:8765"));
+    }
+}
+
+#[cfg(test)]
+mod doc_routing_tests {
+    use super::{is_offerta_to_doc, is_seo_audit, lexical_doc_skill, AgentBody};
+    use crate::doc_intent::DocSkill;
+
+    fn body(task: &str, project: bool) -> AgentBody {
+        AgentBody {
+            task: task.to_string(),
+            lang: None,
+            context: None,
+            project_id: project.then(|| "p1".to_string()),
+        }
+    }
+
+    #[test]
+    fn seo_audit_capta_variantes_reales() {
+        // Los fraseos REALES del screenshot que antes no se detectaban.
+        assert!(is_seo_audit(
+            "verificaste el seo de la pagina de lisa armenio?"
+        ));
+        assert!(is_seo_audit(
+            "quiero un analisis seo profesional, en que posicion esta en google y que puntaje tiene"
+        ));
+        assert!(is_seo_audit("y el posicionamiento"));
+        assert!(is_seo_audit(
+            "analiza el posicionamiento de la pagina del cliente"
+        ));
+        // Charla SOBRE seo (sin pedir análisis) no dispara.
+        assert!(!is_seo_audit("el seo es importante para el negocio"));
+        assert!(!is_seo_audit("hola, como estas"));
+    }
+
+    #[test]
+    fn red_lexica_rutea_en_orden_correcto() {
+        // SEO gana (antes lo secuestraba la propuesta).
+        assert_eq!(
+            lexical_doc_skill(&body(
+                "quiero un analisis seo, en que posicion esta en google",
+                true
+            )),
+            Some(DocSkill::Seo)
+        );
+        // Oferta → documento.
+        assert_eq!(
+            lexical_doc_skill(&body("hazme la oferta en un pdf", true)),
+            Some(DocSkill::Offerta)
+        );
+        // Propuesta analítica explícita (con proyecto).
+        assert_eq!(
+            lexical_doc_skill(&body(
+                "redacta una propuesta analitica para el cliente",
+                true
+            )),
+            Some(DocSkill::Proposta)
+        );
+        // Propuesta SIN proyecto → no aplica.
+        assert_eq!(
+            lexical_doc_skill(&body("redacta una propuesta para el cliente", false)),
+            None
+        );
+        // Charla → ninguna skill.
+        assert_eq!(
+            lexical_doc_skill(&body("hola, como estas hoy?", true)),
+            None
+        );
+    }
+
+    #[test]
+    fn oferta_a_doc_exige_formato() {
+        assert!(is_offerta_to_doc("pásame la oferta en pdf"));
+        assert!(is_offerta_to_doc("haz la oferta en un documento"));
+        // Sin formato de documento, no es «oferta→documento».
+        assert!(!is_offerta_to_doc("hablemos de la oferta"));
     }
 }
 
