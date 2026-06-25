@@ -26,6 +26,7 @@ mod empathy;
 mod episodic;
 mod evals;
 mod faces;
+mod flow;
 mod governance;
 mod graph;
 mod identity;
