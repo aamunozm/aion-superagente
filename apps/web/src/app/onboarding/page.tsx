@@ -28,12 +28,6 @@ const POSTURES = [
   { id: "max", name: "Máxima autonomía", desc: "Autónomo en casi todo; solo la lista roja pide confirmación." },
 ];
 
-// Voz por GÉNERO (Piper, género fiable). Mujer = Lucía; hombre = Mateo (el predeterminado).
-const VOICE_BY_GENDER: Record<"f" | "m", string> = {
-  f: "es_MX-claude-high",
-  m: "es_MX-ald-medium",
-};
-
 export default function OnboardingPage() {
   const router = useRouter();
   const [step, setStep] = useState<Step>("scan");
@@ -122,11 +116,12 @@ export default function OnboardingPage() {
     if (agentName.trim().length >= 2) {
       await identityNameSet(agentName.trim()).catch(() => {});
     }
-    // Voz por género (Piper, fiable). Se guarda como preferencia local.
+    // Voz por GÉNERO usando las voces NEURONALES de macOS (cero descarga, cero Terminal; calidad
+    // "Siri/Premium" a un clic en Ajustes del Sistema). femenina→Mónica/Paulina, masculina→Jorge.
     try {
-      localStorage.setItem("aion.voice.name", VOICE_BY_GENDER[gender]);
-      localStorage.setItem("aion.voice.engine", "piper");
-      localStorage.setItem("aion.voice", "piper"); // != "system"
+      localStorage.setItem("aion.voice", "system");
+      localStorage.setItem("aion.voice.engine", "system");
+      localStorage.setItem("aion.voice.gender", gender);
     } catch {
       /* sin localStorage: no bloquea */
     }
@@ -271,7 +266,7 @@ export default function OnboardingPage() {
 
             <label className="text-[11px]" style={{ color: "var(--text-3)" }}>Voz</label>
             <div className="grid grid-cols-2 gap-2 mt-1 mb-5">
-              {([["f", "Femenina", "Lucía"], ["m", "Masculina", "Mateo"]] as const).map(([g, label, who]) => (
+              {([["f", "Femenina", "Mónica · macOS"], ["m", "Masculina", "Jorge · macOS"]] as const).map(([g, label, who]) => (
                 <button
                   key={g}
                   onClick={() => setGender(g)}
@@ -279,7 +274,7 @@ export default function OnboardingPage() {
                   style={{ borderColor: gender === g ? "var(--accent)" : "var(--border)", background: gender === g ? "var(--accent-subtle)" : "transparent" }}
                 >
                   <div className="font-medium text-sm">{label}</div>
-                  <div className="text-[11px]" style={{ color: "var(--text-3)" }}>{who} · español (Piper)</div>
+                  <div className="text-[11px]" style={{ color: "var(--text-3)" }}>{who}</div>
                 </button>
               ))}
             </div>
