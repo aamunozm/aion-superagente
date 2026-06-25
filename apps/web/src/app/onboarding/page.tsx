@@ -7,11 +7,13 @@ import {
   providerSet,
   governanceSetup,
   modelsPull,
+  status,
+  identityNameSet,
   type SystemScan,
   type ModelOption,
 } from "@/lib/api";
 
-type Step = "scan" | "model" | "install" | "rules" | "done";
+type Step = "scan" | "model" | "install" | "identity" | "rules";
 
 const PROVIDERS: Record<string, { label: string; base_url: string; model: string }> = {
   groq: { label: "Groq", base_url: "https://api.groq.com/openai/v1", model: "llama-3.3-70b-versatile" },
@@ -26,6 +28,12 @@ const POSTURES = [
   { id: "max", name: "Máxima autonomía", desc: "Autónomo en casi todo; solo la lista roja pide confirmación." },
 ];
 
+// Voz por GÉNERO (Piper, género fiable). Mujer = Lucía; hombre = Mateo (el predeterminado).
+const VOICE_BY_GENDER: Record<"f" | "m", string> = {
+  f: "es_MX-claude-high",
+  m: "es_MX-ald-medium",
+};
+
 export default function OnboardingPage() {
   const router = useRouter();
   const [step, setStep] = useState<Step>("scan");
@@ -38,6 +46,9 @@ export default function OnboardingPage() {
   const [extModel, setExtModel] = useState(PROVIDERS.groq.model);
   const [progress, setProgress] = useState(0);
   const [progressMsg, setProgressMsg] = useState("");
+  const [ready, setReady] = useState(false); // modelo verificado y disponible
+  const [agentName, setAgentName] = useState("");
+  const [gender, setGender] = useState<"f" | "m">("m");
   const [posture, setPosture] = useState("conservative");
   const [error, setError] = useState<string | null>(null);
 
@@ -51,37 +62,75 @@ export default function OnboardingPage() {
       .catch((e) => setError(e instanceof Error ? e.message : "error"));
   }, []);
 
+  // Espera ACTIVA a que el modelo esté realmente listo (descargado y cargable) antes de continuar.
+  // Resuelve el problema del «Continuar» prematuro: el chat fallaba con Ollama 500 porque el modelo
+  // aún se estaba descargando (o preparando en segundo plano, caso del recomendado).
+  async function waitModelReady() {
+    for (let i = 0; i < 900; i++) {
+      // ~30 min de margen
+      const s = await status().catch(() => null);
+      if (s?.model_ready) {
+        setReady(true);
+        setProgress(100);
+        setProgressMsg("Modelo listo ✓");
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    setError("el modelo tarda demasiado en prepararse; revisa que Ollama esté corriendo.");
+  }
+
   async function startInstall() {
     setError(null);
+    setReady(false);
     try {
       if (source === "external") {
         const p = PROVIDERS[extProvider];
         await providerSet({ kind: "external", model: extModel, base_url: p.base_url, api_key: apiKey });
-        setStep("rules");
+        setReady(true);
+        setStep("identity");
         return;
       }
       if (!chosen) return;
       await providerSet({ kind: "local", model: chosen.ollama_name });
       setStep("install");
-      // gemma4-reason lo provisiona el propio sistema (bootstrap); el resto se descarga.
+      setProgress(0);
       if (chosen.ollama_name === "gemma4-reason") {
-        setProgressMsg("AION está preparando el modelo recomendado en segundo plano…");
-        setProgress(100);
-        return;
+        // El sistema lo provisiona en segundo plano (bootstrap): no hay % de descarga, esperamos.
+        setProgressMsg("AION está preparando el modelo recomendado… (no cierres esta ventana)");
+      } else {
+        setProgressMsg("Descargando el modelo…");
+        await modelsPull(chosen.ollama_name, (e) => {
+          if (e.kind === "progress") {
+            setProgress(e.percent ?? 0);
+            setProgressMsg(e.status ?? "Descargando…");
+          } else if (e.kind === "error") {
+            setError(e.text ?? "error al descargar");
+          }
+        });
+        setProgressMsg("Verificando el modelo…");
       }
-      await modelsPull(chosen.ollama_name, (e) => {
-        if (e.kind === "progress") {
-          setProgress(e.percent ?? 0);
-          setProgressMsg(e.status ?? "");
-        } else if (e.kind === "error") {
-          setError(e.text ?? "error al descargar");
-        }
-      });
-      setProgress(100);
-      setProgressMsg("Modelo instalado.");
+      // En TODOS los casos: no dejamos continuar hasta confirmar que el modelo responde.
+      await waitModelReady();
     } catch (e) {
       setError(e instanceof Error ? e.message : "error");
     }
+  }
+
+  async function finishIdentity() {
+    // Nombre elegido por el usuario (si lo dejó vacío, AION elige el suyo solo).
+    if (agentName.trim().length >= 2) {
+      await identityNameSet(agentName.trim()).catch(() => {});
+    }
+    // Voz por género (Piper, fiable). Se guarda como preferencia local.
+    try {
+      localStorage.setItem("aion.voice.name", VOICE_BY_GENDER[gender]);
+      localStorage.setItem("aion.voice.engine", "piper");
+      localStorage.setItem("aion.voice", "piper"); // != "system"
+    } catch {
+      /* sin localStorage: no bloquea */
+    }
+    setStep("rules");
   }
 
   async function finish() {
@@ -182,25 +231,64 @@ export default function OnboardingPage() {
           </div>
         )}
 
-        {/* PASO 3: INSTALACIÓN */}
+        {/* PASO 3: INSTALACIÓN (espera a que el modelo esté REALMENTE listo) */}
         {step === "install" && (
           <div className="card" style={{ boxShadow: "var(--shadow-elevated)" }}>
-            <h1 className="font-display text-2xl font-bold mb-1">Instalando el modelo</h1>
+            <h1 className="font-display text-2xl font-bold mb-1">Preparando el modelo</h1>
             <p className="text-sm mb-5" style={{ color: "var(--text-3)" }}>
-              {chosen?.name} · {chosen?.size_gb} GB. La primera vez tarda según tu conexión.
+              {chosen?.name} · {chosen?.size_gb} GB. La primera vez tarda según tu conexión. No cierres esta ventana.
             </p>
             <div className="h-3 rounded-full overflow-hidden mb-2" style={{ background: "var(--surface-2)" }}>
-              <div className="h-full transition-all" style={{ width: `${progress}%`, background: "var(--accent)" }} />
+              <div className="h-full transition-all" style={{ width: `${ready ? 100 : progress}%`, background: "var(--accent)" }} />
             </div>
-            <p className="text-xs mb-5" style={{ color: "var(--text-3)" }}>{progress}% · {progressMsg}</p>
+            <p className="text-xs mb-5" style={{ color: "var(--text-3)" }}>{ready ? 100 : progress}% · {progressMsg}</p>
             {error && <p className="text-sm mb-2" style={{ color: "#ef4444" }}>{error}</p>}
-            <button className="btn w-full" onClick={() => setStep("rules")} disabled={progress < 100 && !error}>
-              {progress >= 100 || error ? "Continuar" : "Descargando…"}
+            <button className="btn w-full" onClick={() => setStep("identity")} disabled={!ready && !error}>
+              {ready || error ? "Continuar" : "Preparando…"}
             </button>
           </div>
         )}
 
-        {/* PASO 4: REGLAS DEL AGENTE */}
+        {/* PASO 4: IDENTIDAD — nombre + voz (femenina / masculina) */}
+        {step === "identity" && (
+          <div className="card" style={{ boxShadow: "var(--shadow-elevated)" }}>
+            <h1 className="font-display text-2xl font-bold mb-1">Dale identidad</h1>
+            <p className="text-sm mb-4" style={{ color: "var(--text-3)" }}>
+              Elige cómo se llama y cómo suena. Podrás cambiarlo en Ajustes.
+            </p>
+
+            <label className="text-[11px]" style={{ color: "var(--text-3)" }}>Nombre</label>
+            <input
+              className="input mt-1 mb-1"
+              placeholder="Escribe un nombre…"
+              value={agentName}
+              onChange={(e) => setAgentName(e.target.value)}
+              maxLength={24}
+            />
+            <p className="text-[11px] mb-4" style={{ color: "var(--text-3)" }}>
+              Déjalo vacío y <strong>AION elegirá su propio nombre</strong> al nacer.
+            </p>
+
+            <label className="text-[11px]" style={{ color: "var(--text-3)" }}>Voz</label>
+            <div className="grid grid-cols-2 gap-2 mt-1 mb-5">
+              {([["f", "Femenina", "Lucía"], ["m", "Masculina", "Mateo"]] as const).map(([g, label, who]) => (
+                <button
+                  key={g}
+                  onClick={() => setGender(g)}
+                  className="rounded-lg p-3 border text-left transition-all"
+                  style={{ borderColor: gender === g ? "var(--accent)" : "var(--border)", background: gender === g ? "var(--accent-subtle)" : "transparent" }}
+                >
+                  <div className="font-medium text-sm">{label}</div>
+                  <div className="text-[11px]" style={{ color: "var(--text-3)" }}>{who} · español (Piper)</div>
+                </button>
+              ))}
+            </div>
+
+            <button className="btn w-full" onClick={finishIdentity}>Continuar</button>
+          </div>
+        )}
+
+        {/* PASO 5: REGLAS DEL AGENTE */}
         {step === "rules" && (
           <div className="card" style={{ boxShadow: "var(--shadow-elevated)" }}>
             <h1 className="font-display text-2xl font-bold mb-1">Reglas del agente</h1>

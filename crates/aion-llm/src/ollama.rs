@@ -151,7 +151,7 @@ impl OllamaEngine {
             .await
             .map_err(|e| AionError::Llm(format!("petición a Ollama falló: {e}")))?;
         if !resp.status().is_success() {
-            return Err(AionError::Llm(format!("Ollama devolvió {}", resp.status())));
+            return Err(ollama_failure(&self.model, resp).await);
         }
         let parsed: OllamaChatResponse = resp
             .json()
@@ -163,6 +163,44 @@ impl OllamaEngine {
             thinking: None,
         })
     }
+}
+
+/// Convierte una respuesta de Ollama con error HTTP en un mensaje CLARO y accionable (en vez de un
+/// «Ollama devolvió 500» críptico). Lee el cuerpo para detectar las causas comunes: el modelo no
+/// está instalado/se quedó a medias, o no cabe en la memoria del equipo.
+async fn ollama_failure(model: &str, resp: reqwest::Response) -> AionError {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let low = body.to_lowercase();
+    let msg = if low.contains("not found")
+        || low.contains("try pulling")
+        || low.contains("no such model")
+    {
+        format!(
+            "el modelo «{model}» no está instalado del todo (la descarga no terminó). Abre una \
+             terminal y ejecuta `ollama pull {model}`, o elige otro modelo en Ajustes."
+        )
+    } else if low.contains("out of memory")
+        || low.contains("more system memory")
+        || low.contains("vram")
+        || low.contains("requires more")
+    {
+        format!(
+            "el modelo «{model}» no cabe en la memoria de este equipo. Elige un modelo más pequeño \
+             en Ajustes (p. ej. Llama 3.2 3B)."
+        )
+    } else if status.as_u16() == 404 {
+        format!(
+            "el modelo «{model}» no está en Ollama. Instálalo con `ollama pull {model}` o elige otro \
+             en Ajustes."
+        )
+    } else if !body.trim().is_empty() {
+        let detail: String = body.trim().chars().take(200).collect();
+        format!("Ollama devolvió {status}: {detail}")
+    } else {
+        format!("Ollama devolvió {status}. ¿Está Ollama corriendo y el modelo «{model}» instalado?")
+    };
+    AionError::Llm(msg)
 }
 
 #[async_trait]
@@ -182,7 +220,7 @@ impl LlmEngine for OllamaEngine {
             .map_err(|e| AionError::Llm(format!("petición a Ollama falló: {e}")))?;
 
         if !resp.status().is_success() {
-            return Err(AionError::Llm(format!("Ollama devolvió {}", resp.status())));
+            return Err(ollama_failure(&self.model, resp).await);
         }
 
         let parsed: OllamaChatResponse = resp
@@ -212,7 +250,7 @@ impl LlmEngine for OllamaEngine {
             .map_err(|e| AionError::Llm(format!("petición a Ollama falló: {e}")))?;
 
         if !resp.status().is_success() {
-            return Err(AionError::Llm(format!("Ollama devolvió {}", resp.status())));
+            return Err(ollama_failure(&self.model, resp).await);
         }
 
         // Ollama emite NDJSON: una línea JSON por fragmento.

@@ -900,6 +900,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/agent/import", post(agent_import))
         .route("/api/agent/wipe", post(agent_wipe))
         .route("/api/identity", get(identity_get))
+        .route("/api/identity/name", post(identity_name_set))
         .route("/api/a2a", get(a2a_get).post(a2a_set))
         .route("/api/a2a/message", post(a2a_message))
         .route("/api/a2a/send", post(a2a_send))
@@ -8664,6 +8665,29 @@ async fn agent_import(Json(b): Json<AgentImport>) -> Json<serde_json::Value> {
 /// Identidad única de este AION (id irrepetible + nombre + nacimiento).
 async fn identity_get() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "identity": crate::identity::get() }))
+}
+
+#[derive(Deserialize)]
+struct NameBody {
+    #[serde(default)]
+    name: String,
+}
+/// Fija el NOMBRE que el usuario eligió en el onboarding. Marca `self_named` para que el ritual
+/// automático de auto-nombrado no lo sobrescriba. Nombre vacío → no hace nada (AION elige solo).
+async fn identity_name_set(Json(b): Json<NameBody>) -> Json<serde_json::Value> {
+    let clean: String = b
+        .name
+        .trim()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
+        .take(24)
+        .collect();
+    let clean = clean.trim();
+    if clean.len() < 2 {
+        return Json(serde_json::json!({ "ok": false, "error": "nombre demasiado corto" }));
+    }
+    crate::identity::set_name(clean);
+    Json(serde_json::json!({ "ok": true, "name": clean }))
 }
 
 // ── A2A: comunicación entre agentes ──────────────────────────────────────────

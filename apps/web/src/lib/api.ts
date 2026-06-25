@@ -1309,6 +1309,14 @@ export async function modelsPull(
 export const status = () =>
   jsonCall<{ engine_up: boolean; model_ready: boolean; engine: string }>("/api/status");
 
+/// Fija el nombre que el usuario eligió para AION en el onboarding (vacío → AION elige solo).
+export const identityNameSet = (name: string) =>
+  jsonCall<{ ok: boolean; name?: string; error?: string }>("/api/identity/name", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+
 export const inboxList = () =>
   jsonCall<{ unread: InboxMessage[]; unread_count: number; all: InboxMessage[] }>("/api/inbox");
 
