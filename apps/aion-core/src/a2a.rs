@@ -20,9 +20,32 @@ pub struct Config {
     /// Secreto compartido: ambos agentes deben tener el mismo para hablarse.
     #[serde(default)]
     pub token: String,
-    /// Otros agentes conocidos (nombre + URL base, p. ej. http://192.168.1.20:8765).
+    /// **Hub WebSocket** del peer (p. ej. `wss://api.ceo-intelligence.com/api/v1/ws/a2a`). Cuando
+    /// está, AION abre un canal SALIENTE persistente a él con `token` y recibe mensajes aunque esté
+    /// fuera de la LAN (atraviesa NAT). Se rellena al pegar el «código de conexión» del peer.
+    #[serde(default)]
+    pub hub: String,
+    /// Otros agentes conocidos (nombre + URL base, p. ej. http://192.168.1.20:8765). Modelo HTTP
+    /// directo (LAN): coexiste con el hub WS (que es el camino para movilidad).
     #[serde(default)]
     pub peers: Vec<Peer>,
+}
+
+/// Decodifica un **código de conexión** del peer (base64url de `{"hub": "...", "token": "..."}`)
+/// a `(hub, token)`. Es el atajo de un-pegado que genera CEO·Intelligence al registrar un agente.
+pub fn decode_connect_code(code: &str) -> Option<(String, String)> {
+    use base64::Engine;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(code.trim())
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(code.trim()))
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    let hub = v.get("hub")?.as_str()?.to_string();
+    let token = v.get("token")?.as_str()?.to_string();
+    if hub.is_empty() || token.is_empty() {
+        return None;
+    }
+    Some((hub, token))
 }
 
 fn path() -> PathBuf {

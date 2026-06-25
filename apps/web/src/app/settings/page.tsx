@@ -31,6 +31,7 @@ import {
   a2aGet,
   a2aSet,
   a2aSend,
+  a2aConnect,
   sensorsGet,
   sensorsSet,
   claudeCodeGet,
@@ -503,8 +504,9 @@ export default function SettingsPage() {
   const [modelMsg, setModelMsg] = useState<string>("");
   const [backupMsg, setBackupMsg] = useState<string>("");
   const [ident, setIdent] = useState<AionIdentity | null>(null);
-  const [a2a, setA2a] = useState<A2aConfig>({ enabled: false, token: "", peers: [] });
+  const [a2a, setA2a] = useState<A2aConfig>({ enabled: false, token: "", hub: "", peers: [] });
   const [a2aMsg, setA2aMsg] = useState<string>("");
+  const [connectCode, setConnectCode] = useState<string>("");
   const [newPeer, setNewPeer] = useState({ name: "", url: "" });
   const [sensors, setSensors] = useState<SensorConfig>({ enabled: false, lat: null, lon: null, place: "" });
   const [sensorMsg, setSensorMsg] = useState<string>("");
@@ -654,6 +656,19 @@ export default function SettingsPage() {
   function saveA2a(next: A2aConfig) {
     setA2a(next);
     a2aSet(next);
+  }
+  async function doConnect() {
+    const code = connectCode.trim();
+    if (!code) return;
+    setA2aMsg("Conectando…");
+    const r = await a2aConnect(code);
+    if (r.ok) {
+      setConnectCode("");
+      setA2aMsg("✅ Conectado. AION mantiene el canal abierto al hub (reconecta solo).");
+      a2aGet().then((x) => setA2a(x.config)); // refresca enabled + hub
+    } else {
+      setA2aMsg(`Error: ${r.error ?? "código inválido"}`);
+    }
   }
   async function testPeer(url: string) {
     setA2aMsg("Contactando…");
@@ -1364,6 +1379,34 @@ export default function SettingsPage() {
             />
             Activar A2A (recibir y enviar mensajes de otros agentes)
           </label>
+
+          {/* Vía RECOMENDADA: código de conexión (WebSocket saliente → funciona fuera de la LAN). */}
+          <div className="mb-3 p-3 rounded" style={{ background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+            <p className="text-xs font-medium mb-1" style={{ color: "var(--text-2)" }}>
+              Conectar con CEO·Intelligence (recomendado)
+            </p>
+            <p className="text-[11px] mb-2" style={{ color: "var(--text-3)" }}>
+              Pega el <strong>código de conexión</strong> que te da CEO·Intelligence (Configuración → Comunicación entre
+              Agentes → crear agente). AION abre un canal seguro <strong>saliente</strong>: sigue conectado aunque te
+              lleves el Mac fuera de casa, sin abrir puertos ni instalar nada.
+            </p>
+            {a2a.hub ? (
+              <p className="text-[11px] mb-2" style={{ color: "var(--gold-deep)" }}>● Canal configurado · {a2a.hub}</p>
+            ) : null}
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                className="input flex-1 min-w-[160px]"
+                placeholder="Pega aquí el código de conexión"
+                value={connectCode}
+                onChange={(e) => setConnectCode(e.target.value)}
+              />
+              <button className="btn" onClick={doConnect}>Conectar</button>
+            </div>
+          </div>
+
+          <p className="text-[11px] mb-1" style={{ color: "var(--text-3)" }}>
+            Avanzado — conexión directa por LAN (mismo router): secreto compartido + agentes con su IP.
+          </p>
           <input
             className="input mb-3"
             placeholder="Secreto compartido (token)"

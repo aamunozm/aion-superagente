@@ -291,9 +291,10 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     crate::intent::warm();
     // 🧭 ENRUTADO DE SKILLS DE DOCUMENTO (SEO / propuesta / oferta): mismos prototipos cacheados.
     crate::doc_intent::warm();
-    // 🔗 A2A PULL: AION «se asoma» a la cola de sus peers (modelo saliente) para recibir mensajes
-    // aunque el Mac esté fuera de la red local. Solo actúa si A2A está activado con secreto + peers.
-    spawn_a2a_pull_loop();
+    // 🔗 A2A por WEBSOCKET: AION abre un canal saliente persistente al hub del peer (CEO·Intelligence)
+    // y recibe/responde mensajes aunque el Mac esté fuera de la red local. Solo si A2A está activo
+    // con hub + token (el «código de conexión» del peer). Reconecta solo.
+    spawn_a2a_ws_client();
 
     // 🧬 RITUAL DE TEMPERAMENTO: si AION aún no se ha descrito a sí mismo, articula su propio
     // carácter (una vez, en 1ª persona, grounded en su genoma único) — para que su
@@ -910,6 +911,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/identity/name", post(identity_name_set))
         .route("/api/factory-reset", post(factory_reset))
         .route("/api/a2a", get(a2a_get).post(a2a_set))
+        .route("/api/a2a/connect", post(a2a_connect))
         .route("/api/a2a/message", post(a2a_message))
         .route("/api/a2a/send", post(a2a_send))
         .route("/api/inbox", get(inbox_list))
@@ -8867,6 +8869,30 @@ async fn a2a_set(Json(cfg): Json<crate::a2a::Config>) -> Json<serde_json::Value>
 }
 
 #[derive(Deserialize)]
+struct A2aConnectBody {
+    code: String,
+}
+
+/// Activa el A2A desde un **código de conexión** del peer (base64 de `{hub, token}`): lo decodifica,
+/// guarda hub + token y enciende A2A. El cliente WebSocket se conecta en el próximo ciclo (~5 s).
+/// Es el flujo de un-pegado: el usuario copia el código de CEO·Intelligence y lo pega aquí.
+async fn a2a_connect(Json(b): Json<A2aConnectBody>) -> Json<serde_json::Value> {
+    match crate::a2a::decode_connect_code(&b.code) {
+        Some((hub, token)) => {
+            let mut cfg = crate::a2a::load();
+            cfg.enabled = true;
+            cfg.hub = hub;
+            cfg.token = token;
+            crate::a2a::save(&cfg);
+            Json(serde_json::json!({ "ok": true, "hub": cfg.hub }))
+        }
+        None => Json(
+            serde_json::json!({ "ok": false, "error": "código de conexión inválido (revisa que lo copiaste completo)" }),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
 struct A2aInbound {
     #[serde(default)]
     from_id: String,
@@ -8921,79 +8947,126 @@ async fn a2a_generate_reply(
     Ok(reply)
 }
 
-/// Un mensaje pendiente que un peer guardó para nosotros (modelo PULL).
-#[derive(Deserialize)]
-struct A2aInboxMsg {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    from_id: String,
-    #[serde(default)]
-    from_name: String,
-    #[serde(default)]
-    message: String,
-}
-#[derive(Deserialize)]
-struct A2aInboxResp {
-    #[serde(default)]
-    messages: Vec<A2aInboxMsg>,
+/// Serializa un mensaje del protocolo WS A2A a un frame de texto.
+fn a2a_ws_text(value: serde_json::Value) -> tokio_tungstenite::tungstenite::Message {
+    tokio_tungstenite::tungstenite::Message::Text(value.to_string().into())
 }
 
-/// **PULL (saliente)**: sondea UNA vez la cola de cada peer. En vez de que el peer ENTRE a AION
-/// (imposible fuera de la LAN, detrás de NAT), AION SE ASOMA al peer: `GET {peer}/api/a2a/inbox`
-/// con el secreto, responde cada mensaje y entrega la respuesta en `POST {peer}/api/a2a/reply`.
-/// Conexiones SALIENTES → atraviesan cualquier NAT, sin exponer el `:8765` ni instalar nada.
-async fn a2a_poll_once(cfg: &crate::a2a::Config) {
-    let me = crate::identity::get();
-    let client = reqwest::Client::new();
-    for peer in &cfg.peers {
-        let base = peer.url.trim_end_matches('/');
-        let resp = match client
-            .get(format!("{base}/api/a2a/inbox"))
-            .bearer_auth(&cfg.token)
-            .timeout(std::time::Duration::from_secs(20))
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => r,
-            // Peer caído, sin red, o todavía sin el endpoint pull → se intenta en el próximo ciclo.
-            _ => continue,
-        };
-        let Ok(parsed) = resp.json::<A2aInboxResp>().await else {
-            continue;
-        };
-        for msg in parsed.messages {
-            if msg.message.trim().is_empty() {
+/// **A2A por WEBSOCKET (saliente, pull-mode).** AION abre un canal persistente al hub del peer
+/// (`wss://…/api/v1/ws/a2a?token=…`): tráfico SALIENTE por el 443 → atraviesa cualquier NAT, sin
+/// exponer el `:8765` ni instalar terceros. Funciona aunque el Mac esté fuera de la red local. El
+/// peer (CEO·Intelligence) empuja `{type:"to_peer", id, message}`; AION genera la respuesta y la
+/// devuelve `{type:"reply", id, ok, reply}` por el mismo socket. Keepalive con `ping`. Devuelve
+/// cuando la conexión se cierra (el llamador reconecta).
+async fn a2a_ws_connect_once(hub: &str, token: &str) -> Result<(), String> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let sep = if hub.contains('?') { '&' } else { '?' };
+    let url = format!("{hub}{sep}token={token}");
+    let (ws, _resp) = tokio_tungstenite::connect_async(&url)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (mut write, mut read) = ws.split();
+
+    // Canal ÚNICO de escritura: las respuestas (generadas en tasks aparte, porque el LLM tarda) y
+    // los pings se serializan aquí, sin compartir el sink entre tasks.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(32);
+    let writer = tokio::spawn(async move {
+        while let Some(m) = rx.recv().await {
+            if write.send(m).await.is_err() {
+                break;
+            }
+        }
+    });
+    // Ping cada 30 s (el hub cierra a los ~75 s de inactividad).
+    let tx_ping = tx.clone();
+    let pinger = tokio::spawn(async move {
+        let mut iv = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            iv.tick().await;
+            if tx_ping
+                .send(a2a_ws_text(serde_json::json!({ "type": "ping" })))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    tracing::info!(%hub, "A2A WS: conectado al hub del peer");
+    while let Some(msg) = futures_util::StreamExt::next(&mut read).await {
+        let msg = msg.map_err(|e| e.to_string())?;
+        let text = match msg {
+            Message::Text(t) => t.as_str().to_string(),
+            Message::Ping(p) => {
+                let _ = tx.send(Message::Pong(p)).await;
                 continue;
             }
-            let Ok(reply) = a2a_generate_reply(&msg.from_id, &msg.from_name, &msg.message).await
-            else {
+            Message::Close(_) => break,
+            _ => continue,
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) == Some("to_peer") {
+            let id = v
+                .get("id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let message = v
+                .get("message")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let from_name = v
+                .get("from_name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let from_id = v
+                .get("from_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            if message.trim().is_empty() {
                 continue;
-            };
-            let _ = client
-                .post(format!("{base}/api/a2a/reply"))
-                .bearer_auth(&cfg.token)
-                .json(&serde_json::json!({
-                    "id": msg.id, "reply": reply, "from_id": me.id, "from_name": me.name,
-                }))
-                .timeout(std::time::Duration::from_secs(20))
-                .send()
-                .await;
+            }
+            // El LLM tarda: genera y responde en una task para NO bloquear la recepción ni el ping.
+            let txc = tx.clone();
+            tokio::spawn(async move {
+                let reply = a2a_generate_reply(&from_id, &from_name, &message)
+                    .await
+                    .unwrap_or_else(|e| format!("(no pude responder ahora: {e})"));
+                let _ = txc
+                    .send(a2a_ws_text(serde_json::json!({
+                        "type": "reply", "id": id, "ok": true, "reply": reply,
+                    })))
+                    .await;
+            });
         }
     }
+    pinger.abort();
+    writer.abort();
+    Ok(())
 }
 
-/// Lanza el bucle de fondo del modelo PULL: mientras A2A esté activo (con secreto y peers), sondea
-/// cada pocos segundos. Es lo que mantiene a AION «conectado» a un peer aunque el Mac se mueva de
-/// red — sin túneles, VPN ni puertos abiertos. Fail-soft: si A2A está apagado, solo duerme.
-pub fn spawn_a2a_pull_loop() {
+/// Lanza el cliente WebSocket A2A en segundo plano: mientras A2A esté activo con `hub` + `token`,
+/// mantiene el canal abierto y lo RECONECTA si se cae. Es lo que mantiene a AION «conectado» al peer
+/// aunque el Mac cambie de red — sin túneles, VPN ni puertos abiertos. Fail-soft: si A2A está
+/// apagado o no hay hub, solo espera.
+pub fn spawn_a2a_ws_client() {
     tokio::spawn(async {
         loop {
             let cfg = crate::a2a::load();
-            if cfg.enabled && !cfg.token.is_empty() && !cfg.peers.is_empty() {
-                a2a_poll_once(&cfg).await;
+            if cfg.enabled && !cfg.hub.is_empty() && !cfg.token.is_empty() {
+                if let Err(e) = a2a_ws_connect_once(&cfg.hub, &cfg.token).await {
+                    tracing::info!(err = %e, "A2A WS: conexión terminó; reintento en 5s");
+                }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     });
 }

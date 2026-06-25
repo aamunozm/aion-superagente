@@ -43,6 +43,9 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tokio-stream = "0.1"
 futures-util = "0.3"
+# Cliente WebSocket del A2A (canal saliente persistente con CEO·Intelligence). rustls para casar
+# con reqwest (sin OpenSSL); webpki-roots = CA bundle embebido (conecta a un wss público).
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 mdns-sd = "0.20.0"
 nusb = "0.2.3"
 
