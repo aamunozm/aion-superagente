@@ -1351,61 +1351,103 @@ async fn models_pull(
     tokio::spawn(async move {
         let base =
             std::env::var("AION_OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".into());
-        let resp = reqwest::Client::new()
-            .post(format!("{base}/api/pull"))
-            .json(&serde_json::json!({ "model": model, "stream": true }))
-            .send()
-            .await;
-        let resp = match resp {
-            Ok(r) => r,
-            Err(e) => {
+        let client = reqwest::Client::new();
+        // REINTENTOS: una descarga grande puede cortarse por red. `ollama pull` REANUDA lo ya
+        // bajado, así que reintentamos hasta 3 veces (con espera) antes de rendirnos. Solo
+        // emitimos "done" cuando Ollama confirma "success"; si no, "error" claro (sin falsos OK).
+        const MAX_ATTEMPTS: u32 = 3;
+        let mut last_err = String::new();
+        let mut ok = false;
+        for attempt in 1..=MAX_ATTEMPTS {
+            if attempt > 1 {
                 let _ = tx
-                    .send(Event::default().data(
-                        serde_json::json!({ "kind": "error", "text": e.to_string() }).to_string(),
-                    ))
+                    .send(
+                        Event::default().data(
+                            serde_json::json!({ "kind": "progress",
+                            "status": format!("reintentando descarga ({attempt}/{MAX_ATTEMPTS})…"),
+                            "percent": 0 })
+                            .to_string(),
+                        ),
+                    )
                     .await;
-                return;
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
-        };
-        let mut stream = resp.bytes_stream();
-        // Búfer de BYTES: decodificar cada chunk por separado partiría un carácter multibyte
-        // que cayera en el borde del chunk. Partimos por el byte '\n' (nunca dentro de un
-        // multibyte) y decodificamos solo líneas COMPLETAS (siempre UTF-8 válido).
-        let mut buf: Vec<u8> = Vec::new();
-        while let Some(item) = stream.next().await {
-            let Ok(bytes) = item else { break };
-            buf.extend_from_slice(&bytes);
-            while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
-                let line = String::from_utf8_lossy(&buf[..nl]).trim().to_string();
-                buf.drain(..=nl);
-                if line.is_empty() {
+            let resp = client
+                .post(format!("{base}/api/pull"))
+                .json(&serde_json::json!({ "model": model, "stream": true }))
+                .send()
+                .await;
+            let resp = match resp {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = e.to_string();
                     continue;
                 }
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                    let status = v["status"].as_str().unwrap_or("");
-                    let completed = v["completed"].as_f64().unwrap_or(0.0);
-                    let total = v["total"].as_f64().unwrap_or(0.0);
-                    let percent = if total > 0.0 {
-                        (completed / total * 100.0).round()
-                    } else {
-                        0.0
-                    };
-                    let _ = tx
-                        .send(
-                            Event::default().data(
-                                serde_json::json!({
-                                    "kind": "progress", "status": status, "percent": percent
-                                })
-                                .to_string(),
-                            ),
-                        )
-                        .await;
+            };
+            if !resp.status().is_success() {
+                last_err = format!("Ollama devolvió {}", resp.status());
+                // Modelo inexistente/mal nombre → no tiene sentido reintentar.
+                if matches!(resp.status().as_u16(), 400 | 404) {
+                    break;
+                }
+                continue;
+            }
+            let mut stream = resp.bytes_stream();
+            // Búfer de BYTES: partir por '\n' (nunca dentro de un multibyte) y decodificar solo
+            // líneas COMPLETAS (siempre UTF-8 válido).
+            let mut buf: Vec<u8> = Vec::new();
+            while let Some(item) = stream.next().await {
+                let bytes = match item {
+                    Ok(b) => b,
+                    Err(e) => {
+                        last_err = e.to_string();
+                        break; // stream cortado → fuera del while, se reintenta
+                    }
+                };
+                buf.extend_from_slice(&bytes);
+                while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+                    let line = String::from_utf8_lossy(&buf[..nl]).trim().to_string();
+                    buf.drain(..=nl);
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                        let status = v["status"].as_str().unwrap_or("");
+                        if let Some(err) = v["error"].as_str() {
+                            last_err = err.to_string();
+                        }
+                        if status == "success" {
+                            ok = true;
+                        }
+                        let completed = v["completed"].as_f64().unwrap_or(0.0);
+                        let total = v["total"].as_f64().unwrap_or(0.0);
+                        let percent = if total > 0.0 {
+                            (completed / total * 100.0).round()
+                        } else if ok {
+                            100.0
+                        } else {
+                            0.0
+                        };
+                        let _ = tx
+                            .send(Event::default().data(
+                                serde_json::json!({ "kind": "progress", "status": status, "percent": percent })
+                                    .to_string(),
+                            ))
+                            .await;
+                    }
                 }
             }
+            if ok {
+                break;
+            }
         }
-        let _ = tx
-            .send(Event::default().data(serde_json::json!({ "kind": "done" }).to_string()))
-            .await;
+        let evt = if ok {
+            serde_json::json!({ "kind": "done" })
+        } else {
+            serde_json::json!({ "kind": "error",
+                "text": format!("no se pudo descargar el modelo tras {MAX_ATTEMPTS} intentos: {last_err}") })
+        };
+        let _ = tx.send(Event::default().data(evt.to_string())).await;
     });
     Sse::new(ReceiverStream::new(rx).map(Ok))
 }
