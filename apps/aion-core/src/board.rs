@@ -794,9 +794,10 @@ pub fn seed_playbook(pid: &str, name: &str, actor: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    // Lock COMPARTIDO con los tests de `projects`: ambos aíslan con la misma env var global
+    // `AION_PROJECTS_DIR`, así que deben serializarse entre sí (un lock por módulo no basta).
+    use crate::projects::TEST_ENV_LOCK as LOCK;
 
-    static LOCK: Mutex<()> = Mutex::new(());
     fn isolate() -> (String, String) {
         let dir = std::env::temp_dir().join(format!("aion-board-{}", uuid::Uuid::new_v4()));
         std::env::set_var("AION_PROJECTS_DIR", &dir);

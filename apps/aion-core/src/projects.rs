@@ -13,6 +13,13 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Lock COMPARTIDO para los tests que mutan la env GLOBAL `AION_PROJECTS_DIR` (este módulo y
+/// [`crate::board`]): cada módulo con su propio lock NO se serializa contra el otro, así que en
+/// paralelo competían por la variable y se contaminaban. Con un único lock de crate, los tests de
+/// proyectos y tablero se ejecutan en exclusión mutua.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: String,
@@ -456,11 +463,9 @@ pub fn grounding(pid: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // El store se aísla con una env var GLOBAL; serializamos los tests para que no
-    // compitan por ella (los tests de Rust corren en paralelo por defecto).
-    static LOCK: Mutex<()> = Mutex::new(());
+    // Serializa con el lock COMPARTIDO de crate (`TEST_ENV_LOCK`) para no competir con los tests de
+    // `board`, que aíslan con la misma env var global.
+    use super::TEST_ENV_LOCK as LOCK;
 
     /// Aísla el store en un directorio temporal único para no tocar datos reales.
     fn isolate() -> String {
