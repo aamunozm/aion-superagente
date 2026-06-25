@@ -8,6 +8,7 @@ import { NAV_GROUPS } from "@/lib/nav";
 import { useT } from "@/lib/i18n";
 import { inboxList } from "@/lib/api";
 import { chime } from "@/lib/chime";
+import { APP_VERSION } from "@/lib/version";
 
 /**
  * TEMPLATE: AppShell — shell interno con SIDEBAR (estilo CEO·Intelligence):
@@ -87,7 +88,9 @@ export default function AppShell({
           </span>
           {!collapsed && (
             <div className="leading-tight">
-              <div className="font-display font-bold text-sm">AION</div>
+              <div className="font-display font-bold text-sm">
+                AION <span className="font-normal" style={{ color: "var(--text-3)", fontSize: "10px" }}>v{APP_VERSION}</span>
+              </div>
               <div className="text-[10px]" style={{ color: "var(--text-3)" }}>
                 {t("brand.tagline")}
               </div>

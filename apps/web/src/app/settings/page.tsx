@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
+import { APP_VERSION } from "@/lib/version";
 import Icon from "@/components/Icon";
 import { LANGS, useT } from "@/lib/i18n";
 import { playTtsBlob } from "@/lib/voice";
@@ -1409,6 +1410,9 @@ export default function SettingsPage() {
           )}
         </div>
       </div>
+      <p className="text-center text-[11px] py-5" style={{ color: "var(--text-3)" }}>
+        AION <strong style={{ color: "var(--text-2)" }}>v{APP_VERSION}</strong> · super-agente local · 100% on-device
+      </p>
     </AppShell>
   );
 }
