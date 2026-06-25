@@ -190,6 +190,55 @@
     padding-top: 5px;
   }
 
+  /* ── Cierre profesional del preventivo (próximos pasos · validez · firmas · GDPR) ── */
+  .content .doc-closing { margin-top: 1.6em; break-inside: avoid; }
+  .content .callout-next {
+    background: var(--ink);
+    color: #fff;
+    border-radius: 12px;
+    padding: 14px 18px;
+    margin: 0 0 1.1em;
+    break-inside: avoid;
+  }
+  .content .callout-next .callout-title {
+    display: block;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 4px;
+    letter-spacing: 0.01em;
+  }
+  .content .callout-next ol { margin: 0; padding-left: 1.2em; }
+  .content .callout-next li { margin: 0.1em 0; color: #fff; }
+  .content .validity { font-size: 9.5pt; color: var(--muted); margin: 0 0 1.1em; }
+  .content .sign-grid {
+    display: flex;
+    gap: 28px;
+    margin: 0.4em 0 1.2em;
+    break-inside: avoid;
+  }
+  .content .sign-box { flex: 1; display: flex; flex-direction: column; }
+  .content .sign-box .sign-role {
+    font-size: 9.5pt; font-weight: 700; color: var(--ink); margin-bottom: 2px;
+  }
+  .content .sign-box .sign-name { font-size: 10pt; min-height: 14px; color: var(--text); }
+  .content .sign-box .sign-line {
+    margin-top: 22px;
+    border-top: 1px solid var(--ink);
+    padding-top: 3px;
+    font-size: 8pt;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .content .privacy-note {
+    font-size: 7.8pt;
+    line-height: 1.45;
+    color: #8a9099;
+    border-top: 1px solid var(--hair);
+    padding-top: 7px;
+    margin: 0.6em 0 0;
+  }
+
   {% block extra_style %}{% endblock %}
 </style>
 </head>

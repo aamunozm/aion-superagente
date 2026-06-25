@@ -2740,14 +2740,24 @@ async fn agent(
             )
             .await
             {
-                Ok((path, cliente)) => {
+                Ok((path, cliente, missing)) => {
                     crate::awareness::record_outcome(true);
                     let who = if cliente.trim().is_empty() {
                         "el cliente".to_string()
                     } else {
                         cliente
                     };
-                    format!("Propuesta analítica para {who} lista — la guardé en tu Escritorio:\n{path}")
+                    let mut a = format!(
+                        "Propuesta analítica para {who} lista — la guardé en tu Escritorio:\n{path}\n\nIncluye firmas de ambas partes, fecha, validez y cláusula de privacidad (GDPR)."
+                    );
+                    if !missing.is_empty() {
+                        a.push_str("\n\nPara que el preventivo quede redondo, indícame también:");
+                        for m in &missing {
+                            a.push_str(&format!("\n• {m}"));
+                        }
+                        a.push_str("\n\nCon eso lo regenero al instante.");
+                    }
+                    a
                 }
                 Err(e) => format!("Empecé la propuesta analítica pero no pude terminarla: {e}"),
             };

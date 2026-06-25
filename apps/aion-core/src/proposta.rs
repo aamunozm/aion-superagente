@@ -85,14 +85,92 @@ fn legal_footer(az: &serde_json::Value) -> String {
     parts.join("  |  ")
 }
 
+fn esc_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// **Cierre profesional DETERMINISTA** de un preventivo/propuesta — lo que SIEMPRE debe llevar un
+/// documento serio y que no podemos dejar al azar del LLM: próximos pasos destacados, validez,
+/// **firma de AMBAS partes con fecha** e **informativa de privacidad (GDPR)**. Se inyecta como HTML
+/// (pulldown-cmark lo deja pasar) al final del cuerpo. La marca/empresa es la que emite.
+fn professional_closing(azienda_nome: &str, cliente_nome: &str) -> String {
+    let az = if azienda_nome.trim().is_empty() {
+        "la nostra azienda".to_string()
+    } else {
+        esc_html(azienda_nome.trim())
+    };
+    let cl_name = if cliente_nome.trim().is_empty() {
+        "&nbsp;".to_string()
+    } else {
+        esc_html(cliente_nome.trim())
+    };
+    format!(
+        r#"
+
+<div class="doc-closing">
+  <div class="callout-next">
+    <span class="callout-title">Prossimi passi</span>
+    <ol>
+      <li>Conferma di questa proposta firmandola in calce.</li>
+      <li>Avvio dei lavori entro 5 giorni lavorativi dalla firma.</li>
+      <li>Aggiornamenti regolari fino alla consegna concordata.</li>
+    </ol>
+  </div>
+
+  <p class="validity"><strong>Validità.</strong> La presente proposta è valida 30 giorni dalla data di emissione indicata in alto. I prezzi si intendono IVA esclusa salvo diversa indicazione.</p>
+
+  <div class="sign-grid">
+    <div class="sign-box">
+      <span class="sign-role">Il Cliente — per accettazione</span>
+      <span class="sign-name">{cl_name}</span>
+      <span class="sign-line">Firma</span>
+      <span class="sign-line">Data</span>
+    </div>
+    <div class="sign-box">
+      <span class="sign-role">Per {az}</span>
+      <span class="sign-name">&nbsp;</span>
+      <span class="sign-line">Firma</span>
+      <span class="sign-line">Data</span>
+    </div>
+  </div>
+
+  <p class="privacy-note"><strong>Informativa sul trattamento dei dati personali (Reg. UE 2016/679 — GDPR).</strong> I dati personali forniti saranno trattati da {az}, in qualità di Titolare del trattamento, esclusivamente per la gestione del presente rapporto e per gli adempimenti di legge. I dati non saranno diffusi a terzi non autorizzati e potranno essere consultati, rettificati o cancellati in qualsiasi momento su richiesta dell'interessato (artt. 15-22 GDPR), scrivendo ai recapiti riportati in calce.</p>
+</div>
+"#
+    )
+}
+
+/// Detecta los elementos que FALTAN para un preventivo de primera (intuición de consultor): si algo
+/// crítico no está, lo devolvemos como avisos para PEDÍRSELO al usuario (no inventamos). Vacío = OK.
+fn missing_required(azienda_present: bool, cliente_nome: &str, n_servizi: usize) -> Vec<String> {
+    let mut m = Vec::new();
+    if cliente_nome.trim().is_empty() {
+        m.push("el **nombre del cliente** (a quién va dirigida la oferta)".to_string());
+    }
+    if !azienda_present {
+        m.push(
+            "los **datos de tu empresa** (razón social, P.IVA, dirección): usé la marca **AION** con pie de «agente de IA» por defecto".to_string(),
+        );
+    }
+    if n_servizi == 0 {
+        m.push(
+            "los **servicios y precios** a incluir (no los invento; márcalos en una fuente o dímelos)".to_string(),
+        );
+    }
+    m
+}
+
 /// Orquesta la propuesta: SEO real + extracción de empresa/cliente + redacción + marca + PDF.
-/// Devuelve `(ruta, nombre_cliente)` o un error legible. Pensada para el fast-path del agente.
+/// Devuelve `(ruta, nombre_cliente, faltantes)` o un error legible: `faltantes` son los elementos
+/// que convendría aportar para un preventivo de primera (el agente los PIDE, no los inventa).
 pub async fn compose(
     engine: &dyn LlmEngine,
     project_id: Option<&str>,
     task: &str,
     context: &str,
-) -> Result<(String, String), String> {
+) -> Result<(String, String, Vec<String>), String> {
     // ── 1. Material del proyecto: instrucciones (notas) + contenido de las fuentes ──
     let mut material = String::new();
     let mut web_url: Option<String> = None;
@@ -269,6 +347,10 @@ pub async fn compose(
     }
     body_full.push_str(&body_md);
 
+    // ── 6b. CIERRE PROFESIONAL DETERMINISTA: próximos pasos + validez + FIRMAS de ambas partes
+    //        con fecha + INFORMATIVA GDPR. No lo dejamos al LLM: un preventivo serio SIEMPRE lo lleva.
+    body_full.push_str(&professional_closing(&brand.company, &cliente_nome));
+
     brand.ink = st.ink.clone();
     brand.accent = st.accent.clone();
 
@@ -310,7 +392,16 @@ pub async fn compose(
     let path = std::path::Path::new(&home).join("Desktop").join(fname);
     std::fs::write(&path, &bytes).map_err(|e| format!("no pude escribir el PDF: {e}"))?;
     crate::agent_tools::open_file(&path, false);
-    Ok((path.display().to_string(), cliente_nome))
+
+    // Intuición de consultor: ¿qué FALTARÍA para que el preventivo sea redondo? (se pide, no se inventa)
+    let n_servizi = meta
+        .get("servizi")
+        .and_then(|s| s.as_array())
+        .map(|a| a.iter().filter(|x| !jstr(x, "titolo").is_empty()).count())
+        .unwrap_or(0);
+    let missing = missing_required(!jstr(&azienda, "nome").is_empty(), &cliente_nome, n_servizi);
+
+    Ok((path.display().to_string(), cliente_nome, missing))
 }
 
 #[cfg(test)]
@@ -329,5 +420,32 @@ mod tests {
     fn footer_solo_campos_presentes() {
         let az = serde_json::json!({"nome":"X SRL","piva":"123","email":"a@b.it"});
         assert_eq!(legal_footer(&az), "X SRL  |  P.IVA: 123  |  a@b.it");
+    }
+
+    #[test]
+    fn cierre_lleva_firmas_de_ambos_y_gdpr() {
+        let c = professional_closing("PRONTO CLICK SRLS", "Avv. Lisa Armenio");
+        // Firma de AMBAS partes.
+        assert!(c.contains("Il Cliente"));
+        assert!(c.contains("Avv. Lisa Armenio"));
+        assert!(c.contains("Per PRONTO CLICK SRLS"));
+        // Hueco de firma + fecha en cada parte (2 firmas, 2 fechas).
+        assert_eq!(c.matches("sign-line\">Firma").count(), 2);
+        assert_eq!(c.matches("sign-line\">Data").count(), 2);
+        // Cláusula de privacidad (GDPR) + validez.
+        assert!(c.contains("GDPR") && c.contains("2016/679"));
+        assert!(c.to_lowercase().contains("valida 30 giorni"));
+    }
+
+    #[test]
+    fn intuye_lo_que_falta() {
+        // Falta cliente + empresa + servicios → 3 avisos.
+        assert_eq!(missing_required(false, "", 0).len(), 3);
+        // Todo presente → sin avisos.
+        assert!(missing_required(true, "Lisa", 2).is_empty());
+        // Solo faltan precios/servicios.
+        let m = missing_required(true, "Lisa", 0);
+        assert_eq!(m.len(), 1);
+        assert!(m[0].contains("servicios"));
     }
 }
