@@ -650,7 +650,8 @@ pub fn stage_template(name: &str) -> Vec<Status> {
 #[derive(Debug, Clone, Serialize)]
 pub struct PlaybookStep {
     pub title: String,
-    /// Categoría destino (se resuelve a la columna de esa categoría más a la izquierda).
+    /// Columna destino por NOMBRE exacto (resuelve por nombre antes que por categoría, así cada
+    /// tarjeta cae en su etapa concreta aunque varias columnas compartan categoría).
     pub stage: &'static str,
     pub estimate_days: f64,
     pub checklist: Vec<&'static str>,
@@ -669,7 +670,7 @@ pub fn playbook(name: &str) -> Vec<PlaybookStep> {
         "web-seo" | "web" | "seo" => vec![
             step(
                 "Kickoff & brief con el cliente",
-                "backlog",
+                "Brief & objetivos",
                 1.0,
                 vec![
                     "Objetivos de negocio y KPIs",
@@ -680,7 +681,7 @@ pub fn playbook(name: &str) -> Vec<PlaybookStep> {
             ),
             step(
                 "Auditoría técnica + SEO inicial",
-                "todo",
+                "Auditoría & research",
                 3.0,
                 vec![
                     "Rastreo e indexación",
@@ -692,7 +693,7 @@ pub fn playbook(name: &str) -> Vec<PlaybookStep> {
             ),
             step(
                 "Propuesta / preventivo",
-                "todo",
+                "Propuesta / Preventivo",
                 2.0,
                 vec![
                     "Alcance y entregables",
@@ -704,7 +705,7 @@ pub fn playbook(name: &str) -> Vec<PlaybookStep> {
             ),
             step(
                 "Arquitectura & wireframes",
-                "doing",
+                "Diseño & contenidos",
                 3.0,
                 vec![
                     "Mapa del sitio",
@@ -714,13 +715,13 @@ pub fn playbook(name: &str) -> Vec<PlaybookStep> {
             ),
             step(
                 "Diseño UI + contenidos",
-                "doing",
+                "Diseño & contenidos",
                 5.0,
                 vec!["Diseño on-brand", "Textos y multimedia", "Accesibilidad AA"],
             ),
             step(
                 "Maquetación & SEO on-page",
-                "doing",
+                "Desarrollo & SEO on-page",
                 5.0,
                 vec![
                     "Titles y meta descripciones",
@@ -732,7 +733,7 @@ pub fn playbook(name: &str) -> Vec<PlaybookStep> {
             ),
             step(
                 "QA + revisión del cliente",
-                "review",
+                "Revisión cliente",
                 2.0,
                 vec![
                     "Pruebas cross-device",
@@ -742,7 +743,7 @@ pub fn playbook(name: &str) -> Vec<PlaybookStep> {
             ),
             step(
                 "Publicación + indexación",
-                "done",
+                "Publicación & entrega",
                 1.0,
                 vec![
                     "Despliegue",
@@ -900,6 +901,25 @@ mod tests {
         let cards = load(&pid).cards;
         assert!(cards.iter().all(|c| c.estimate_days.is_some()));
         assert!(cards.iter().all(|c| !c.checklist.is_empty()));
+        // Cada tarjeta cae en su COLUMNA NOMBRADA (no en la primera de la categoría): la de
+        // «Propuesta / preventivo» debe estar en la columna «Propuesta / Preventivo», no en «Auditoría».
+        let cols = list_statuses(&pid);
+        let col_name = |sid: &str| {
+            cols.iter()
+                .find(|s| s.id == sid)
+                .map(|s| s.name.clone())
+                .unwrap_or_default()
+        };
+        let prop = cards
+            .iter()
+            .find(|c| c.title.contains("Propuesta"))
+            .unwrap();
+        assert_eq!(col_name(&prop.status_id), "Propuesta / Preventivo");
+        let maq = cards
+            .iter()
+            .find(|c| c.title.contains("Maquetación"))
+            .unwrap();
+        assert_eq!(col_name(&maq.status_id), "Desarrollo & SEO on-page");
         // Re-sembrar no duplica.
         assert_eq!(seed_playbook(&pid, "web-seo", "aion"), 0);
 

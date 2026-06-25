@@ -100,7 +100,7 @@ export function BoardModal({
   const progress = snap?.progress ?? { done: 0, total: 0, pct: 0 };
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col" style={{ background: "var(--surface-0)" }}>
+    <div className="fixed inset-0 z-50 flex flex-col" style={{ background: "var(--bg)" }}>
       {/* Cabecera */}
       <header
         className="flex items-center gap-3 px-5 h-14 shrink-0"
@@ -114,7 +114,7 @@ export function BoardModal({
             Tablero · {projectName}
           </h2>
           <div className="flex items-center gap-2 mt-0.5">
-            <div className="h-1.5 w-40 rounded-full overflow-hidden" style={{ background: "var(--surface-3)" }}>
+            <div className="h-1.5 w-40 rounded-full overflow-hidden" style={{ background: "var(--surface-2)" }}>
               <div className="h-full rounded-full" style={{ width: `${progress.pct}%`, background: "var(--accent)" }} />
             </div>
             <span className="text-[11px]" style={{ color: "var(--text-3)" }}>
@@ -198,7 +198,7 @@ export function BoardModal({
                       <span
                         className="ml-auto text-[11px] px-1.5 py-0.5 rounded-md shrink-0"
                         style={{
-                          background: over ? "var(--danger-subtle, #fbe9e7)" : "var(--surface-3)",
+                          background: over ? "var(--danger-subtle, #fbe9e7)" : "var(--surface-2)",
                           color: over ? "#c0594e" : "var(--text-3)",
                           fontWeight: over ? 700 : 500,
                         }}
@@ -245,7 +245,7 @@ export function BoardModal({
                   <span
                     className="inline-block px-1.5 rounded text-[10px] font-semibold mr-1"
                     style={{
-                      background: a.actor === "aion" ? "var(--accent-subtle)" : "var(--surface-3)",
+                      background: a.actor === "aion" ? "var(--accent-subtle)" : "var(--surface-2)",
                       color: a.actor === "aion" ? "var(--gold-deep)" : "var(--text-2)",
                     }}
                   >
@@ -322,7 +322,7 @@ function CardChip({
       onDragEnd={onDragEnd}
       onClick={onOpen}
       className="rounded-xl p-2.5 cursor-pointer transition-shadow hover:shadow-sm"
-      style={{ background: "var(--surface-0)", border: "1px solid var(--border)" }}
+      style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
     >
       <p className="text-[13px] leading-snug" style={{ color: "var(--text-1)" }}>
         {card.title}
@@ -350,7 +350,7 @@ function CardChip({
           </span>
         )}
         {card.assignee && (
-          <span className="ml-auto text-[10px] px-1.5 rounded" style={{ background: "var(--surface-3)", color: "var(--text-2)" }}>
+          <span className="ml-auto text-[10px] px-1.5 rounded" style={{ background: "var(--surface-2)", color: "var(--text-2)" }}>
             {card.assignee}
           </span>
         )}
@@ -426,7 +426,7 @@ function CardSheet({
       >
         <div className="flex items-center gap-2">
           {col && (
-            <span className="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-md" style={{ background: "var(--surface-3)", color: "var(--text-2)" }}>
+            <span className="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-md" style={{ background: "var(--surface-2)", color: "var(--text-2)" }}>
               <span className="h-2 w-2 rounded-full" style={{ background: col.color }} />
               {col.name}
             </span>
