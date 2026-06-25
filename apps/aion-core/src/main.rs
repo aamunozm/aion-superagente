@@ -11,6 +11,7 @@ mod apikeys;
 mod arcface;
 mod awareness;
 mod biography;
+mod board;
 mod capabilities;
 mod claude_code;
 mod claude_mcp;

@@ -1872,6 +1872,153 @@ impl Tool for MakeNoteTool {
     }
 }
 
+// ── Tablero Kanban del proyecto (el agente como gestor de proyecto) ──────────
+
+/// Herramienta única para operar el **tablero Kanban del proyecto en foco**. El agente la usa
+/// para AVANZAR el trabajo: ver el estado, crear/mover tarjetas, comentar, marcar checklist y
+/// **enlazar los entregables que produce** (preventivo, auditoría, documento) a su tarjeta. Cada
+/// escritura queda en el log con actor `aion` (transparencia humano-vs-agente). Solo funciona
+/// dentro de un proyecto (lo lleva inyectado); fuera de uno, avisa.
+pub struct BoardTool {
+    project_id: Option<String>,
+}
+impl BoardTool {
+    pub fn new(project_id: Option<String>) -> Self {
+        Self { project_id }
+    }
+}
+
+#[async_trait]
+impl Tool for BoardTool {
+    fn name(&self) -> &str {
+        "board"
+    }
+    fn description(&self) -> &str {
+        "Gestiona el TABLERO Kanban del proyecto (etapas, tarjetas, avance). Entrada = JSON con \
+         «op». Empieza SIEMPRE por {\"op\":\"list\"} para ver columnas y obtener los id de las \
+         tarjetas. Operaciones: \
+         {\"op\":\"list\"} · \
+         {\"op\":\"create\",\"title\":\"...\",\"status\":\"todo\",\"desc\":\"...\"} (status puede ser \
+         backlog|todo|doing|review|done o el nombre de la columna) · \
+         {\"op\":\"move\",\"id\":\"<card>\",\"status\":\"done\"} · \
+         {\"op\":\"comment\",\"id\":\"<card>\",\"text\":\"...\"} · \
+         {\"op\":\"checklist\",\"id\":\"<card>\",\"items\":[{\"text\":\"...\",\"done\":true}]} · \
+         {\"op\":\"link\",\"id\":\"<card>\",\"kind\":\"preventivo|documento|seo|url\",\"reference\":\"PREV-2026-031\",\"title\":\"...\"} para atar un entregable a la tarjeta · \
+         {\"op\":\"seed\",\"template\":\"web-seo\",\"playbook\":true} para sembrar etapas + plan recomendado con tempística."
+    }
+    async fn run(&self, input: &str) -> Result<String, String> {
+        let pid = self
+            .project_id
+            .clone()
+            .filter(|p| !p.trim().is_empty())
+            .ok_or("el tablero solo existe dentro de un proyecto; abre un proyecto primero")?;
+        let v: serde_json::Value = serde_json::from_str(input.trim())
+            .map_err(|e| format!("entrada no es JSON válido ({e}). Ej: {{\"op\":\"list\"}}"))?;
+        let op = v.get("op").and_then(|x| x.as_str()).unwrap_or("list");
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        match op {
+            "list" => {
+                let cols = crate::board::list_statuses(&pid);
+                let wip = crate::board::wip_state(&pid);
+                let board = crate::board::load(&pid);
+                let name_of = |sid: &str| {
+                    cols.iter()
+                        .find(|c| c.id == sid)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_default()
+                };
+                let columns: Vec<_> = cols
+                    .iter()
+                    .map(|c| {
+                        let w = wip.iter().find(|w| w.status_id == c.id);
+                        serde_json::json!({
+                            "id": c.id, "name": c.name, "category": c.category,
+                            "wip": c.wip, "count": w.map(|w| w.count), "over": w.map(|w| w.over),
+                        })
+                    })
+                    .collect();
+                let cards: Vec<_> = board
+                    .cards
+                    .iter()
+                    .map(|c| {
+                        let done = c.checklist.iter().filter(|i| i.done).count();
+                        serde_json::json!({
+                            "id": c.id, "title": c.title, "status": name_of(&c.status_id),
+                            "priority": c.priority, "estimate_days": c.estimate_days,
+                            "checklist": format!("{}/{}", done, c.checklist.len()),
+                            "deliverables": c.deliverables.len(),
+                            "assignee": c.assignee,
+                        })
+                    })
+                    .collect();
+                let (d, t, pct) = crate::board::progress(&pid);
+                Ok(serde_json::json!({
+                    "columns": columns, "cards": cards,
+                    "progress": format!("{d}/{t} ({pct}%)"),
+                })
+                .to_string())
+            }
+            "create" => {
+                let title = s("title");
+                let status = if s("status").is_empty() {
+                    "todo".to_string()
+                } else {
+                    s("status")
+                };
+                let c = crate::board::card_create(&pid, "aion", &title, &status, &s("desc"))?;
+                Ok(format!("tarjeta creada (id {}): «{}»", c.id, c.title))
+            }
+            "move" => {
+                let c = crate::board::card_move(&pid, "aion", &s("id"), &s("status"), None)?;
+                Ok(format!("tarjeta «{}» movida", c.title))
+            }
+            "comment" => {
+                crate::board::card_comment(&pid, "aion", &s("id"), &s("text"))?;
+                Ok("comentario añadido".into())
+            }
+            "checklist" => {
+                let items: Vec<crate::board::ChecklistItem> = v
+                    .get("items")
+                    .and_then(|x| serde_json::from_value(x.clone()).ok())
+                    .unwrap_or_default();
+                let c = crate::board::card_set_checklist(&pid, "aion", &s("id"), items)?;
+                Ok(format!("checklist actualizada en «{}»", c.title))
+            }
+            "link" => {
+                let c = crate::board::card_link_deliverable(
+                    &pid,
+                    "aion",
+                    &s("id"),
+                    &s("kind"),
+                    &s("reference"),
+                    &s("title"),
+                )?;
+                Ok(format!("entregable enlazado a «{}»", c.title))
+            }
+            "seed" => {
+                let tmpl = if s("template").is_empty() {
+                    "generico".to_string()
+                } else {
+                    s("template")
+                };
+                let pb = v.get("playbook").and_then(|x| x.as_bool()).unwrap_or(false);
+                let n = if pb {
+                    crate::board::seed_playbook(&pid, &tmpl, "aion")
+                } else {
+                    crate::board::ensure_template(&pid, &tmpl);
+                    0
+                };
+                Ok(format!(
+                    "tablero sembrado (plantilla «{tmpl}», {n} tarjetas del plan)"
+                ))
+            }
+            other => Err(format!(
+                "op «{other}» desconocida. Usa list|create|move|comment|checklist|link|seed"
+            )),
+        }
+    }
+}
+
 // ── Navegador agéntico real (Chrome headless vía CDP) ───────────────────────
 
 /// Formatea una instantánea de accesibilidad para el LLM: texto visible + lista de

@@ -957,6 +957,20 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/project/chat/history", post(project_chat_history))
         .route("/api/project/chat/append", post(project_chat_append))
         .route("/api/project/chat/clear", post(project_chat_clear))
+        // Tablero Kanban por etapas del proyecto (columnas, tarjetas, WIP, log, tempística).
+        .route("/api/project/board/get", post(board_get))
+        .route("/api/project/board/seed", post(board_seed))
+        .route("/api/project/board/status/add", post(board_status_add))
+        .route("/api/project/board/card/create", post(board_card_create))
+        .route("/api/project/board/card/update", post(board_card_update))
+        .route("/api/project/board/card/move", post(board_card_move))
+        .route("/api/project/board/card/comment", post(board_card_comment))
+        .route(
+            "/api/project/board/card/checklist",
+            post(board_card_checklist),
+        )
+        .route("/api/project/board/card/link", post(board_card_link))
+        .route("/api/project/board/card/delete", post(board_card_delete))
         .route("/api/brand", get(brand_get).post(brand_set))
         // Estilos de documento (galería tipo Canva): listar/guardar/borrar/extraer + oferta.
         .route(
@@ -3066,6 +3080,11 @@ async fn agent(
         tools.register(Arc::new(crate::agent_tools::GenerateDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::GenerateOffertaTool::new()));
         tools.register(Arc::new(crate::agent_tools::SeoAuditTool::new()));
+        // 📋 Tablero Kanban del proyecto: el agente lo opera (crear/mover/comentar/enlazar
+        // entregables) para AVANZAR el trabajo. Inyecta el proyecto en foco (None fuera de uno).
+        tools.register(Arc::new(crate::agent_tools::BoardTool::new(
+            body.project_id.clone(),
+        )));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
         // 📘 SkillBook (Hermes): memoria PROCEDIMENTAL — cómo hacer cosas que ya funcionaron.
@@ -3549,6 +3568,11 @@ async fn crew(
         tools.register(Arc::new(crate::agent_tools::GenerateDocumentTool::new()));
         tools.register(Arc::new(crate::agent_tools::GenerateOffertaTool::new()));
         tools.register(Arc::new(crate::agent_tools::SeoAuditTool::new()));
+        // 📋 Tablero Kanban del proyecto: el agente lo opera (crear/mover/comentar/enlazar
+        // entregables) para AVANZAR el trabajo. Inyecta el proyecto en foco (None fuera de uno).
+        tools.register(Arc::new(crate::agent_tools::BoardTool::new(
+            body.project_id.clone(),
+        )));
         tools.register(Arc::new(crate::agent_tools::MakeNoteTool::new()));
         tools.register(Arc::new(crate::agent_tools::RunCommandTool::new()));
         // 💬 COMUNICACIONES en modo autónomo: SOLO lectura (agenda y contactos) para que el
@@ -6963,6 +6987,206 @@ async fn project_chat_append(Json(b): Json<ProjChatAppend>) -> Json<serde_json::
 async fn project_chat_clear(Json(b): Json<ProjChatRef>) -> Json<serde_json::Value> {
     crate::projects::clear_chat(&b.project_id);
     Json(serde_json::json!({ "ok": true }))
+}
+
+// ── Tablero Kanban del proyecto ───────────────────────────────────────────────
+// El actor por defecto de las acciones de la UI es "ariel" (humano); el agente usa "aion".
+
+/// Snapshot completo del tablero para la UI: columnas (ordenadas), tarjetas, estado WIP por
+/// columna, progreso global y últimos eventos del log. Una sola llamada lo pinta todo.
+fn board_snapshot(pid: &str) -> serde_json::Value {
+    let board = crate::board::ensure(pid);
+    let (done, total, pct) = crate::board::progress(pid);
+    serde_json::json!({
+        "statuses": crate::board::list_statuses(pid),
+        "cards": board.cards,
+        "wip": crate::board::wip_state(pid),
+        "progress": { "done": done, "total": total, "pct": pct },
+        "activity": crate::board::activity(pid, 40),
+    })
+}
+
+#[derive(Deserialize)]
+struct BoardRef {
+    project_id: String,
+}
+async fn board_get(Json(b): Json<BoardRef>) -> Json<serde_json::Value> {
+    let mut snap = board_snapshot(&b.project_id);
+    snap["ok"] = serde_json::json!(true);
+    Json(snap)
+}
+
+#[derive(Deserialize)]
+struct BoardSeed {
+    project_id: String,
+    /// "generico" | "web-seo" | "contenido".
+    #[serde(default)]
+    template: String,
+    /// Si `true`, además de las columnas siembra las tarjetas del playbook (tempística + checklist).
+    #[serde(default)]
+    playbook: bool,
+}
+/// Siembra el tablero con una plantilla de etapas y, opcionalmente, el plan recomendado.
+async fn board_seed(Json(b): Json<BoardSeed>) -> Json<serde_json::Value> {
+    let tmpl = if b.template.trim().is_empty() {
+        "generico"
+    } else {
+        b.template.trim()
+    };
+    let seeded = if b.playbook {
+        crate::board::seed_playbook(&b.project_id, tmpl, "ariel")
+    } else {
+        crate::board::ensure_template(&b.project_id, tmpl);
+        0
+    };
+    let mut snap = board_snapshot(&b.project_id);
+    snap["ok"] = serde_json::json!(true);
+    snap["seeded_cards"] = serde_json::json!(seeded);
+    Json(snap)
+}
+
+#[derive(Deserialize)]
+struct StatusAdd {
+    project_id: String,
+    name: String,
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    wip: Option<u32>,
+}
+async fn board_status_add(Json(b): Json<StatusAdd>) -> Json<serde_json::Value> {
+    let st = crate::board::add_status(&b.project_id, &b.name, &b.category, b.wip);
+    Json(serde_json::json!({ "ok": true, "status": st }))
+}
+
+#[derive(Deserialize)]
+struct CardCreate {
+    project_id: String,
+    title: String,
+    /// id de columna, nombre o categoría (si no resuelve, cae en la primera columna).
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    desc: String,
+    #[serde(default = "actor_human")]
+    actor: String,
+}
+fn actor_human() -> String {
+    "ariel".into()
+}
+async fn board_card_create(Json(b): Json<CardCreate>) -> Json<serde_json::Value> {
+    match crate::board::card_create(&b.project_id, &b.actor, &b.title, &b.status, &b.desc) {
+        Ok(c) => Json(serde_json::json!({ "ok": true, "card": c })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CardUpdate {
+    project_id: String,
+    id: String,
+    #[serde(default = "actor_human")]
+    actor: String,
+    #[serde(flatten)]
+    patch: crate::board::CardPatch,
+}
+async fn board_card_update(Json(b): Json<CardUpdate>) -> Json<serde_json::Value> {
+    match crate::board::card_update(&b.project_id, &b.actor, &b.id, b.patch) {
+        Ok(c) => Json(serde_json::json!({ "ok": true, "card": c })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CardMove {
+    project_id: String,
+    id: String,
+    status: String,
+    #[serde(default)]
+    before: Option<String>,
+    #[serde(default = "actor_human")]
+    actor: String,
+}
+async fn board_card_move(Json(b): Json<CardMove>) -> Json<serde_json::Value> {
+    match crate::board::card_move(
+        &b.project_id,
+        &b.actor,
+        &b.id,
+        &b.status,
+        b.before.as_deref(),
+    ) {
+        Ok(c) => Json(serde_json::json!({ "ok": true, "card": c })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CardComment {
+    project_id: String,
+    id: String,
+    text: String,
+    #[serde(default = "actor_human")]
+    actor: String,
+}
+async fn board_card_comment(Json(b): Json<CardComment>) -> Json<serde_json::Value> {
+    match crate::board::card_comment(&b.project_id, &b.actor, &b.id, &b.text) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CardChecklist {
+    project_id: String,
+    id: String,
+    items: Vec<crate::board::ChecklistItem>,
+    #[serde(default = "actor_human")]
+    actor: String,
+}
+async fn board_card_checklist(Json(b): Json<CardChecklist>) -> Json<serde_json::Value> {
+    match crate::board::card_set_checklist(&b.project_id, &b.actor, &b.id, b.items) {
+        Ok(c) => Json(serde_json::json!({ "ok": true, "card": c })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CardLink {
+    project_id: String,
+    id: String,
+    kind: String,
+    reference: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default = "actor_human")]
+    actor: String,
+}
+async fn board_card_link(Json(b): Json<CardLink>) -> Json<serde_json::Value> {
+    match crate::board::card_link_deliverable(
+        &b.project_id,
+        &b.actor,
+        &b.id,
+        &b.kind,
+        &b.reference,
+        &b.title,
+    ) {
+        Ok(c) => Json(serde_json::json!({ "ok": true, "card": c })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CardDelete {
+    project_id: String,
+    id: String,
+    #[serde(default = "actor_human")]
+    actor: String,
+}
+async fn board_card_delete(Json(b): Json<CardDelete>) -> Json<serde_json::Value> {
+    match crate::board::card_delete(&b.project_id, &b.actor, &b.id) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
 }
 
 /// Perfil de marca actual (logo/colores/idioma/numeración) usado por los documentos.
