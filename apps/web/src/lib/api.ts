@@ -601,6 +601,100 @@ export const projectStudioGenerate = (project_id: string, kind: string) =>
 export const projectStudioRemove = (project_id: string, id: string) =>
   jpost<{ ok: boolean }>("/api/project/studio/remove", { project_id, id });
 
+// ── Tablero Kanban del proyecto ──────────────────────────────────────────────
+export type BoardCategory = "backlog" | "todo" | "doing" | "review" | "done" | "canceled";
+export type BoardStatus = {
+  id: string;
+  name: string;
+  category: BoardCategory;
+  pos: number;
+  wip?: number | null;
+  color: string;
+};
+export type BoardChecklistItem = { text: string; done: boolean };
+export type BoardDeliverable = { kind: string; reference: string; title: string };
+export type BoardCard = {
+  id: string;
+  title: string;
+  status_id: string;
+  pos: number;
+  desc: string;
+  priority: number;
+  estimate_days?: number | null;
+  due?: string | null;
+  assignee: string;
+  labels: string[];
+  checklist: BoardChecklistItem[];
+  deliverables: BoardDeliverable[];
+  blocked_by: string[];
+  created: string;
+  updated: string;
+};
+export type BoardWip = { status_id: string; name: string; count: number; wip?: number | null; over: boolean };
+export type BoardActivity = { id: string; at: string; actor: string; action: string; card: string; detail: string };
+export type BoardSnapshot = {
+  ok: boolean;
+  statuses: BoardStatus[];
+  cards: BoardCard[];
+  wip: BoardWip[];
+  progress: { done: number; total: number; pct: number };
+  activity: BoardActivity[];
+  seeded_cards?: number;
+};
+
+export const boardGet = (project_id: string) =>
+  jpost<BoardSnapshot>("/api/project/board/get", { project_id });
+export const boardSeed = (project_id: string, template: string, playbook: boolean) =>
+  jpost<BoardSnapshot>("/api/project/board/seed", { project_id, template, playbook });
+export const boardStatusAdd = (project_id: string, name: string, category: string, wip?: number) =>
+  jpost<{ ok: boolean; status?: BoardStatus; error?: string }>("/api/project/board/status/add", {
+    project_id,
+    name,
+    category,
+    wip,
+  });
+export const boardCardCreate = (project_id: string, title: string, status: string, desc = "") =>
+  jpost<{ ok: boolean; card?: BoardCard; error?: string }>("/api/project/board/card/create", {
+    project_id,
+    title,
+    status,
+    desc,
+  });
+export const boardCardUpdate = (
+  project_id: string,
+  id: string,
+  patch: Partial<{
+    title: string;
+    desc: string;
+    priority: number;
+    estimate_days: number;
+    due: string;
+    assignee: string;
+    labels: string[];
+  }>,
+) => jpost<{ ok: boolean; card?: BoardCard; error?: string }>("/api/project/board/card/update", { project_id, id, ...patch });
+export const boardCardMove = (project_id: string, id: string, status: string, before?: string) =>
+  jpost<{ ok: boolean; card?: BoardCard; error?: string }>("/api/project/board/card/move", {
+    project_id,
+    id,
+    status,
+    before,
+  });
+export const boardCardComment = (project_id: string, id: string, text: string) =>
+  jpost<{ ok: boolean; error?: string }>("/api/project/board/card/comment", { project_id, id, text });
+export const boardCardChecklist = (project_id: string, id: string, items: BoardChecklistItem[]) =>
+  jpost<{ ok: boolean; card?: BoardCard; error?: string }>("/api/project/board/card/checklist", { project_id, id, items });
+export const boardCardLink = (project_id: string, id: string, kind: string, reference: string, title: string) =>
+  jpost<{ ok: boolean; card?: BoardCard; error?: string }>("/api/project/board/card/link", {
+    project_id,
+    id,
+    kind,
+    reference,
+    title,
+  });
+export const boardCardDelete = (project_id: string, id: string) =>
+  jpost<{ ok: boolean; error?: string }>("/api/project/board/card/delete", { project_id, id });
+
 export type DocFormat = "pdf" | "docx" | "html";
 
 /** Dispara la descarga de un `Response` binario, tomando el nombre de Content-Disposition. */

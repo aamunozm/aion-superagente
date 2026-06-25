@@ -6,6 +6,7 @@ import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
 import Markdown from "@/components/Markdown";
 import { DocStudioModal } from "@/components/documents/DocStudio";
+import { BoardModal } from "@/components/board/Board";
 import {
   projectGet,
   projectSourceAdd,
@@ -58,6 +59,8 @@ export default function ProjectWorkspace() {
   const [notFound, setNotFound] = useState(false);
   // Estudio de documentos y estilos (galería tipo Canva), dentro del proyecto.
   const [docOpen, setDocOpen] = useState(false);
+  // Tablero Kanban por etapas del proyecto.
+  const [boardOpen, setBoardOpen] = useState(false);
   // Edición del COMENTARIO de una fuente (instrucción para el agente).
   const [noteEditId, setNoteEditId] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
@@ -700,6 +703,16 @@ export default function ProjectWorkspace() {
           >
             <button
               type="button"
+              onClick={() => setBoardOpen(true)}
+              className="shrink-0 rounded-full p-2 transition-colors"
+              style={{ color: "var(--text-3)", background: "var(--surface-2)" }}
+              title="Tablero por etapas (Kanban) para avanzar el proyecto"
+              aria-label="Abrir tablero del proyecto"
+            >
+              <Icon name="target" size={18} />
+            </button>
+            <button
+              type="button"
               onClick={() => setDocOpen(true)}
               className="shrink-0 rounded-full p-2 transition-colors"
               style={{ color: "var(--text-3)", background: "var(--surface-2)" }}
@@ -837,6 +850,12 @@ export default function ProjectWorkspace() {
       )}
 
       <DocStudioModal open={docOpen} onClose={() => setDocOpen(false)} />
+      <BoardModal
+        projectId={id}
+        projectName={project?.name ?? "Proyecto"}
+        open={boardOpen}
+        onClose={() => setBoardOpen(false)}
+      />
     </AppShell>
   );
 }
