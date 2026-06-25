@@ -1317,6 +1317,11 @@ export const identityNameSet = (name: string) =>
     body: JSON.stringify({ name }),
   });
 
+/// REINICIO DE FÁBRICA: borra todos los datos de AION (identidad, config, proyectos, memoria,
+/// modelos) y cierra el núcleo. El llamador debe limpiar localStorage y pedir reabrir la app.
+export const factoryReset = () =>
+  jsonCall<{ ok: boolean }>("/api/factory-reset", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+
 export const inboxList = () =>
   jsonCall<{ unread: InboxMessage[]; unread_count: number; all: InboxMessage[] }>("/api/inbox");
 

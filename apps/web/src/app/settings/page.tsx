@@ -27,6 +27,7 @@ import {
   agentImport,
   agentWipe,
   getIdentity,
+  factoryReset,
   a2aGet,
   a2aSet,
   a2aSend,
@@ -1459,10 +1460,72 @@ export default function SettingsPage() {
             <p className="text-xs mt-3 whitespace-pre-wrap" style={{ color: "var(--text-2)" }}>{ccMsg}</p>
           )}
         </div>
+        <ResetCard />
       </div>
       <p className="text-center text-[11px] py-5" style={{ color: "var(--text-3)" }}>
         AION <strong style={{ color: "var(--text-2)" }}>v{APP_VERSION}</strong> · super-agente local · 100% on-device
       </p>
     </AppShell>
+  );
+}
+
+/** Reinicio de fábrica: borra TODO (datos + modelos vía backend, y la sesión del navegador) y deja
+ *  AION como recién instalado, sin Terminal. Tras esto se reabre la app y arranca el onboarding. */
+function ResetCard() {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  async function doReset() {
+    setBusy(true);
+    try {
+      await factoryReset().catch(() => {}); // el backend borra datos+modelos y se cierra
+      try {
+        [
+          "aion_token", "aion_email", "aion.voice", "aion.voice.name", "aion.voice.engine",
+          "aion.voice.gender", "aion.voice.system", "aion.voice.speed", "aion.voice.exaggeration",
+          "aion.voice.stream",
+        ].forEach((k) => localStorage.removeItem(k));
+      } catch {
+        /* sin storage */
+      }
+      setDone(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ border: "1px solid #c0594e44" }}>
+      <h2 className="t-section mb-1 flex items-center gap-2" style={{ color: "#c0594e" }}>
+        <Icon name="trash" size={16} /> Reinicio de fábrica
+      </h2>
+      <p className="text-sm mb-3" style={{ color: "var(--text-3)" }}>
+        Borra <strong>todo</strong> lo de AION en este equipo (identidad, configuración, proyectos, memoria y
+        modelos descargados) y lo deja como recién instalado. No se puede deshacer.
+      </p>
+      {done ? (
+        <p className="text-sm" style={{ color: "var(--accent)" }}>
+          ✅ Hecho. <strong>Cierra AION (⌘Q) y vuelve a abrirlo</strong> para empezar desde cero.
+        </p>
+      ) : confirming ? (
+        <div className="flex items-center gap-2">
+          <button className="btn" style={{ background: "#c0594e", color: "#fff" }} onClick={doReset} disabled={busy}>
+            {busy ? "Borrando…" : "Sí, borrar todo"}
+          </button>
+          <button className="btn btn-ghost" onClick={() => setConfirming(false)} disabled={busy}>
+            Cancelar
+          </button>
+        </div>
+      ) : (
+        <button
+          className="btn"
+          style={{ background: "var(--surface-2)", color: "#c0594e" }}
+          onClick={() => setConfirming(true)}
+        >
+          Reiniciar de fábrica…
+        </button>
+      )}
+    </div>
   );
 }

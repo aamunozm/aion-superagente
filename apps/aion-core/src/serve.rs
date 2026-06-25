@@ -901,6 +901,7 @@ pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/agent/wipe", post(agent_wipe))
         .route("/api/identity", get(identity_get))
         .route("/api/identity/name", post(identity_name_set))
+        .route("/api/factory-reset", post(factory_reset))
         .route("/api/a2a", get(a2a_get).post(a2a_set))
         .route("/api/a2a/message", post(a2a_message))
         .route("/api/a2a/send", post(a2a_send))
@@ -8730,6 +8731,26 @@ async fn identity_name_set(Json(b): Json<NameBody>) -> Json<serde_json::Value> {
     }
     crate::identity::set_name(clean);
     Json(serde_json::json!({ "ok": true, "name": clean }))
+}
+
+/// **REINICIO DE FÁBRICA**: borra TODOS los datos de AION (identidad, config, proyectos, memoria,
+/// grafo y MODELOS descargados — todo vive bajo `app_data_dir`) y cierra el núcleo. Al reabrir AION
+/// arranca como recién instalado. La sesión del navegador (token/usuario) la limpia el frontend.
+/// Tras esto, en el equipo NO queda rastro de datos de AION.
+async fn factory_reset() -> Json<serde_json::Value> {
+    // Responde primero; el borrado + salida van en segundo plano para que la UI reciba el ok.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let dir = crate::app_data_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        tracing::warn!(
+            ?dir,
+            "REINICIO DE FÁBRICA: datos borrados; cerrando el núcleo"
+        );
+        // Salir para que el daemon no recree estado; al reabrir AION nace de cero.
+        std::process::exit(0);
+    });
+    Json(serde_json::json!({ "ok": true }))
 }
 
 // ── A2A: comunicación entre agentes ──────────────────────────────────────────
