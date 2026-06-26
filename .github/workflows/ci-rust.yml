@@ -8,13 +8,29 @@ on:
 
 jobs:
   rust:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 16
+        run: |
+          XCODE16=$(find /Applications -maxdepth 1 -name "Xcode_16*.app" | sort -V | tail -1)
+          if [ -n "$XCODE16" ]; then
+            echo "Selecting $XCODE16"
+            sudo xcode-select -s "$XCODE16/Contents/Developer"
+          else
+            echo "Xcode 16 not found, using default: $(xcode-select -p)"
+          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-xcode16"
+      - name: Cache ORT binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ort.pyke.io
+          key: ort-${{ runner.arch }}-2.0.0-rc.12
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy

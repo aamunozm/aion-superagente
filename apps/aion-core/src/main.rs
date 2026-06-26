@@ -69,6 +69,7 @@ mod serve;
 mod skill_store;
 mod skill_tool;
 mod skillbook_tool;
+mod tools;
 mod usermodel;
 mod vault;
 mod web_tool;

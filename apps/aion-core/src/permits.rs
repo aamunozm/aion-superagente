@@ -201,6 +201,7 @@ mod tests {
     #[test]
     #[allow(clippy::useless_vec)] // el test muta `items` como Vec; el vec! es intencional
     fn ciclo_pending_approved() {
+        #[allow(clippy::useless_vec)]
         let mut items = vec![Permit {
             id: "x".into(),
             capability: "computer".into(),

@@ -24,6 +24,7 @@ struct Span {
 }
 
 /// Bloques de alto nivel que volcamos al documento en orden.
+#[allow(clippy::large_enum_variant)]
 enum Block {
     Para(Paragraph),
     Table(Table),

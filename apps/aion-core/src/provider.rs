@@ -74,6 +74,7 @@ impl ProviderConfig {
     }
     /// Modelo LOCAL para tareas de fondo: el utilitario ligero si está configurado, si no
     /// el local normal. Cadena vacía si no hay ninguno (las tareas de fondo se saltan).
+    #[allow(dead_code)]
     pub fn background_model(&self) -> String {
         let util = self.utility_model.trim();
         if !util.is_empty() {
@@ -86,6 +87,7 @@ impl ProviderConfig {
     /// `translation_model` configurado > `background_model()`. Así un traductor especializado
     /// (TranslateGemma/GemmaX2) es un cambio de CONFIG, no de código, con fallback seguro: si
     /// no hay nada especializado, traduce con el de fondo de siempre (fail-open conservado).
+    #[allow(dead_code)]
     pub fn translation_model(&self) -> String {
         if let Ok(env) = std::env::var("AION_TRANSLATION_MODEL") {
             let env = env.trim();

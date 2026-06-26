@@ -217,7 +217,7 @@ pub fn remove(list: Vec<Workflow>, id: &str) -> Vec<Workflow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aion_orchestrator::{CalculatorTool, Tool};
+    use aion_orchestrator::CalculatorTool;
     use std::sync::Arc;
 
     fn registry() -> ToolRegistry {

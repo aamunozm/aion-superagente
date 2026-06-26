@@ -641,7 +641,7 @@ impl VectorMemory {
             }
         }
         let mut out: Vec<ProjectStat> = map.into_values().collect();
-        out.sort_by(|a, b| b.count.cmp(&a.count));
+        out.sort_by_key(|a: &ProjectStat| std::cmp::Reverse(a.count));
         out
     }
 
