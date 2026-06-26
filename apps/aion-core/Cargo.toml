@@ -43,6 +43,10 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tokio-stream = "0.1"
 futures-util = "0.3"
+# Cliente WebSocket del A2A (canal saliente persistente con CEO·Intelligence). native-tls = Secure
+# Transport del sistema (macOS) — el MISMO TLS que ya usa el navegador, sin CryptoProvider de rustls
+# que instalar (rustls 0.23 falla en runtime sin uno, por eso connect_async no abría el wss://).
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "native-tls"] }
 mdns-sd = "0.20.0"
 nusb = "0.2.3"
 

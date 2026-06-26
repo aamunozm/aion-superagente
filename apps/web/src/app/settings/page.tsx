@@ -31,6 +31,7 @@ import {
   a2aGet,
   a2aSet,
   a2aSend,
+  a2aConnect,
   sensorsGet,
   sensorsSet,
   claudeCodeGet,
@@ -503,8 +504,12 @@ export default function SettingsPage() {
   const [modelMsg, setModelMsg] = useState<string>("");
   const [backupMsg, setBackupMsg] = useState<string>("");
   const [ident, setIdent] = useState<AionIdentity | null>(null);
-  const [a2a, setA2a] = useState<A2aConfig>({ enabled: false, token: "", peers: [] });
+  const [a2a, setA2a] = useState<A2aConfig>({ enabled: false, token: "", hub: "", peers: [] });
   const [a2aMsg, setA2aMsg] = useState<string>("");
+  const [connectHub, setConnectHub] = useState<string>("");
+  const [connectToken, setConnectToken] = useState<string>("");
+  const [connectCode, setConnectCode] = useState<string>("");
+  const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [newPeer, setNewPeer] = useState({ name: "", url: "" });
   const [sensors, setSensors] = useState<SensorConfig>({ enabled: false, lat: null, lon: null, place: "" });
   const [sensorMsg, setSensorMsg] = useState<string>("");
@@ -580,10 +585,14 @@ export default function SettingsPage() {
 
   useEffect(() => {
     getIdentity().then(setIdent);
-    a2aGet().then((r) => setA2a(r.config));
+    a2aGet().then((r) => { setA2a(r.config); setWsConnected(!!r.ws_connected); });
+    const a2aPoll = setInterval(() => {
+      a2aGet().then((r) => setWsConnected(!!r.ws_connected)).catch(() => {});
+    }, 6000);
     sensorsGet().then(setSensors).catch(() => {});
     claudeCodeGet().then(setCc).catch(() => {});
     providerGet().then(applyProv).catch(() => {});
+    return () => clearInterval(a2aPoll);
   }, []);
 
   const ccConnected = cc.enabled && cc.registered;
@@ -654,6 +663,26 @@ export default function SettingsPage() {
   function saveA2a(next: A2aConfig) {
     setA2a(next);
     a2aSet(next);
+  }
+  async function doConnect() {
+    const code = connectCode.trim();
+    const hub = connectHub.trim();
+    const token = connectToken.trim();
+    if (!code && (!hub || !token)) {
+      setA2aMsg("Pega la URL y el token (o el código de un-pegado).");
+      return;
+    }
+    setA2aMsg("Conectando…");
+    const r = await a2aConnect(code ? { code } : { hub, token });
+    if (r.ok) {
+      setConnectCode("");
+      setConnectHub("");
+      setConnectToken("");
+      setA2aMsg("✅ Datos guardados. AION está abriendo el canal al hub (unos segundos)…");
+      a2aGet().then((x) => { setA2a(x.config); setWsConnected(!!x.ws_connected); }); // refresca enabled + hub + estado
+    } else {
+      setA2aMsg(`Error: ${r.error ?? "datos inválidos"}`);
+    }
   }
   async function testPeer(url: string) {
     setA2aMsg("Contactando…");
@@ -1364,6 +1393,53 @@ export default function SettingsPage() {
             />
             Activar A2A (recibir y enviar mensajes de otros agentes)
           </label>
+
+          {/* Vía RECOMENDADA: URL (hub WS) + token de CEO·Intelligence → canal saliente, móvil. */}
+          <div className="mb-3 p-3 rounded" style={{ background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+            <p className="text-xs font-medium mb-1" style={{ color: "var(--text-2)" }}>
+              Conectar con CEO·Intelligence (recomendado)
+            </p>
+            <p className="text-[11px] mb-2" style={{ color: "var(--text-3)" }}>
+              En CEO·Intelligence (Comunicación entre Agentes → crear agente) copia la <strong>URL</strong> y el{" "}
+              <strong>token</strong> y pégalos aquí. AION abre un canal seguro <strong>saliente</strong>: sigue conectado
+              aunque te lleves el Mac fuera de casa, sin abrir puertos ni instalar nada.
+            </p>
+            {a2a.hub ? (
+              <p className="text-[11px] mb-2" style={{ color: wsConnected ? "var(--positive, #1a7f37)" : "var(--text-3)" }}>
+                {wsConnected ? "● Conectado al hub" : "○ Configurado · conectando…"} · {a2a.hub}
+              </p>
+            ) : null}
+            <input
+              className="input mb-2"
+              placeholder="URL (wss://api.ceo-intelligence.com/api/v1/ws/a2a)"
+              value={connectHub}
+              onChange={(e) => setConnectHub(e.target.value)}
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                className="input flex-1 min-w-[160px]"
+                placeholder="Token"
+                value={connectToken}
+                onChange={(e) => setConnectToken(e.target.value)}
+              />
+              <button className="btn" onClick={doConnect}>Conectar</button>
+            </div>
+            <details className="mt-2">
+              <summary className="text-[11px] cursor-pointer" style={{ color: "var(--text-3)" }}>
+                ¿Tienes un solo código? Pégalo aquí
+              </summary>
+              <input
+                className="input mt-2"
+                placeholder="Código de conexión (URL + token juntos)"
+                value={connectCode}
+                onChange={(e) => setConnectCode(e.target.value)}
+              />
+            </details>
+          </div>
+
+          <p className="text-[11px] mb-1" style={{ color: "var(--text-3)" }}>
+            Avanzado — conexión directa por LAN (mismo router): secreto compartido + agentes con su IP.
+          </p>
           <input
             className="input mb-3"
             placeholder="Secreto compartido (token)"
